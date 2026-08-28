@@ -139,10 +139,43 @@ defmodule DpExchange.Coinbase.Socket do
     end
   end
 
-  defp dispatch(%{"channel" => "ticker", "events" => events}, state) do
+  # v3 nests the rows under a per-channel key, and the key differs per channel. Only the
+  # channels this package actually delivers are expanded; anything else yields nothing
+  # rather than a half-populated message, because a message with nil fields is exactly
+  # what made an outage invisible in the adapter this was ported from.
+  #
+  # Note `l2_data`: v3 names the level2 channel that way on the RESPONSE side while the
+  # subscribe still says `level2`. A parser keyed on the subscribe name silently drops
+  # every book update — and a venue delivering nothing on one channel while another works
+  # reads as a quiet market.
+  defp dispatch(%{"channel" => "ticker", "events" => events}, state) when is_list(events) do
     Enum.reduce(events, state, fn event, acc ->
       Enum.reduce(Map.get(event, "tickers", []), acc, &deliver_ticker/2)
     end)
+  end
+
+  defp dispatch(%{"channel" => "subscriptions"}, state) do
+    # The venue acknowledging a subscribe. Not data, and deliberately NOT recorded as
+    # coverage: a confirmation is intent, and coverage reports what arrived.
+    state
+  end
+
+  defp dispatch(%{"channel" => "heartbeats"}, state), do: state
+
+  defp dispatch(%{"channel" => channel, "events" => _events}, state)
+       when channel in ["l2_data", "level2", "market_trades", "candles", "user"] do
+    # Recognised, and not delivered. This package declares `streamable: [:quotes]`, so
+    # these channels are never subscribed — arriving means the venue sent something this
+    # package did not ask for, which is worth noticing rather than silently dropping.
+    notify(
+      state,
+      Notice.new(:data_quality, :coinbase,
+        message: "received an unsubscribed channel",
+        details: %{channel: channel}
+      )
+    )
+
+    state
   end
 
   defp dispatch(%{"type" => "error", "message" => message}, state) do

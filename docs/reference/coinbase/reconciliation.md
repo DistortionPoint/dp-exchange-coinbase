@@ -262,3 +262,60 @@ suite, and not a code path inside the live provider.
 
 **The rule, stated once**: a package must not be able to return data the venue did not
 send. Not behind a flag, not in test mode, not as a fallback.
+
+---
+
+## 5.7 — the host's test corpus, read rather than ported
+
+The plan calls the host's 4,582 lines of Coinbase tests a **behavioural baseline** and
+says to port them, triaging each failure into a port bug or a deliberate change. Read in
+full, most of that corpus does not encode behaviour, and porting it would have imported
+two things this package had already had to remove.
+
+**Measured across its eleven files:**
+
+| | Count |
+|---|---:|
+| Assertions of the form `match?({:ok, _}, r) or match?({:error, _}, r)` | **62** |
+| Assertions checking only a shape — `is_list/1`, `Map.has_key?/2`, `is_binary/1` | **121** |
+| Files with no HTTP seam, so their "unit" tests reach the live venue | **10 of 11** |
+
+The first form is true of every possible return value. The representative case:
+
+```elixir
+result = CoinbaseProvider.get_balances(@valid_credentials)
+assert match?({:ok, _}, result) or match?({:error, _}, result)
+```
+
+That passes whether the venue answers, refuses, times out or returns nonsense. With
+placeholder credentials against the live API it passes on the error path essentially
+always — so the test runs, is green, and constrains nothing.
+
+**What the corpus does encode** is the v3 **message taxonomy**, and that is worth having:
+the channels Coinbase actually sends, the per-channel nesting, and the concrete values
+its tests pin against real payloads. Carried into
+`test/dp_exchange/coinbase/baseline_test.exs`.
+
+The most valuable single fact recovered: **`l2_data` is v3's name for the level2 channel
+on the response side, while the subscribe still says `level2`.** A parser keyed on the
+subscribe name drops every book update — and a venue delivering on one channel while
+another goes silent reads as a quiet market rather than a parsing bug. This package now
+recognises every channel the venue sends and emits a notice for any it did not subscribe
+to, because silence is indistinguishable from a channel that stopped arriving.
+
+### Deltas the host's tests would have flagged
+
+| Host asserts | This package | Why |
+|---|---|---|
+| `parsed.provider == "coinbase"` (16×) | `:coinbase`, the atom | The contract admits both; the family uses the atom so a consumer matches one thing, not two |
+| a fallback width on an unknown granularity | `{:error, {:unsupported_timeframe, tf}}` | There is no safe substitute for a width the venue does not serve |
+| `{:ok, candles}` from a test-mode generator | no such path exists | A package must not be able to return data the venue did not send |
+| errors and refusals as one shape | `{:refused, _}` vs `{:error, _}` | Permanent versus transient is the distinction a caller acts on |
+
+### What this does not claim
+
+**This is a floor, not a census.** The host's tests were not executed against this
+package, so a behaviour they encode *implicitly* — one no assertion names but that some
+test would have tripped on — has not been ruled out. Given that 183 of their assertions
+cannot distinguish a working venue from a broken one, the residual risk is smaller than
+the line count suggests, but it is not zero.
