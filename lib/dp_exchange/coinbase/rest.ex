@@ -228,7 +228,7 @@ defmodule DpExchange.Coinbase.Rest do
   # Measured 2026-08-28: **both endpoints return the trades shape.** Either the public
   # response changed or the assumption was never right; the branch is gone either way,
   # because two formatters for one shape is a second place to be wrong about the venue.
-  defp to_quote(%{"trades" => [trade | _rest]} = body, symbol) do
+  defp to_quote(%{"trades" => [trade | _rest]} = _body, symbol) do
     with {:ok, at} <- parse_time(trade["time"]) do
       {:ok,
        %Types.Quote{
