@@ -63,6 +63,9 @@ defmodule DpExchange.CoinbaseTest do
       for {name, arity} <- Capabilities.endpoints_at(caps, :unsupported) do
         args =
           case {name, arity} do
+            {:replace_order, 4} ->
+              [@credentials, "id", %{}, []]
+
             {_name, 1} ->
               [[]]
 

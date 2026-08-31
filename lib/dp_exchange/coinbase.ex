@@ -48,6 +48,11 @@ defmodule DpExchange.Coinbase do
   alias DpExchange.Core.{Capabilities, Venue}
 
   @unsupported [
+    # Neither exists on this venue. `preview_order/3` has no endpoint at all;
+    # `replace_order/4` means a caller cancels and re-places, which is NOT equivalent —
+    # it opens a window in which no order is live.
+    {:preview_order, 3},
+    {:replace_order, 4},
     {:get_transfers, 2},
     {:quantization, 1},
     {:get_market_overview, 1},
@@ -169,6 +174,24 @@ defmodule DpExchange.Coinbase do
 
   @impl true
   def place_order(_credentials, _request, _opts), do: Venue.not_supported()
+
+  @doc """
+  **Not supported.** This venue publishes no order-preview endpoint.
+
+  Declared through `supports_order_preview: false`, so a consumer routes around it rather
+  than discovering the refusal at call time.
+  """
+  @impl true
+  def preview_order(_credentials, _request, _opts \\ []), do: Venue.not_supported()
+
+  @doc """
+  **Not supported.** This venue has no atomic replace; a caller cancels and re-places.
+
+  That is not equivalent — it opens a window in which no order is live — which is why
+  `supports_order_replace: false` is a claim about **risk** rather than convenience.
+  """
+  @impl true
+  def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
 
   @impl true
   def cancel_order(_credentials, _id, _opts), do: Venue.not_supported()
