@@ -264,19 +264,24 @@ defmodule DpExchange.Coinbase.Rest do
         do: "/products/#{native}/ticker",
         else: "/market/products/#{native}/ticker"
 
-    with {:ok, body} <- request(:get, path, credentials, opts, %{"limit" => "1"}) do
-      {:ok,
-       %Types.TopOfBook{
-         symbol: SymbolFormat.to_canonical_symbol(native),
-         bid: decimal(body["best_bid"]),
-         ask: decimal(body["best_ask"]),
-         bid_size: nil,
-         ask_size: nil,
-         venue_time: top_of_book_time(body),
-         observed_at: DateTime.utc_now(),
-         provider: :coinbase
-       }}
+    case request(:get, path, credentials, opts) do
+      {:ok, %{body: body}} -> build_top_of_book(native, body)
+      {:error, reason} -> classify(reason)
     end
+  end
+
+  defp build_top_of_book(native, body) do
+    {:ok,
+     %Types.TopOfBook{
+       symbol: SymbolFormat.to_canonical_symbol(native),
+       bid: decimal(body["best_bid"]),
+       ask: decimal(body["best_ask"]),
+       bid_size: nil,
+       ask_size: nil,
+       venue_time: top_of_book_time(body),
+       observed_at: DateTime.utc_now(),
+       provider: :coinbase
+     }}
   end
 
   # The ticker stamps its trades, not its book. Where the newest trade carries a time it is
