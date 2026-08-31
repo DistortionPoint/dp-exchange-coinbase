@@ -63,6 +63,56 @@ defmodule DpExchange.CoinbaseTest do
       for {name, arity} <- Capabilities.endpoints_at(caps, :unsupported) do
         args =
           case {name, arity} do
+            {:withdraw, 5} ->
+              ["BTC", "bitcoin", Decimal.new("1"), "addr", []]
+
+            {:estimate_withdrawal_fee, 4} ->
+              ["BTC", "bitcoin", Decimal.new("1"), []]
+
+            {:quote_conversion, 4} ->
+              ["BTC", "USD", Decimal.new("1"), []]
+
+            {:get_deposit_address, 3} ->
+              ["BTC", "bitcoin", []]
+
+            {:create_watchlist, 3} ->
+              ["name", [], []]
+
+            {:get_financials, 3} ->
+              ["BTC-USD", :balance_sheet, []]
+
+            {:rename_account, 3} ->
+              ["id", "name", []]
+
+            {:stake, 3} ->
+              ["BTC", Decimal.new("1"), []]
+
+            {:unstake, 3} ->
+              ["BTC", Decimal.new("1"), []]
+
+            {n, 2}
+            when n in [
+                   :get_funding,
+                   :get_contract_stats,
+                   :get_option_chain,
+                   :get_option_expirations,
+                   :get_top_of_book
+                 ] ->
+              ["BTC-USD", []]
+
+            {n, 2}
+            when n in [
+                   :get_option_greeks,
+                   :get_watchlist,
+                   :update_watchlist,
+                   :delete_watchlist,
+                   :get_filings,
+                   :get_screener,
+                   :commit_conversion,
+                   :get_conversion
+                 ] ->
+              ["id", []]
+
             {:replace_order, 4} ->
               [@credentials, "id", %{}, []]
 

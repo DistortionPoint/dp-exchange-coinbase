@@ -235,8 +235,6 @@ defmodule DpExchange.Coinbase.Rest do
          symbol: symbol,
          price: decimal(trade["price"]),
          volume: decimal(trade["size"]),
-         bid: decimal(body["best_bid"] || trade["bid"]),
-         ask: decimal(body["best_ask"] || trade["ask"]),
          timestamp: at,
          provider: :coinbase
        }}
@@ -244,6 +242,54 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp to_quote(_body, _symbol), do: {:error, :unexpected_response_shape}
+
+  @doc """
+  Best bid and ask for `symbol` — the top of the book, not a traded price.
+
+  Reads the same ticker payload as `get_price/2`, which carries `best_bid` and `best_ask`
+  alongside the trades. Those used to ride on the `Quote`; `Core.Types.Quote` has no fields
+  for them now, because a resting order is not an execution.
+
+  The payload publishes no sizes at the top, so `bid_size` and `ask_size` stay `nil` — not
+  published rather than zero.
+  """
+  @spec get_top_of_book(String.t(), keyword()) ::
+          {:ok, Types.TopOfBook.t()} | {:error, term()} | {:refused, term()}
+  def get_top_of_book(symbol, opts) do
+    native = SymbolFormat.to_exchange_symbol(symbol)
+    credentials = Keyword.get(opts, :credentials)
+
+    path =
+      if credentials,
+        do: "/products/#{native}/ticker",
+        else: "/market/products/#{native}/ticker"
+
+    with {:ok, body} <- request(:get, path, credentials, opts, %{"limit" => "1"}) do
+      {:ok,
+       %Types.TopOfBook{
+         symbol: SymbolFormat.to_canonical_symbol(native),
+         bid: decimal(body["best_bid"]),
+         ask: decimal(body["best_ask"]),
+         bid_size: nil,
+         ask_size: nil,
+         venue_time: top_of_book_time(body),
+         observed_at: DateTime.utc_now(),
+         provider: :coinbase
+       }}
+    end
+  end
+
+  # The ticker stamps its trades, not its book. Where the newest trade carries a time it is
+  # the closest thing the venue states to when this book was current; absent, `nil` rather
+  # than the local clock, which `observed_at` already holds and says so.
+  defp top_of_book_time(%{"trades" => [trade | _rest]}) do
+    case parse_time(trade["time"]) do
+      {:ok, at} -> at
+      _unparsable -> nil
+    end
+  end
+
+  defp top_of_book_time(_body), do: nil
 
   defp to_candles(%{"candles" => candles}, symbol) do
     {:ok,

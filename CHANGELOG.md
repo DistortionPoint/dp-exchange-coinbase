@@ -21,6 +21,16 @@ acceptable changelog line.
 ## [Unreleased]
 
 ### Added
+- `DeprecatedEndpointsTest` — fails the build if any code path constructs one of Coinbase's
+  six vendor-deprecated INTX endpoints. They are absent today; nothing kept them absent.
+- `docs/reference/coinbase/endpoints-enumerated.tsv` and a rewritten inventory: the documented
+  surface is **712 REST operations and 46 socket channels**, enumerated endpoint by endpoint
+  from all 806 reference pages, replacing a page count. **Deribit alone was recorded as 37 and
+  is 115** — Coinbase renders it as twelve sibling trees with no `deribit` in their paths.
+- Prime's custodial staking enumerated: **13 documentation pages, 9 endpoints**, four pairs
+  being duplicate pages for one path.
+
+### Added
 - Repo scaffold from the DpExchange standard; extraction pinned to the host's
   `553fa787` with its working-tree state recorded, since the Coinbase subtree was dirty
   at extraction time.
