@@ -151,8 +151,6 @@ defmodule DpExchange.Coinbase.Fake do
   def get_fees(_credentials, _opts), do: Venue.not_supported()
   @impl true
   def get_transfers(_credentials, _opts), do: Venue.not_supported()
-  @impl true
-  def place_order(_credentials, _request, _opts), do: Venue.not_supported()
   # Both refused, matching the real venue. A fake that answered where the real one
   # refuses lets a consumer's suite go green against behaviour that cannot happen.
   @impl true
@@ -348,4 +346,41 @@ defmodule DpExchange.Coinbase.Fake do
 
   @impl true
   def get_roles(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+
+  @impl true
+  def place_order(_credentials, request, _opts \\ []) do
+    # The fake accepts what the venue accepts and refuses what it refuses. The combination
+    # table is the venue's, so a caller that would be rejected upstream is rejected here —
+    # a fake that accepted everything would let a consumer's test pass on an order the
+    # venue will not take.
+    case {Map.get(request, :order_type, :limit), Map.get(request, :time_in_force, :gtc)} do
+      pair
+      when pair in [
+             {:market, :ioc},
+             {:market, :fok},
+             {:limit, :gtc},
+             {:limit, :gtd},
+             {:limit, :fok},
+             {:stop_limit, :gtc},
+             {:stop_limit, :gtd}
+           ] ->
+        {type, tif} = pair
+
+        {:ok,
+         %Types.Order{
+           id: "fake-order-1",
+           symbol: Map.fetch!(request, :symbol),
+           side: Map.fetch!(request, :side),
+           order_type: type,
+           time_in_force: tif,
+           quantity: Map.get(request, :quantity),
+           price: Map.get(request, :price),
+           status: :pending,
+           provider: :coinbase
+         }}
+
+      {type, tif} ->
+        {:error, {:unsupported_order_combination, type, tif}}
+    end
+  end
 end

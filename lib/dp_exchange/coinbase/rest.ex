@@ -347,4 +347,202 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp parse_time(other), do: {:error, {:unparseable_venue_timestamp, other}}
+
+  @doc """
+  Places an order.
+
+  ## Coinbase names the order type and the time-in-force together, and not every pair exists
+
+  `order_configuration` is a map with exactly one key, and that key names **both** at once:
+  `limit_limit_gtc`, `market_market_ioc`, `stop_limit_stop_limit_gtd`. The facade carries
+  `:order_type` and `:time_in_force` separately, so this is a cross-product — and the
+  product is **sparse**. There is no `limit_limit_ioc`, no `market_market_gtc`, no
+  `stop_limit_stop_limit_ioc`.
+
+  **A pair the venue does not name is an error, not the nearest key.** Sending
+  `{:limit, :ioc}` as `limit_limit_fok` would place an order that fills-or-kills where the
+  caller asked for immediate-or-cancel, and every field in the request would look right.
+  That is the §0 substitution with money behind it.
+
+  ## `client_order_id` is required by the venue and generated here when absent
+
+  Coinbase requires it, and it is the venue's idempotency key: re-sending the same id
+  returns the original order rather than placing a second. A caller that supplies one gets
+  that protection; a caller that does not gets a UUID and no protection across retries,
+  which is worth knowing rather than being quietly given.
+  """
+  @spec place_order(map(), map(), keyword()) ::
+          {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
+  def place_order(credentials, request, opts) do
+    with {:ok, configuration} <- order_configuration(request) do
+      body = %{
+        "client_order_id" => Map.get(request, :client_order_id) || generate_client_order_id(),
+        "product_id" => SymbolFormat.to_exchange_symbol(Map.fetch!(request, :symbol)),
+        "side" => request |> Map.fetch!(:side) |> to_string() |> String.upcase(),
+        "order_configuration" => configuration
+      }
+
+      case post_json("/orders", body, credentials, opts) do
+        {:ok, %{body: response}} -> to_placed_order(response, request)
+        {:error, reason} -> classify(reason)
+      end
+    end
+  end
+
+  # The sparse cross-product, written out. A pair absent from this table is absent from the
+  # venue, and `order_configuration/1` refuses rather than reaching for a neighbour.
+  @configurations %{
+    {:market, :ioc} => "market_market_ioc",
+    {:market, :fok} => "market_market_fok",
+    {:limit, :gtc} => "limit_limit_gtc",
+    {:limit, :gtd} => "limit_limit_gtd",
+    {:limit, :fok} => "limit_limit_fok",
+    {:stop_limit, :gtc} => "stop_limit_stop_limit_gtc",
+    {:stop_limit, :gtd} => "stop_limit_stop_limit_gtd"
+  }
+
+  defp order_configuration(request) do
+    type = Map.get(request, :order_type, :limit)
+    tif = Map.get(request, :time_in_force, :gtc)
+
+    case Map.fetch(@configurations, {type, tif}) do
+      {:ok, key} -> build_configuration(key, type, request)
+      :error -> {:error, {:unsupported_order_combination, type, tif}}
+    end
+  end
+
+  defp build_configuration(key, type, request) do
+    with {:ok, leaf} <- configuration_leaf(type, request) do
+      {:ok, %{key => leaf}}
+    end
+  end
+
+  # A market order sizes in base or quote; a limit order needs a price. Missing either is an
+  # error rather than a default, because a default here is a different order.
+  defp configuration_leaf(:market, request) do
+    case {Map.get(request, :quantity), Map.get(request, :quote_size)} do
+      {nil, nil} -> {:error, :missing_order_size}
+      {nil, quote_size} -> {:ok, %{"quote_size" => to_string(quote_size)}}
+      {quantity, _quote_size} -> {:ok, %{"base_size" => to_string(quantity)}}
+    end
+  end
+
+  defp configuration_leaf(:limit, request) do
+    with {:ok, price} <- required_field(request, :price, :missing_limit_price) do
+      leaf = %{
+        "base_size" => to_string(Map.fetch!(request, :quantity)),
+        "limit_price" => to_string(price)
+      }
+
+      {:ok, maybe_put_configuration(leaf, request)}
+    end
+  end
+
+  defp configuration_leaf(:stop_limit, request) do
+    with {:ok, price} <- required_field(request, :price, :missing_limit_price),
+         {:ok, stop} <- required_field(request, :stop_price, :missing_stop_price) do
+      leaf = %{
+        "base_size" => to_string(Map.fetch!(request, :quantity)),
+        "limit_price" => to_string(price),
+        "stop_price" => to_string(stop)
+      }
+
+      {:ok, maybe_put_configuration(leaf, request)}
+    end
+  end
+
+  defp maybe_put_configuration(leaf, request) do
+    leaf
+    |> put_unless_nil("post_only", Map.get(request, :post_only))
+    |> put_unless_nil("end_time", Map.get(request, :end_time))
+  end
+
+  defp put_unless_nil(map, _key, nil), do: map
+  defp put_unless_nil(map, key, value), do: Map.put(map, key, to_string(value))
+
+  defp required_field(request, key, error) do
+    case Map.get(request, key) do
+      nil -> {:error, error}
+      value -> {:ok, value}
+    end
+  end
+
+  # The venue answers 200 with `success: false` for a rejected order. Treating that as a
+  # placed order is the failure this clause exists to prevent — the HTTP call succeeded and
+  # the order did not.
+  defp to_placed_order(%{"success" => true, "success_response" => success}, request) do
+    {:ok,
+     %Types.Order{
+       id: success["order_id"],
+       symbol: Map.fetch!(request, :symbol),
+       side: Map.fetch!(request, :side),
+       order_type: Map.get(request, :order_type, :limit),
+       time_in_force: Map.get(request, :time_in_force, :gtc),
+       quantity: Map.get(request, :quantity),
+       price: Map.get(request, :price),
+       status: :pending,
+       provider: :coinbase
+     }}
+  end
+
+  defp to_placed_order(%{"success" => false} = response, _request) do
+    {:refused, {:order_rejected, failure_reason(response)}}
+  end
+
+  defp to_placed_order(_other, _request), do: {:error, :unexpected_response_shape}
+
+  defp failure_reason(%{"error_response" => %{"error" => error}}) when is_binary(error), do: error
+  defp failure_reason(%{"failure_reason" => reason}) when is_binary(reason), do: reason
+  defp failure_reason(_response), do: :unspecified
+
+  # A POST carrying a JSON body. Separate from `request/5` rather than an extra parameter on
+  # it, because every existing caller is a GET and adding an argument to all of them to
+  # serve one is how a helper becomes hard to read.
+  #
+  # The body is **not** signed: this venue's JWT is scoped to the method and URI, so the
+  # signature does not cover the payload (see `Auth.rest_headers/4`, whose body argument is
+  # ignored on purpose).
+  defp post_json(path, body, credentials, opts) do
+    headers =
+      HttpClient.build_auth_headers(
+        :post,
+        @api_path <> path,
+        nil,
+        credentials,
+        &Auth.rest_headers/4
+      )
+
+    request_opts =
+      opts
+      |> Keyword.take([:timeout, :retry_attempts, :retry_delay, :plug, :weight])
+      |> Keyword.put(:provider, :coinbase)
+      |> Keyword.put_new(:limiter, Keyword.get(opts, :limiter, DpExchange.Coinbase.RateLimiter))
+
+    HttpClient.request(
+      :post,
+      @base_url <> @api_path <> path,
+      headers,
+      Jason.encode!(body),
+      request_opts
+    )
+  end
+
+  # A v4 UUID from the VM's own CSPRNG, rather than a dependency.
+  #
+  # Coinbase requires `client_order_id` and treats it as an idempotency key: re-sending one
+  # returns the original order instead of placing a second. That makes it worth generating
+  # correctly — a colliding id would silently return someone else's order — and not worth a
+  # library for sixteen bytes.
+  defp generate_client_order_id do
+    <<a::32, b::16, _version::4, c::12, _variant::2, d::62>> = :crypto.strong_rand_bytes(16)
+
+    :io_lib.format("~8.16.0b-~4.16.0b-4~3.16.0b-a~3.16.0b-~12.16.0b", [
+      a,
+      b,
+      c,
+      Bitwise.bsr(d, 50),
+      Bitwise.band(d, 0xFFFFFFFFFFFF)
+    ])
+    |> IO.iodata_to_binary()
+  end
 end

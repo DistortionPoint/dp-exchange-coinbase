@@ -21,6 +21,27 @@ acceptable changelog line.
 ## [Unreleased]
 
 ### Added
+- **`place_order/3`.** This venue could not place an order; it can now.
+
+  Coinbase names the order type and the time-in-force in a **single key** —
+  `limit_limit_gtc`, `market_market_ioc`, `stop_limit_stop_limit_gtd` — and the set of names
+  is sparse. There is no `limit_limit_ioc`, no `market_market_gtc`.
+
+  **A pair the venue does not name is refused before the request is sent.** Sending
+  `{:limit, :ioc}` as `limit_limit_fok` would place an order that fills-or-kills where the
+  caller asked for immediate-or-cancel, and every field in the request would look right.
+
+  Three further refusals rather than defaults: a limit without a price, a stop-limit without
+  a stop price, and a market order sized in neither base nor quote. `post_only` is omitted
+  when unset rather than sent as `false`, because silence is not a decision to take
+  liquidity.
+
+  A `200` carrying `success: false` is a **refusal**, not a placed order.
+
+  `client_order_id` is the venue's idempotency key: a caller's own is passed through, and a
+  v4 UUID is generated from the VM's CSPRNG when absent.
+
+### Added
 - `DeprecatedEndpointsTest` — fails the build if any code path constructs one of Coinbase's
   six vendor-deprecated INTX endpoints. They are absent today; nothing kept them absent.
 - `docs/reference/coinbase/endpoints-enumerated.tsv` and a rewritten inventory: the documented

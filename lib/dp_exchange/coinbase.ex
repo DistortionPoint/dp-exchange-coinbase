@@ -95,7 +95,6 @@ defmodule DpExchange.Coinbase do
     {:get_accounts, 2},
     {:get_fees, 2},
     {:get_order_book, 2},
-    {:place_order, 3},
     {:cancel_order, 3},
     {:get_order, 3},
     {:get_orders, 2},
@@ -211,7 +210,8 @@ defmodule DpExchange.Coinbase do
   def get_transfers(_credentials, _opts), do: Venue.not_supported()
 
   @impl true
-  def place_order(_credentials, _request, _opts), do: Venue.not_supported()
+  def place_order(credentials, request, opts \\ []),
+    do: Rest.place_order(credentials, request, opts)
 
   @doc """
   **Not supported.** This venue publishes no order-preview endpoint.
