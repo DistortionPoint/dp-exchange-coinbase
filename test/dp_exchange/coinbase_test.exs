@@ -312,4 +312,136 @@ defmodule DpExchange.CoinbaseTest do
       assert order.provider == :coinbase
     end
   end
+
+  describe "the fake's preview and edit match the venue's surface" do
+    test "a preview returns totals without placing" do
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: Decimal.new("0.5"),
+        price: Decimal.new("40000")
+      }
+
+      assert {:ok, preview} = Fake.preview_order(@fake_credentials, request)
+      assert Decimal.positive?(preview.order_total)
+      assert preview.preview_id
+    end
+
+    test "a preview of an impossible pair is refused, as the venue would" do
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: Decimal.new("0.5"),
+        order_type: :market,
+        time_in_force: :gtc
+      }
+
+      assert {:error, {:unsupported_order_combination, :market, :gtc}} =
+               Fake.preview_order(@fake_credentials, request)
+    end
+
+    test "editing price or size is accepted" do
+      assert {:ok, order} =
+               Fake.replace_order(@fake_credentials, "fake-order-1", %{
+                 price: Decimal.new("41000")
+               })
+
+      assert order.id == "fake-order-1"
+    end
+
+    test "editing anything else is refused, matching the venue's edit surface" do
+      assert {:error, {:unsupported_order_edit, [:time_in_force]}} =
+               Fake.replace_order(@fake_credentials, "fake-order-1", %{time_in_force: :ioc})
+    end
+  end
+
+  describe "the facade delegates the order surface" do
+    # These go through DpExchange.Coinbase rather than Rest, which is the module a consumer
+    # actually calls. A delegate wired to the wrong function would pass every Rest test.
+    @creds %{api_key: "organizations/x/apiKeys/y", api_secret: "-----BEGIN EC PRIVATE KEY-----"}
+
+    defmodule FacadeLimiter do
+      @moduledoc false
+      @behaviour DpExchange.Core.RateLimitBehaviour
+
+      @impl true
+      def acquire(_provider, _weight, _opts), do: :ok
+      @impl true
+      def check(_provider, _weight, _opts), do: :ok
+      @impl true
+      def record(_provider, _weight, _opts), do: :ok
+    end
+
+    setup do
+      DpExchange.Core.Config.put_override(:rate_limit_module, FacadeLimiter)
+      :ok
+    end
+
+    defp json_plug(body) do
+      fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+    end
+
+    test "place_order reaches the venue through the facade" do
+      body = %{"success" => true, "success_response" => %{"order_id" => "via-facade"}}
+
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: Decimal.new("0.5"),
+        price: Decimal.new("40000")
+      }
+
+      assert {:ok, order} =
+               Coinbase.place_order(@creds, request, plug: json_plug(body), retry_attempts: 0)
+
+      assert order.id == "via-facade"
+    end
+
+    test "cancel_order reaches the venue through the facade" do
+      body = %{"results" => [%{"order_id" => "abc", "success" => true}]}
+
+      assert {:ok, :cancelled} =
+               Coinbase.cancel_order(@creds, "abc", plug: json_plug(body), retry_attempts: 0)
+    end
+
+    test "get_order reaches the venue through the facade" do
+      body = %{"order" => %{"order_id" => "abc", "product_id" => "BTC-USD", "status" => "OPEN"}}
+
+      assert {:ok, order} =
+               Coinbase.get_order(@creds, "abc", plug: json_plug(body), retry_attempts: 0)
+
+      assert order.id == "abc"
+    end
+
+    test "get_orders reaches the venue through the facade" do
+      assert {:ok, []} =
+               Coinbase.get_orders(@creds, plug: json_plug(%{"orders" => []}), retry_attempts: 0)
+    end
+
+    test "preview_order reaches the venue through the facade" do
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: Decimal.new("0.5"),
+        price: Decimal.new("40000")
+      }
+
+      assert {:ok, preview} =
+               Coinbase.preview_order(@creds, request,
+                 plug: json_plug(%{"errs" => [], "order_total" => "1"}),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(preview.order_total, Decimal.new("1"))
+    end
+
+    test "replace_order refuses an unsupported edit through the facade" do
+      assert {:error, {:unsupported_order_edit, [:side]}} =
+               Coinbase.replace_order(@creds, "abc", %{side: :sell}, retry_attempts: 0)
+    end
+  end
 end

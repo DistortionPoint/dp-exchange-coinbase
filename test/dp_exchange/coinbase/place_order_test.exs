@@ -331,4 +331,143 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       assert_receive {:sent, %{"side" => "SELL", "product_id" => "BTC-USD"}}
     end
   end
+
+  describe "preview_order/3" do
+    test "returns the venue's numbers without placing anything" do
+      body = %{
+        "order_total" => "20005.00",
+        "commission_total" => "10.00",
+        "base_size" => "0.5",
+        "best_bid" => "39990",
+        "best_ask" => "40010",
+        "slippage" => "0.001",
+        "preview_id" => "prev-1",
+        "errs" => []
+      }
+
+      assert {:ok, preview} =
+               Rest.preview_order(@credentials, limit_request(),
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(preview.order_total, Decimal.new("20005.00"))
+      assert Decimal.equal?(preview.commission_total, Decimal.new("10.00"))
+      assert preview.preview_id == "prev-1"
+    end
+
+    test "a preview carrying errors is a refusal, not a preview" do
+      # The venue answers 200 with a populated `errs` for an order it would reject. Handing
+      # that back as a successful preview would tell a caller its order is fine when the
+      # venue has already said otherwise.
+      body = %{"errs" => ["INSUFFICIENT_FUND"], "order_total" => "0"}
+
+      assert {:refused, {:preview_rejected, ["INSUFFICIENT_FUND"]}} =
+               Rest.preview_order(@credentials, limit_request(),
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a warning is passed through and does NOT make it a refusal" do
+      # A warning is the venue saying "this will execute, and you may not like how".
+      body = %{"errs" => [], "warning" => "PREVIEW_WARNING_SLIPPAGE", "order_total" => "1"}
+
+      assert {:ok, preview} =
+               Rest.preview_order(@credentials, limit_request(),
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert preview.warning == "PREVIEW_WARNING_SLIPPAGE"
+    end
+
+    test "an impossible type/time-in-force pair is refused before previewing" do
+      exploding = fn _conn -> raise "must not call the venue for an impossible pair" end
+
+      assert {:error, {:unsupported_order_combination, :limit, :ioc}} =
+               Rest.preview_order(@credentials, limit_request(%{time_in_force: :ioc}),
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+  end
+
+  describe "replace_order/4" do
+    test "an accepted edit reads the order back rather than echoing the request" do
+      # The venue's edit response carries no order body. Building one from the request would
+      # report what was asked for as though the venue had confirmed it.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        body =
+          if conn.request_path =~ "edit" do
+            %{"success" => true}
+          else
+            %{
+              "order" => %{
+                "order_id" => "abc-123",
+                "product_id" => "BTC-USD",
+                "side" => "BUY",
+                "status" => "OPEN"
+              }
+            }
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:ok, order} =
+               Rest.replace_order(@credentials, "abc-123", %{price: Decimal.new("41000")},
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert order.id == "abc-123"
+      assert order.status == :open
+      assert_receive {:path, edit_path}
+      assert edit_path =~ "edit"
+      assert_receive {:path, read_path}
+      assert read_path =~ "historical"
+    end
+
+    test "a rejected edit refuses with the venue's reason" do
+      body = %{
+        "success" => false,
+        "errors" => [%{"edit_failure_reason" => "INVALID_PRICE_PRECISION"}]
+      }
+
+      assert {:refused, {:edit_rejected, "INVALID_PRICE_PRECISION"}} =
+               Rest.replace_order(@credentials, "abc-123", %{price: Decimal.new("41000")},
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "changing anything but price or size is refused, not silently dropped" do
+      # A caller trying to change the side is describing a different order. Editing only the
+      # price would leave it holding one it did not ask for.
+      exploding = fn _conn -> raise "must not call the venue for an unsupported edit" end
+
+      assert {:error, {:unsupported_order_edit, [:side]}} =
+               Rest.replace_order(@credentials, "abc-123", %{side: :sell},
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "an edit that changes nothing is an error" do
+      exploding = fn _conn -> raise "must not call the venue with no changes" end
+
+      assert {:error, :no_order_changes} =
+               Rest.replace_order(@credentials, "abc-123", %{},
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+  end
 end

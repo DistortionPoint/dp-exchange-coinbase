@@ -153,11 +153,6 @@ defmodule DpExchange.Coinbase.Fake do
   def get_transfers(_credentials, _opts), do: Venue.not_supported()
   # Both refused, matching the real venue. A fake that answered where the real one
   # refuses lets a consumer's suite go green against behaviour that cannot happen.
-  @impl true
-  def preview_order(_credentials, _request, _opts \\ []), do: Venue.not_supported()
-
-  @impl true
-  def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
 
   @impl true
   def get_trade_history(_credentials, _opts), do: Venue.not_supported()
@@ -413,5 +408,57 @@ defmodule DpExchange.Coinbase.Fake do
       status: :open,
       provider: :coinbase
     }
+  end
+
+  @impl true
+  def preview_order(_credentials, request, _opts \\ []) do
+    with :ok <- fake_combination(request) do
+      {:ok,
+       %{
+         order_total: Decimal.new("20000.00"),
+         commission_total: Decimal.new("10.00"),
+         base_size: Map.get(request, :quantity),
+         quote_size: nil,
+         best_bid: Decimal.new("39990"),
+         best_ask: Decimal.new("40010"),
+         slippage: Decimal.new("0.001"),
+         warning: nil,
+         preview_id: "fake-preview-1"
+       }}
+    end
+  end
+
+  @impl true
+  def replace_order(_credentials, order_id, changes, _opts \\ []) do
+    # The fake enforces the venue's edit surface: price and size only. A fake that accepted
+    # a side change would let a consumer's test pass on an edit the venue refuses.
+    case Map.keys(changes) -- [:price, :quantity] do
+      [] ->
+        # Read back, as the real package does: the venue's edit response carries no order.
+        {:ok,
+         %{fake_order() | id: order_id, price: Map.get(changes, :price) || fake_order().price}}
+
+      unsupported ->
+        {:error, {:unsupported_order_edit, unsupported}}
+    end
+  end
+
+  defp fake_combination(request) do
+    pair = {Map.get(request, :order_type, :limit), Map.get(request, :time_in_force, :gtc)}
+
+    if pair in [
+         {:market, :ioc},
+         {:market, :fok},
+         {:limit, :gtc},
+         {:limit, :gtd},
+         {:limit, :fok},
+         {:stop_limit, :gtc},
+         {:stop_limit, :gtd}
+       ] do
+      :ok
+    else
+      {type, tif} = pair
+      {:error, {:unsupported_order_combination, type, tif}}
+    end
   end
 end

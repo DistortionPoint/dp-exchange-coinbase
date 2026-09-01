@@ -20,6 +20,32 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+- **This package claimed the venue has no order preview and no atomic replace. It has
+  both.** `supports_order_preview` and `supports_order_replace` were declared `false` on
+  those claims, and neither was checked against the venue's reference. Coinbase publishes
+  `POST /orders/preview` and `POST /orders/edit`; both flags are now `true` and both
+  endpoints are implemented.
+
+  The replace claim was the worse of the two. Its moduledoc called
+  `supports_order_replace: false` "a claim about **risk** rather than convenience", because
+  cancel-then-replace opens a window in which no order is live. The risk was real and the
+  claim was wrong: **the package was describing a hazard it was creating by not implementing
+  the endpoint that avoids it.**
+
+### Added
+- **`preview_order/3`** builds the same `order_configuration` as `place_order/3`, so a
+  preview is a preview of the order that would actually be sent. **A `200` carrying a
+  populated `errs` is a refusal** — returning it as a successful preview would tell a caller
+  its order is fine when the venue has already said otherwise. A `warning` is passed through
+  and does *not* make it a refusal.
+- **`replace_order/4`** edits price or size in place. **Any other change is refused rather
+  than dropped**: a caller trying to change the side is describing a different order, and
+  editing only the price would leave it holding one it did not ask for. The venue's edit
+  response carries no order body, so the order is **read back** rather than reconstructed
+  from the request — reporting what was asked for as though the venue had confirmed it is
+  the mistake this whole contract is written against.
+
 ### Added
 - **`cancel_order/3`, `get_order/3`, `get_orders/2`.** The order lifecycle, where there was
   none.

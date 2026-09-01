@@ -703,4 +703,130 @@ defmodule DpExchange.Coinbase.Rest do
       _unparsable -> nil
     end
   end
+
+  @doc """
+  Previews an order without placing it.
+
+  Takes the same request as `place_order/3` and builds the same `order_configuration`, so a
+  preview that succeeds is a preview of the order that would actually be sent. Building the
+  request differently here — a simpler path, a defaulted field — would preview something
+  else and report it as the order.
+
+  **A preview carrying `errs` is a refusal, not a preview.** The venue answers `200` with a
+  populated error list for an order it would reject, and returning that as a successful
+  preview would tell a caller its order is fine when the venue has already said it is not.
+
+  `warning` is passed through untouched and does **not** make this a refusal: a warning is
+  the venue saying "this will execute, and you may not like how".
+  """
+  @spec preview_order(map(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def preview_order(credentials, request, opts) do
+    with {:ok, configuration} <- order_configuration(request) do
+      body = %{
+        "product_id" => SymbolFormat.to_exchange_symbol(Map.fetch!(request, :symbol)),
+        "side" => request |> Map.fetch!(:side) |> to_string() |> String.upcase(),
+        "order_configuration" => configuration
+      }
+
+      case post_json("/orders/preview", body, credentials, opts) do
+        {:ok, %{body: response}} -> preview_result(response)
+        {:error, reason} -> classify(reason)
+      end
+    end
+  end
+
+  defp preview_result(%{"errs" => errs} = _response) when is_list(errs) and errs != [] do
+    {:refused, {:preview_rejected, errs}}
+  end
+
+  defp preview_result(%{} = response) do
+    {:ok,
+     %{
+       order_total: decimal(response["order_total"]),
+       commission_total: decimal(response["commission_total"]),
+       base_size: decimal(response["base_size"]),
+       quote_size: decimal(response["quote_size"]),
+       best_bid: decimal(response["best_bid"]),
+       best_ask: decimal(response["best_ask"]),
+       slippage: decimal(response["slippage"]),
+       # The venue's own words, unedited. A warning summarised here is a warning a caller
+       # cannot act on.
+       warning: response["warning"],
+       preview_id: response["preview_id"]
+     }}
+  end
+
+  defp preview_result(_other), do: {:error, :unexpected_response_shape}
+
+  @doc """
+  Changes the price or size of a working order.
+
+  **This venue edits in place; it does not cancel and re-place.** That distinction is the
+  reason `replace_order/4` is worth having at all: a cancel-then-place opens a window in
+  which no order is live, and on a moving market that window is where the fill a caller
+  wanted goes to someone else.
+
+  Coinbase accepts `price` and `size` only. **Anything else in the request is refused rather
+  than dropped** — a caller trying to change the side or the time-in-force is describing a
+  different order, and silently editing only the price would leave it holding one it did not
+  ask for.
+
+  A `200` carrying `success: false` is a refusal, as everywhere else on this venue.
+  """
+  @spec replace_order(map(), String.t(), map(), keyword()) ::
+          {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
+  def replace_order(credentials, order_id, changes, opts) do
+    with :ok <- editable_changes(changes) do
+      body =
+        %{"order_id" => order_id}
+        |> put_unless_nil("price", Map.get(changes, :price))
+        |> put_unless_nil("size", Map.get(changes, :quantity))
+
+      case post_json("/orders/edit", body, credentials, opts) do
+        {:ok, %{body: response}} -> edit_result(response, order_id, credentials, opts)
+        {:error, reason} -> classify(reason)
+      end
+    end
+  end
+
+  @editable [:price, :quantity]
+
+  defp editable_changes(changes) do
+    case Map.keys(changes) -- @editable do
+      [] -> editable_present(changes)
+      unsupported -> {:error, {:unsupported_order_edit, unsupported}}
+    end
+  end
+
+  defp editable_present(changes) do
+    if Enum.any?(@editable, &Map.has_key?(changes, &1)) do
+      :ok
+    else
+      {:error, :no_order_changes}
+    end
+  end
+
+  defp edit_result(%{"success" => true}, order_id, credentials, opts) do
+    # The venue's edit response carries no order body — only that it worked. Building an
+    # `Order` from the request would report what was *asked for* as though the venue had
+    # confirmed it, which is a different thing and the one this family keeps getting wrong.
+    #
+    # So the order is read back. It costs a second call and returns the venue's own view,
+    # including whatever it did with the edit that the caller did not ask for.
+    get_order(credentials, order_id, opts)
+  end
+
+  defp edit_result(%{"success" => false} = response, _order_id, _credentials, _opts) do
+    {:refused, {:edit_rejected, edit_failure(response)}}
+  end
+
+  defp edit_result(_other, _order_id, _credentials, _opts),
+    do: {:error, :unexpected_response_shape}
+
+  defp edit_failure(%{"errors" => [%{"edit_failure_reason" => reason} | _rest]})
+       when is_binary(reason),
+       do: reason
+
+  defp edit_failure(_response), do: :unspecified
 end

@@ -86,8 +86,6 @@ defmodule DpExchange.Coinbase do
     # Neither exists on this venue. `preview_order/3` has no endpoint at all;
     # `replace_order/4` means a caller cancels and re-places, which is NOT equivalent —
     # it opens a window in which no order is live.
-    {:preview_order, 3},
-    {:replace_order, 4},
     {:get_transfers, 2},
     {:quantization, 1},
     {:get_market_overview, 1},
@@ -129,6 +127,13 @@ defmodule DpExchange.Coinbase do
       supported_quotes: ~w(USDC USD EUR GBP BTC USDT ETH INR AUD CAD SGD),
       supported_instrument_types: [:spot],
       supports_short_selling: false,
+      # Both were `false`, on an unchecked claim that the venue publishes neither endpoint.
+      # It publishes `/orders/preview` and `/orders/edit`, and the second matters more than
+      # a convenience: `supports_order_replace: false` told a caller to cancel and re-place,
+      # which opens a window where no order is live. The package was describing a risk it
+      # was creating by not implementing the endpoint that avoids it.
+      supports_order_preview: true,
+      supports_order_replace: true,
       streamable: [:quotes],
       historical_timeframes: Rest.granularities(),
       max_candles_per_request: Rest.max_candles(),
@@ -211,22 +216,28 @@ defmodule DpExchange.Coinbase do
     do: Rest.place_order(credentials, request, opts)
 
   @doc """
-  **Not supported.** This venue publishes no order-preview endpoint.
+  Previews an order without placing it.
 
-  Declared through `supports_order_preview: false`, so a consumer routes around it rather
-  than discovering the refusal at call time.
+  **This used to read "this venue publishes no order-preview endpoint".** It publishes
+  `POST /api/v3/brokerage/orders/preview`, and `supports_order_preview` was declared `false`
+  on the strength of that claim. Neither was checked against the venue's reference.
   """
   @impl true
-  def preview_order(_credentials, _request, _opts \\ []), do: Venue.not_supported()
+  def preview_order(credentials, request, opts \\ []),
+    do: Rest.preview_order(credentials, request, opts)
 
   @doc """
-  **Not supported.** This venue has no atomic replace; a caller cancels and re-places.
+  Changes the price or size of a working order, in place.
 
-  That is not equivalent — it opens a window in which no order is live — which is why
-  `supports_order_replace: false` is a claim about **risk** rather than convenience.
+  **This used to read "this venue has no atomic replace; a caller cancels and re-places",
+  and called that a claim about risk.** The risk was real and the claim was wrong: Coinbase
+  publishes `POST /api/v3/brokerage/orders/edit`, which amends without ever leaving the
+  order un-live. The window this package warned a caller about was one it was creating by
+  not implementing the endpoint that avoids it.
   """
   @impl true
-  def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
+  def replace_order(credentials, order_id, changes, opts \\ []),
+    do: Rest.replace_order(credentials, order_id, changes, opts)
 
   @impl true
   def cancel_order(credentials, order_id, opts \\ []),
