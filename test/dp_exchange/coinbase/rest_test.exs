@@ -144,6 +144,42 @@ defmodule DpExchange.Coinbase.RestTest do
       assert DpExchange.Core.Timeframe.aligned?(first.opened_at, "1m")
     end
 
+    test "the public candles path is used without a credential and the private one with" do
+      # The venue publishes the same candles twice. Reading the public one while holding a
+      # credential would silently forgo whatever the authenticated view adds.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(@candles))
+      end
+
+      assert {:ok, _public} =
+               Rest.get_historical_prices("BTC-USD", "1m", [], plug: plug, retry_attempts: 0)
+
+      assert_receive {:path, public_path}
+      assert public_path =~ "/market/products/BTC-USD/candles"
+
+      credentials = %{
+        api_key: "organizations/x/apiKeys/y",
+        api_secret: "-----BEGIN EC PRIVATE KEY-----"
+      }
+
+      assert {:ok, _private} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 credentials: credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, private_path}
+      refute private_path =~ "/market/"
+      assert private_path =~ "/products/BTC-USD/candles"
+    end
+
     test "all four prices survive the boundary" do
       # This package built `Quote`s with `price: close` until 2026-09-01, discarding open,
       # high and low where no caller could see it happen. Every value that came out was

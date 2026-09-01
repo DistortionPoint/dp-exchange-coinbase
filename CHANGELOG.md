@@ -31,6 +31,12 @@ acceptable changelog line.
   nothing busted.
 
 
+- **`get_historical_prices/4` reads the authenticated candles path when a credential is
+  present.** The venue publishes the same candles twice — `/market/products/…` public and
+  `/products/…` for a credential — and this always called the public one, so a caller
+  holding a credential was silently forgoing whatever the authenticated view adds. Same
+  correction as the product book.
+
 - **`get_order_book/2` — depth, which this package declared `:unsupported`.**
   `GET /product_book` for a credential and `/market/product_book` without one — the venue
   publishes the same book twice, and reading the public one while holding a credential

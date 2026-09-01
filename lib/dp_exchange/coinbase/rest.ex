@@ -115,7 +115,17 @@ defmodule DpExchange.Coinbase.Rest do
          {:ok, params} <- candle_params(timeframe, range, enum) do
       native = SymbolFormat.to_exchange_symbol(symbol)
 
-      case request(:get, "/market/products/#{native}/candles", nil, opts, params) do
+      # The venue publishes the same candles twice: `/market/products/…` unauthenticated
+      # and `/products/…` for a credential. Reading the public one while holding a
+      # credential would silently forgo whatever the authenticated view adds.
+      credentials = Keyword.get(opts, :credentials)
+
+      path =
+        if credentials,
+          do: "/products/#{native}/candles",
+          else: "/market/products/#{native}/candles"
+
+      case request(:get, path, credentials, opts, params) do
         {:ok, %{body: body}} -> to_candles(body, symbol, timeframe)
         {:error, reason} -> classify(reason)
       end
