@@ -95,9 +95,6 @@ defmodule DpExchange.Coinbase do
     {:get_accounts, 2},
     {:get_fees, 2},
     {:get_order_book, 2},
-    {:cancel_order, 3},
-    {:get_order, 3},
-    {:get_orders, 2},
     {:get_trade_history, 2},
     {:get_balances, 2},
     {:test_connection, 2},
@@ -232,13 +229,15 @@ defmodule DpExchange.Coinbase do
   def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
 
   @impl true
-  def cancel_order(_credentials, _id, _opts), do: Venue.not_supported()
+  def cancel_order(credentials, order_id, opts \\ []),
+    do: Rest.cancel_order(credentials, order_id, opts)
 
   @impl true
-  def get_order(_credentials, _id, _opts), do: Venue.not_supported()
+  def get_order(credentials, order_id, opts \\ []),
+    do: Rest.get_order(credentials, order_id, opts)
 
   @impl true
-  def get_orders(_credentials, _opts), do: Venue.not_supported()
+  def get_orders(credentials, opts \\ []), do: Rest.get_orders(credentials, opts)
 
   @impl true
   def get_trade_history(_credentials, _opts), do: Venue.not_supported()

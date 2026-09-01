@@ -545,4 +545,162 @@ defmodule DpExchange.Coinbase.Rest do
     ])
     |> IO.iodata_to_binary()
   end
+
+  @doc """
+  Cancels an order.
+
+  ## The venue has no single-order cancel, and the batch one refuses per order
+
+  Coinbase cancels through `POST /orders/batch_cancel`, which takes `order_ids` and answers
+  with a `results` array — one entry per id, each with its own `success` and
+  `failure_reason`. A batch of one is still a batch, so **the HTTP call succeeding says
+  nothing about whether the order was cancelled**.
+
+  A caller asking to cancel one order gets one answer: the result for that id, or a refusal
+  carrying the venue's reason. An order already filled or already cancelled comes back as a
+  refusal rather than an `:ok`, because "I cancelled it" and "it was not there to cancel"
+  are different facts and a caller retrying on the second is chasing nothing.
+  """
+  @spec cancel_order(map(), String.t(), keyword()) ::
+          {:ok, :cancelled} | {:error, term()} | {:refused, term()}
+  def cancel_order(credentials, order_id, opts) do
+    case post_json("/orders/batch_cancel", %{"order_ids" => [order_id]}, credentials, opts) do
+      {:ok, %{body: body}} -> cancel_result(body, order_id)
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  defp cancel_result(%{"results" => results}, order_id) when is_list(results) do
+    case Enum.find(results, &(&1["order_id"] == order_id)) do
+      %{"success" => true} -> {:ok, :cancelled}
+      %{"failure_reason" => reason} -> {:refused, {:cancel_rejected, reason}}
+      # The venue answered about orders, and none of them was the one asked about. That is
+      # not a cancelled order and it is not an error from the transport either.
+      nil -> {:error, :order_not_in_response}
+    end
+  end
+
+  defp cancel_result(_body, _order_id), do: {:error, :unexpected_response_shape}
+
+  @doc """
+  One order by its venue id.
+
+  The venue wraps it as `%{"order" => ...}`. A response without that key is an unreadable
+  answer rather than a missing order — the second would be a refusal, and telling them
+  apart is what stops a caller treating a parse failure as "no such order".
+  """
+  @spec get_order(map(), String.t(), keyword()) ::
+          {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
+  def get_order(credentials, order_id, opts) do
+    case request(:get, "/orders/historical/#{order_id}", credentials, opts) do
+      {:ok, %{body: %{"order" => order}}} -> {:ok, to_order(order)}
+      {:ok, %{body: _other}} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  @doc """
+  Orders, most recent first.
+
+  `:status` and `:symbol` in `opts` filter at the venue rather than here — a client-side
+  filter over one page would silently drop matching orders that were on the next one.
+
+  **This returns one page.** The venue paginates with a cursor and this does not follow it,
+  which is a limit worth stating rather than a total worth trusting: a caller reconciling
+  positions against a truncated order list would find a difference it could not explain.
+  """
+  @spec get_orders(map(), keyword()) ::
+          {:ok, [Types.Order.t()]} | {:error, term()} | {:refused, term()}
+  def get_orders(credentials, opts) do
+    params =
+      %{}
+      |> put_unless_nil("order_status", opts |> Keyword.get(:status) |> order_status_param())
+      |> put_unless_nil("product_ids", venue_symbol(Keyword.get(opts, :symbol)))
+      |> put_unless_nil("limit", Keyword.get(opts, :limit))
+
+    case request(:get, "/orders/historical/batch", credentials, opts, params) do
+      {:ok, %{body: %{"orders" => orders}}} when is_list(orders) ->
+        {:ok, Enum.map(orders, &to_order/1)}
+
+      {:ok, %{body: _other}} ->
+        {:error, :unexpected_response_shape}
+
+      {:error, reason} ->
+        classify(reason)
+    end
+  end
+
+  defp order_status_param(nil), do: nil
+
+  defp order_status_param(status) when is_atom(status),
+    do: status |> to_string() |> String.upcase()
+
+  defp order_status_param(status) when is_binary(status), do: String.upcase(status)
+
+  defp venue_symbol(nil), do: nil
+  defp venue_symbol(symbol), do: SymbolFormat.to_exchange_symbol(symbol)
+
+  # The venue's status vocabulary, mapped to the contract's.
+  #
+  # `QUEUED` and `CANCEL_QUEUED` are the venue's own intermediate states — accepted, not yet
+  # working, and accepted-for-cancellation-but-still-live. Both map to `:open`: the order
+  # exists and may still fill, which is what a caller needs to know. Mapping CANCEL_QUEUED
+  # to `:cancelled` would tell a caller an order is gone while it can still trade.
+  @statuses %{
+    "PENDING" => :pending,
+    "QUEUED" => :open,
+    "OPEN" => :open,
+    "CANCEL_QUEUED" => :open,
+    "FILLED" => :filled,
+    "CANCELLED" => :cancelled,
+    "EXPIRED" => :expired,
+    "FAILED" => :rejected
+  }
+
+  defp to_order(order) do
+    %Types.Order{
+      id: order["order_id"],
+      symbol: order |> Map.get("product_id") |> canonical_or_nil(),
+      side: order |> Map.get("side") |> side_atom(),
+      order_type: order |> Map.get("order_type") |> type_atom(),
+      time_in_force: order |> Map.get("time_in_force") |> tif_atom(),
+      quantity: decimal(order["filled_size"]),
+      filled_quantity: decimal(order["filled_size"]),
+      average_price: decimal(order["average_filled_price"]),
+      fee: decimal(order["total_fees"]),
+      fee_currency: order["fee_currency"],
+      # An unmapped status is `nil`, never a guess. A caller branching on :open would
+      # otherwise act on a state the venue named and this package did not recognise.
+      status: Map.get(@statuses, order["status"]),
+      created_at: parse_created(order["created_time"]),
+      provider: :coinbase
+    }
+  end
+
+  defp canonical_or_nil(nil), do: nil
+  defp canonical_or_nil(native), do: SymbolFormat.to_canonical_symbol(native)
+
+  defp side_atom("BUY"), do: :buy
+  defp side_atom("SELL"), do: :sell
+  defp side_atom(_other), do: nil
+
+  defp type_atom("MARKET"), do: :market
+  defp type_atom("LIMIT"), do: :limit
+  defp type_atom("STOP_LIMIT"), do: :stop_limit
+  defp type_atom(_other), do: nil
+
+  defp tif_atom("GOOD_UNTIL_CANCELLED"), do: :gtc
+  defp tif_atom("GOOD_UNTIL_DATE_TIME"), do: :gtd
+  defp tif_atom("IMMEDIATE_OR_CANCEL"), do: :ioc
+  defp tif_atom("FILL_OR_KILL"), do: :fok
+  defp tif_atom(_other), do: nil
+
+  defp parse_created(nil), do: nil
+
+  defp parse_created(value) do
+    case parse_time(value) do
+      {:ok, at} -> at
+      _unparsable -> nil
+    end
+  end
 end

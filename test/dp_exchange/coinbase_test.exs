@@ -2,6 +2,7 @@ defmodule DpExchange.CoinbaseTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Coinbase
+  alias DpExchange.Coinbase.Fake
   alias DpExchange.Core.{Capabilities, Venue}
 
   doctest Coinbase
@@ -248,6 +249,67 @@ defmodule DpExchange.CoinbaseTest do
       assert :ok = Coinbase.unsubscribe(~w(BTC-USD), opts)
       assert :ok = Coinbase.update_symbols(~w(ETH-USD), opts)
       assert :ok = Coinbase.subscribe_notices(opts)
+    end
+  end
+
+  describe "the fake's order lifecycle matches the venue's" do
+    @fake_credentials %{api_key: "k", api_secret: "s"}
+
+    test "placing an order the venue would accept succeeds" do
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: Decimal.new("0.5"),
+        price: Decimal.new("40000")
+      }
+
+      assert {:ok, order} = Fake.place_order(@fake_credentials, request)
+      assert order.status == :pending
+      assert order.provider == :coinbase
+    end
+
+    test "placing a pair the venue does NOT name is refused by the fake too" do
+      # A fake that accepted everything would let a consumer's suite pass on an order the
+      # venue will reject, which is the failure a fake exists to prevent rather than cause.
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: Decimal.new("0.5"),
+        order_type: :limit,
+        time_in_force: :ioc
+      }
+
+      assert {:error, {:unsupported_order_combination, :limit, :ioc}} =
+               Fake.place_order(@fake_credentials, request)
+    end
+
+    test "cancelling a known order succeeds" do
+      assert {:ok, :cancelled} = Fake.cancel_order(@fake_credentials, "fake-order-1")
+    end
+
+    test "cancelling an order that cannot be cancelled refuses, as the venue does" do
+      assert {:refused, {:cancel_rejected, _reason}} =
+               Fake.cancel_order(@fake_credentials, "already-filled")
+    end
+
+    test "cancelling an unknown order refuses" do
+      assert {:refused, {:cancel_rejected, _reason}} =
+               Fake.cancel_order(@fake_credentials, "no-such-order")
+    end
+
+    test "reading a known order returns it" do
+      assert {:ok, order} = Fake.get_order(@fake_credentials, "fake-order-1")
+      assert order.id == "fake-order-1"
+      assert order.status == :open
+    end
+
+    test "reading an unknown order refuses" do
+      assert {:refused, :not_found} = Fake.get_order(@fake_credentials, "no-such-order")
+    end
+
+    test "listing returns the fake's orders" do
+      assert {:ok, [order]} = Fake.get_orders(@fake_credentials)
+      assert order.provider == :coinbase
     end
   end
 end

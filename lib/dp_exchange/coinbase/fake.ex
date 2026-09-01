@@ -160,12 +160,6 @@ defmodule DpExchange.Coinbase.Fake do
   def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
 
   @impl true
-  def cancel_order(_credentials, _id, _opts), do: Venue.not_supported()
-  @impl true
-  def get_order(_credentials, _id, _opts), do: Venue.not_supported()
-  @impl true
-  def get_orders(_credentials, _opts), do: Venue.not_supported()
-  @impl true
   def get_trade_history(_credentials, _opts), do: Venue.not_supported()
   # Streaming, in memory. The fake pushes immediately on subscribe, which is what the
   # real venue's first tick does from the caller's side — and the caller cannot tell the
@@ -382,5 +376,42 @@ defmodule DpExchange.Coinbase.Fake do
       {type, tif} ->
         {:error, {:unsupported_order_combination, type, tif}}
     end
+  end
+
+  @impl true
+  def cancel_order(_credentials, order_id, _opts \\ []) do
+    # The fake refuses the same way the venue does: an order that is not open cannot be
+    # cancelled, and saying :ok would let a consumer's retry logic go untested.
+    case order_id do
+      "fake-order-1" -> {:ok, :cancelled}
+      "already-filled" -> {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_FAILURE_REASON"}}
+      _unknown -> {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}}
+    end
+  end
+
+  @impl true
+  def get_order(_credentials, order_id, _opts \\ []) do
+    case order_id do
+      "fake-order-1" -> {:ok, fake_order()}
+      _unknown -> {:refused, :not_found}
+    end
+  end
+
+  @impl true
+  def get_orders(_credentials, _opts \\ []), do: {:ok, [fake_order()]}
+
+  defp fake_order do
+    %Types.Order{
+      id: "fake-order-1",
+      symbol: "BTC-USD",
+      side: :buy,
+      order_type: :limit,
+      time_in_force: :gtc,
+      quantity: Decimal.new("0.5"),
+      filled_quantity: Decimal.new("0"),
+      price: Decimal.new("40000"),
+      status: :open,
+      provider: :coinbase
+    }
   end
 end

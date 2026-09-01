@@ -21,6 +21,28 @@ acceptable changelog line.
 ## [Unreleased]
 
 ### Added
+- **`cancel_order/3`, `get_order/3`, `get_orders/2`.** The order lifecycle, where there was
+  none.
+
+  **Cancellation is a batch endpoint that refuses per order.** `POST /orders/batch_cancel`
+  answers with a `results` array carrying its own `success` and `failure_reason` per id, so
+  a `200` says nothing about whether anything was cancelled. A batch of one is still a
+  batch. An order already filled comes back as a **refusal**, not an `:ok` — "I cancelled
+  it" and "it was not there to cancel" are different facts, and a caller retrying on the
+  second is chasing nothing.
+
+  **`CANCEL_QUEUED` maps to `:open`, not `:cancelled`.** An order accepted for cancellation
+  is still live until the venue says otherwise; reporting it gone invites a second order for
+  the same exposure.
+
+  **A status, side, order type or time-in-force this package does not recognise is `nil`,
+  never the nearest atom.** A venue adding a word later produces an absent field rather than
+  a plausible wrong one.
+
+  `get_orders/2` filters at the venue rather than in this package — a client-side filter
+  over one page would silently drop matching orders sitting on the next. **It returns one
+  page and does not follow the cursor**, which is stated rather than left for a caller to
+  discover while reconciling.
 - **`place_order/3`.** This venue could not place an order; it can now.
 
   Coinbase names the order type and the time-in-force in a **single key** —
