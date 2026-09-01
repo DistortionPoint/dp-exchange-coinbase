@@ -330,6 +330,77 @@ defmodule DpExchange.Coinbase.Rest do
   defp both_portfolios(from, to) when is_binary(from) and is_binary(to), do: :ok
   defp both_portfolios(_from, _to), do: {:error, :missing_portfolio}
 
+  # --- key permissions and server time ------------------------------------
+
+  @doc """
+  What this API key is allowed to do — `GET /key_permissions`.
+
+  **Three booleans, and `can_transfer` is the one that moves money.** `can_view`,
+  `can_trade` and `can_transfer` are separate permissions and a key routinely holds one or
+  two; asking here is cheaper than discovering a missing one from a refused withdrawal.
+
+  Also carries `portfolio_uuid` — **the portfolio the key is attached to** — and its type.
+  A key is scoped to a portfolio, so "the account's balance" through this key is that
+  portfolio's, and this is where a caller finds out which.
+  """
+  @spec get_key_permissions(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_key_permissions(credentials, opts) do
+    case request(:get, "/key_permissions", credentials, opts) do
+      {:ok, %{body: %{"can_view" => _view} = permissions}} -> {:ok, permissions}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  @doc """
+  The venue's own clock — `GET /brokerage/time`.
+
+  **Public**, and the reason it is worth reading: this venue signs requests with a JWT whose
+  window is two minutes, so a host clock more than that out of step produces authentication
+  failures that look like a credential problem. Comparing this to the local clock is how a
+  reader tells the two apart.
+
+  Returns the venue's own map with `iso` and `epochSeconds`/`epochMillis`. It is **not**
+  parsed into a `DateTime` and diffed here: the difference a caller cares about is against
+  its own clock at the moment it asked, and computing it inside the package would hide
+  the round trip in the number.
+  """
+  @spec get_server_time(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_server_time(opts) do
+    case request(:get, "/time", nil, opts) do
+      {:ok, %{body: %{} = time}} -> {:ok, time}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  @doc """
+  Whether the venue is reachable and the credential, if given, is accepted.
+
+  **Two different questions, and this asks whichever it was given the means to.** Without
+  credentials it reads the public clock — reachability alone. With them it reads
+  `/key_permissions`, which fails if the key is wrong and tells the caller what the key can
+  do if it is right.
+
+  A credential that reaches the venue and is rejected comes back `{:refused, _}`, not
+  `{:ok, _}`: an unreachable venue and an unaccepted key are different problems.
+  """
+  @spec test_connection(map() | nil, keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def test_connection(nil, opts) do
+    with {:ok, time} <- get_server_time(opts), do: {:ok, %{"reachable" => true, "time" => time}}
+  end
+
+  def test_connection(credentials, opts) when map_size(credentials) == 0,
+    do: test_connection(nil, opts)
+
+  def test_connection(credentials, opts) do
+    with {:ok, permissions} <- get_key_permissions(credentials, opts) do
+      {:ok, Map.put(permissions, "reachable", true)}
+    end
+  end
+
   # --- fees and volume ----------------------------------------------------
 
   @doc """

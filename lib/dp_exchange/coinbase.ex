@@ -110,7 +110,6 @@ defmodule DpExchange.Coinbase do
     {:get_filings, 2},
     {:get_news, 1},
     {:get_screener, 2},
-    {:get_roles, 1},
     # **No bulk cancel here — checked against the venue's reference on 2026-09-01.**
     # `POST /orders/batch_cancel` takes an explicit `order_ids` list; it is the endpoint
     # `cancel_order/3` already uses, one id at a time. There is no "cancel everything"
@@ -127,7 +126,6 @@ defmodule DpExchange.Coinbase do
     {:get_volume_profile, 3},
     {:get_market_overview, 1},
     {:list_instruments, 1},
-    {:test_connection, 2},
     {:get_rate_limit_status, 2}
   ]
 
@@ -393,8 +391,15 @@ defmodule DpExchange.Coinbase do
 
   # --- health ------------------------------------------------------------
 
+  @doc """
+  Whether the venue is reachable and the credential, if given, is accepted.
+
+  See `DpExchange.Coinbase.Rest.test_connection/2`. Without credentials it reads the public
+  clock; with them it reads the key's permissions, which is both a reachability check and an
+  answer about what the key can do.
+  """
   @impl true
-  def test_connection(_credentials, _opts), do: Venue.not_supported()
+  def test_connection(credentials, opts), do: Rest.test_connection(credentials, opts)
 
   @impl true
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
@@ -822,6 +827,23 @@ defmodule DpExchange.Coinbase do
   def rename_account(id, name, opts),
     do: Rest.rename_portfolio(Keyword.get(opts, :credentials, %{}), id, name, opts)
 
+  @doc """
+  What this API key is allowed to do.
+
+  See `DpExchange.Coinbase.Rest.get_key_permissions/2`. Three separate permissions, and
+  `can_transfer` is the one that moves money. Carries the portfolio the key is scoped to.
+  """
   @impl true
-  def get_roles(_opts), do: Venue.not_supported()
+  def get_roles(opts),
+    do: Rest.get_key_permissions(Keyword.get(opts, :credentials, %{}), opts)
+
+  @doc """
+  The venue's own clock. **Public.**
+
+  See `DpExchange.Coinbase.Rest.get_server_time/1`. Worth reading because this venue's JWT
+  window is two minutes: a host clock further out than that produces authentication failures
+  that look like a credential problem.
+  """
+  @spec get_server_time(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_server_time(opts \\ []), do: Rest.get_server_time(opts)
 end

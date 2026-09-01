@@ -404,7 +404,17 @@ defmodule DpExchange.Coinbase.Fake do
 
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())
   @impl true
-  def test_connection(_credentials, _opts), do: Venue.not_supported()
+  def test_connection(credentials, _opts) do
+    # With a credential the fake answers what the key can do; without one it answers
+    # reachability only, which is the same split the package makes.
+    if is_map(credentials) and map_size(credentials) > 0 do
+      {:ok,
+       %{"reachable" => true, "can_view" => true, "can_trade" => true, "can_transfer" => false}}
+    else
+      {:ok, %{"reachable" => true, "time" => %{"iso" => "2026-09-01T20:00:00Z"}}}
+    end
+  end
+
   @impl true
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
   @impl true
@@ -735,7 +745,18 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_roles(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_roles(_opts \\ []) do
+    # `can_transfer` false beside two trues: a key routinely holds some and not all, and a
+    # fake that granted everything would let a consumer ship a withdrawal path it cannot use.
+    {:ok,
+     %{
+       "can_view" => true,
+       "can_trade" => true,
+       "can_transfer" => false,
+       "portfolio_uuid" => "pf-1",
+       "portfolio_type" => "DEFAULT"
+     }}
+  end
 
   @impl true
   def place_order(_credentials, request, _opts \\ []) do

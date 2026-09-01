@@ -22,6 +22,26 @@ acceptable changelog line.
 
 ### Added
 
+- **Key permissions and the server clock** — `get_roles/1`, `get_server_time/1` and a
+  `test_connection/2` that is no longer declared absent.
+
+  **`can_transfer` is a separate permission from `can_trade`**, and a key routinely holds one
+  and not the other. Asking is cheaper than discovering a missing one from a refused
+  withdrawal. The response also names **the portfolio the key is scoped to**, which is where
+  a caller finds out whose balance it has been reading.
+
+  **`test_connection/2` asks two different questions and picks by what it was given.**
+  Without credentials it reads the public clock — reachability alone. With them it reads the
+  key's permissions, which fails if the key is wrong and answers what the key can do if it is
+  right. An unreachable venue and an unaccepted key are different problems.
+
+  `get_server_time/1` returns the venue's own map **undiffed**. The difference a caller cares
+  about is against its own clock at the moment it asked, and computing it inside the package
+  would hide the round trip in the number. It is worth reading at all because this venue's
+  JWT window is two minutes: a host clock further out than that produces authentication
+  failures that look like a credential problem.
+
+
 - **Convert, portfolios and the transaction summary** — the last ten Advanced Trade
   endpoints in the coverage plan's Phase 11.
 
