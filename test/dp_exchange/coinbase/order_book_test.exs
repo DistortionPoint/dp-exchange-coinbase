@@ -208,6 +208,40 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       assert book.bids != []
     end
 
+    test "the public book is read without a credential and the private one with" do
+      # The venue publishes the same book twice. Reading the public one while holding a
+      # credential would silently forgo whatever the authenticated view adds.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"pricebook" => pricebook()}))
+      end
+
+      assert {:ok, _public} = Rest.get_order_book("BTC-USD", plug: plug, retry_attempts: 0)
+      assert_receive {:path, public_path}
+      assert public_path =~ "/market/product_book"
+
+      credentials = %{
+        api_key: "organizations/x/apiKeys/y",
+        api_secret: "-----BEGIN EC PRIVATE KEY-----"
+      }
+
+      assert {:ok, _private} =
+               Rest.get_order_book("BTC-USD",
+                 credentials: credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, private_path}
+      refute private_path =~ "/market/"
+      assert private_path =~ "/product_book"
+    end
+
     test "limit and aggregation go to the venue" do
       me = self()
 

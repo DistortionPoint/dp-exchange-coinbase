@@ -572,7 +572,12 @@ defmodule DpExchange.Coinbase.Rest do
         Keyword.get(opts, :aggregation_price_increment)
       )
 
-    case request(:get, "/product_book", credentials, opts, params) do
+    # The venue publishes the same book twice: `/market/product_book` unauthenticated and
+    # `/product_book` for a credential. Reading the public one while holding a credential
+    # would silently forgo whatever the authenticated view adds.
+    path = if credentials, do: "/product_book", else: "/market/product_book"
+
+    case request(:get, path, credentials, opts, params) do
       {:ok, %{body: %{"pricebook" => pricebook}}} -> build_order_book(native, pricebook)
       {:ok, _unexpected} -> {:error, :unexpected_response_shape}
       {:error, reason} -> classify(reason)

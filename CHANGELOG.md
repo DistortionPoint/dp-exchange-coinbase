@@ -23,7 +23,10 @@ acceptable changelog line.
 ### Added
 
 - **`get_order_book/2` — depth, which this package declared `:unsupported`.**
-  `GET /product_book`, with the venue's `limit` and `aggregation_price_increment` passed
+  `GET /product_book` for a credential and `/market/product_book` without one — the venue
+  publishes the same book twice, and reading the public one while holding a credential
+  would silently forgo whatever the authenticated view adds. The venue's `limit` and
+  `aggregation_price_increment` are passed
   through.
 
   **Both sides come back as the venue ordered them.** Re-sorting would hide a venue that
