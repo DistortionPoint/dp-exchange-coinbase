@@ -73,6 +73,9 @@ defmodule DpExchange.Coinbase do
     # friends, still unimplemented and scheduled on their own. There is a one-step
     # `POST /conversions`, but it belongs to the **Exchange** API, a different product this
     # package does not reach. So `convert/4` has no endpoint on this package's surface.
+    # Advanced Trade places one order per request: POST /orders takes a single order, and
+    # /orders/batch_cancel is a batch *cancel*, which destroys rather than creates.
+    {:place_orders, 3},
     {:convert, 4},
     {:get_deposit_address, 3},
     {:list_approved_addresses, 1},
@@ -289,6 +292,17 @@ defmodule DpExchange.Coinbase do
   @impl true
   def place_order(credentials, request, opts \\ []),
     do: Rest.place_order(credentials, request, opts)
+
+  @doc """
+  **Not supported.** Advanced Trade places one order per request.
+
+  `POST /orders` takes a single order and `POST /orders/batch_cancel` is a batch *cancel* —
+  the venue's only bulk order operation, and it destroys rather than creates. Calling
+  `place_order/3` in a loop is what a consumer must do here, with the reconciliation that
+  implies.
+  """
+  @impl true
+  def place_orders(_credentials, _requests, _opts), do: Venue.not_supported()
 
   @doc """
   Previews an order without placing it.

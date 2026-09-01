@@ -796,6 +796,9 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
+  def place_orders(_credentials, _requests, _opts), do: Venue.not_supported()
+
+  @impl true
   def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
   @impl true
   def cancel_order(_credentials, order_id, _opts \\ []) do
