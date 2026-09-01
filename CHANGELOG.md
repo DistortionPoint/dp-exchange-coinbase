@@ -22,6 +22,39 @@ acceptable changelog line.
 
 ### Added
 
+- **Convert, portfolios and the transaction summary** — the last ten Advanced Trade
+  endpoints in the coverage plan's Phase 11.
+
+  **Convert is the facade's only two-step operation, and Advanced Trade states no expiry at
+  all.** `expires_at` is `nil`, which means "not stated" and never "open-ended": a caller
+  committing a lapsed quote can be filled at the *current* rate rather than refused, which is
+  the dangerous outcome because the operation looks like it succeeded and every number is
+  real. `commit_conversion/2` and even `get_conversion/2` **re-ask for both accounts** — the
+  venue's own rule, unusual for a read — and this package fills neither in: a conversion
+  committed against accounts the caller did not name happens between the wrong two balances.
+  A status this package does not know maps to `nil`, never the nearest one.
+
+  **A portfolio is an address, not a value.** `list_portfolios/1` returns them,
+  `get_portfolio_breakdown/3` returns what is *inside* one — a different and much larger
+  answer — and `create_account/1` and `rename_account/3` reach the portfolio endpoints,
+  because Advanced Trade has no notion of creating an *account*. **Deleted portfolios stay in
+  the listing**: the venue keeps them because old orders still name their ids, and filtering
+  them out would make a historical id look like one that never existed.
+
+  **`get_trade_volume/2` was declared absent on a claim that was wrong.** This package held
+  that "Advanced Trade does not aggregate" the account's own volume; the transaction summary
+  does, in `volume_breakdown` per volume type with `advanced_trade_only_volume` and
+  `coinbase_pro_volume` beside it. The claim had been made from the *market* volume
+  endpoint's absence, which answers a different question. The two account totals ride
+  alongside the breakdown rather than being folded in: the venue documents the first as
+  non-inclusive of the second, so adding either to the breakdown double counts.
+
+  `get_fees/2` carries **both** `fee_tier` and `fee_tier_without_promotion` — they differ
+  while a promotion is running, and it can end between two calls — and keeps the tax's
+  `INCLUSIVE`/`EXCLUSIVE` flag, because the same rate quoted either way is a different amount
+  of money.
+
+
 - **US derivatives — the nine CFM endpoints.** `get_positions/1` and
   `list_futures_positions/1`, `get_futures_position/3`, `get_futures_balance_summary/2`,
   the three sweep calls, and the three intraday-margin calls.

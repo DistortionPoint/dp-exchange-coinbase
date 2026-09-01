@@ -289,7 +289,27 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_fees(_credentials, _opts), do: Venue.not_supported()
+  def get_fees(_credentials, _opts) do
+    # A promotion running, so the two tiers differ — the case a consumer that read only one
+    # of them would get wrong.
+    {:ok,
+     %{
+       "total_fees" => 25,
+       "fee_tier" => %{
+         "pricing_tier" => "<$10k",
+         "taker_fee_rate" => "0.0010",
+         "maker_fee_rate" => "0.0020"
+       },
+       "fee_tier_without_promotion" => %{
+         "pricing_tier" => "Advanced 3",
+         "current_tier" => %{"taker_fee_rate" => "0.0060", "maker_fee_rate" => "0.0040"}
+       },
+       "advanced_trade_only_volume" => 1000,
+       "coinbase_pro_volume" => 250,
+       "volume_breakdown" => [%{"volume_type" => "VOLUME_TYPE_SPOT", "volume" => 1000}]
+     }}
+  end
+
   @impl true
   def get_transfers(_credentials, _opts), do: Venue.not_supported()
   # Both refused, matching the real venue. A fake that answered where the real one
@@ -518,23 +538,117 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def quote_conversion(_from, _to, _amount, _opts \\ []),
-    do: DpExchange.Core.Venue.not_supported()
+  def quote_conversion(from, to, amount, _opts \\ []) do
+    # `:quoted`, and no expiry — the two things a consumer must handle. A fake that returned
+    # `:settled` would let one ship code that never commits.
+    {:ok,
+     %Types.Conversion{
+       id: "convert-1",
+       status: :quoted,
+       from_asset: from,
+       to_asset: to,
+       from_amount: amount,
+       to_amount: amount,
+       rate: nil,
+       fee: Decimal.new("0"),
+       expires_at: nil,
+       venue_time: nil,
+       provider: :coinbase
+     }}
+  end
 
   @impl true
-  def commit_conversion(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def commit_conversion(id, opts \\ []) do
+    # Both accounts or nothing, as in the package: committing against accounts the caller
+    # did not name converts between the wrong two balances.
+    with {:ok, from, to} <- fake_convert_accounts(opts) do
+      {:ok,
+       %Types.Conversion{
+         id: id,
+         status: :committed,
+         from_asset: from,
+         to_asset: to,
+         from_amount: nil,
+         to_amount: nil,
+         rate: nil,
+         fee: nil,
+         expires_at: nil,
+         venue_time: nil,
+         provider: :coinbase
+       }}
+    end
+  end
 
   @impl true
-  def get_conversion(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_conversion(id, opts \\ []) do
+    with {:ok, from, to} <- fake_convert_accounts(opts) do
+      {:ok,
+       %Types.Conversion{
+         id: id,
+         status: :settled,
+         from_asset: from,
+         to_asset: to,
+         from_amount: nil,
+         to_amount: nil,
+         rate: nil,
+         fee: nil,
+         expires_at: nil,
+         venue_time: nil,
+         provider: :coinbase
+       }}
+    end
+  end
+
+  defp fake_convert_accounts(opts) do
+    case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
+      {from, to} when is_binary(from) and is_binary(to) -> {:ok, from, to}
+      _missing -> {:error, :from_and_to_required}
+    end
+  end
 
   @impl true
   def convert(_from, _to, _amount, _opts \\ []), do: Venue.not_supported()
 
   @impl true
-  def get_trade_volume(_credentials, _opts \\ []), do: Venue.not_supported()
+  def get_trade_volume(_credentials, _opts \\ []) do
+    # The Advanced Trade and Pro totals ride alongside the breakdown rather than being
+    # folded into it: the venue documents the first as non-inclusive of the second, so
+    # adding either to the breakdown double counts.
+    {:ok,
+     [
+       %{
+         "volume_type" => "VOLUME_TYPE_SPOT",
+         "volume" => 1000,
+         "advanced_trade_only_volume" => 1000,
+         "coinbase_pro_volume" => 250,
+         "total_fees" => 25
+       }
+     ]}
+  end
 
   @impl true
-  def list_portfolios(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def list_portfolios(_opts \\ []) do
+    # A deleted one alongside a live one: the venue keeps deleted portfolios in the listing
+    # because old orders still name them, and a fake that returned only live ones would let
+    # a consumer treat a historical id as one that never existed.
+    {:ok,
+     [
+       %Types.Portfolio{
+         id: "pf-1",
+         name: "Default",
+         type: "DEFAULT",
+         deleted: false,
+         provider: :coinbase
+       },
+       %Types.Portfolio{
+         id: "pf-2",
+         name: "Retired",
+         type: "CONSUMER",
+         deleted: true,
+         provider: :coinbase
+       }
+     ]}
+  end
 
   @impl true
   def get_deposit_address(_asset, _network, _opts \\ []),
@@ -591,10 +705,34 @@ defmodule DpExchange.Coinbase.Fake do
   def get_screener(_name, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def create_account(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def create_account(opts \\ []) do
+    case Keyword.get(opts, :name) do
+      name when is_binary(name) ->
+        {:ok,
+         %Types.Portfolio{
+           id: "pf-new",
+           name: name,
+           type: "CONSUMER",
+           deleted: false,
+           provider: :coinbase
+         }}
+
+      _missing ->
+        {:error, :name_required}
+    end
+  end
 
   @impl true
-  def rename_account(_id, _name, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def rename_account(id, name, _opts \\ []) do
+    {:ok,
+     %Types.Portfolio{
+       id: id,
+       name: name,
+       type: "CONSUMER",
+       deleted: false,
+       provider: :coinbase
+     }}
+  end
 
   @impl true
   def get_roles(_opts \\ []), do: DpExchange.Core.Venue.not_supported()

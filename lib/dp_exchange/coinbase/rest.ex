@@ -330,6 +330,343 @@ defmodule DpExchange.Coinbase.Rest do
   defp both_portfolios(from, to) when is_binary(from) and is_binary(to), do: :ok
   defp both_portfolios(_from, _to), do: {:error, :missing_portfolio}
 
+  # --- fees and volume ----------------------------------------------------
+
+  @doc """
+  The fee schedule that applies to this credential — `GET /transaction_summary`.
+
+  Returns the venue's own map. `fee_tier` carries the maker and taker rates and the volume
+  band they apply in; `fee_tier_without_promotion` carries the same **before** any promotion,
+  and the two differ when one is running. Both travel: a caller computing cost from the
+  promotional tier and reconciling against the standard one would find a gap it cannot
+  explain, and the promotion can end between two calls.
+
+  **The rates are per product type, and the filter is not defaulted.** `opts[:product_type]`
+  takes the venue's enum — `SPOT`, `FUTURE`, `EQUITY` and the rest — and without it the venue
+  answers across all of them, which is its own default and not one this package picked.
+
+  `goods_and_services_tax` is carried where the venue sends it: a rate quoted `INCLUSIVE` and
+  the same rate quoted `EXCLUSIVE` are different amounts of money.
+  """
+  @spec get_fees(map(), keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_fees(credentials, opts) do
+    with {:ok, summary} <- transaction_summary(credentials, opts), do: {:ok, summary}
+  end
+
+  @doc """
+  What **this account** has traded — `GET /transaction_summary`.
+
+  **This package claimed until 2026-09-01 that Advanced Trade does not aggregate it.** That
+  was wrong: the same endpoint that carries the fee schedule carries `volume_breakdown` per
+  volume type, `advanced_trade_only_volume`, and `coinbase_pro_volume` beside it. The claim
+  was made from the *market* volume endpoint's absence, which is a different question —
+  `get_market_overview/1` asks what everyone traded.
+
+  Returned as rows, one per `volume_breakdown` entry, with the venue's own `volume_type`
+  intact. **The three totals are not summed together**: Advanced Trade volume is documented
+  as non-inclusive of Pro, so adding them is right and adding either to the breakdown is
+  double counting. They ride alongside as `advanced_trade_only_volume` and
+  `coinbase_pro_volume` on each row rather than being folded in.
+
+  An empty breakdown is an account that has traded nothing in the venue's window — not an
+  error, and not a venue that does not report.
+  """
+  @spec get_trade_volume(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_trade_volume(credentials, opts) do
+    with {:ok, summary} <- transaction_summary(credentials, opts) do
+      totals = %{
+        "advanced_trade_only_volume" => summary["advanced_trade_only_volume"],
+        "coinbase_pro_volume" => summary["coinbase_pro_volume"],
+        "total_fees" => summary["total_fees"]
+      }
+
+      rows =
+        summary
+        |> Map.get("volume_breakdown", [])
+        |> List.wrap()
+        |> Enum.map(&Map.merge(&1, totals))
+
+      {:ok, rows}
+    end
+  end
+
+  defp transaction_summary(credentials, opts) do
+    params =
+      %{}
+      |> put_unless_nil("product_type", Keyword.get(opts, :product_type))
+      |> put_unless_nil("contract_expiry_type", Keyword.get(opts, :contract_expiry_type))
+      |> put_unless_nil("product_venue", Keyword.get(opts, :product_venue))
+
+    case request(:get, "/transaction_summary", credentials, opts, params) do
+      {:ok, %{body: %{"fee_tier" => _tier} = summary}} -> {:ok, summary}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  # --- portfolios ---------------------------------------------------------
+
+  @doc """
+  The portfolios this credential can address — `GET /portfolios`.
+
+  **A portfolio is an address, not a value.** Balances, orders and positions are asked *of*
+  one, and "the account's BTC balance" is not a well-formed question on a venue that has
+  them.
+
+  `opts[:portfolio_type]` filters by the venue's own enum where a caller gives one; nothing
+  is sent otherwise, because a filter this package chose would hide portfolios the caller
+  did not ask to hide.
+
+  **`deleted` rides on the row and is not filtered out here.** A deleted portfolio is still
+  returned by the venue and still holds history; dropping it would make an id that appears in
+  an old order look like an id that never existed.
+  """
+  @spec list_portfolios(map(), keyword()) ::
+          {:ok, [Types.Portfolio.t()]} | {:error, term()} | {:refused, term()}
+  def list_portfolios(credentials, opts) do
+    params = put_unless_nil(%{}, "portfolio_type", Keyword.get(opts, :portfolio_type))
+
+    case request(:get, "/portfolios", credentials, opts, params) do
+      {:ok, %{body: %{"portfolios" => portfolios}}} when is_list(portfolios) ->
+        {:ok, Enum.map(portfolios, &to_portfolio/1)}
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_response_shape}
+
+      {:error, reason} ->
+        classify(reason)
+    end
+  end
+
+  defp to_portfolio(row) do
+    %Types.Portfolio{
+      id: row["uuid"],
+      name: row["name"],
+      type: row["type"],
+      deleted: row["deleted"],
+      provider: :coinbase
+    }
+  end
+
+  @doc """
+  One portfolio's full breakdown — `GET /portfolios/{portfolio_uuid}`.
+
+  **Not `list_portfolios/2` narrowed to one.** The listing names portfolios; this returns the
+  balances, positions and margin inside one, which is a different and much larger answer. It
+  comes back as the venue's own map because none of the contract's types is shaped for a
+  whole portfolio at once.
+
+  `opts[:currency]` asks the venue to value the breakdown in one currency.
+  """
+  @spec get_portfolio_breakdown(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_portfolio_breakdown(credentials, portfolio_uuid, opts)
+      when is_binary(portfolio_uuid) do
+    params = put_unless_nil(%{}, "currency", Keyword.get(opts, :currency))
+
+    case request(:get, "/portfolios/#{portfolio_uuid}", credentials, opts, params) do
+      {:ok, %{body: %{"breakdown" => breakdown}}} when is_map(breakdown) -> {:ok, breakdown}
+      {:ok, %{body: %{} = body}} -> {:ok, body}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  @doc """
+  Creates a portfolio — `POST /portfolios`.
+
+  `opts[:name]` is required and is not defaulted: an unnamed portfolio is one a caller cannot
+  tell from another later, and the venue has no notion of a nameless one.
+  """
+  @spec create_portfolio(map(), keyword()) ::
+          {:ok, Types.Portfolio.t()} | {:error, term()} | {:refused, term()}
+  def create_portfolio(credentials, opts) do
+    with {:ok, name} <- required_name(opts) do
+      case post_json("/portfolios", %{"name" => name}, credentials, opts) do
+        {:ok, %{body: %{"portfolio" => portfolio}}} when is_map(portfolio) ->
+          {:ok, to_portfolio(portfolio)}
+
+        {:ok, _unexpected} ->
+          {:error, :unexpected_response_shape}
+
+        {:error, reason} ->
+          classify(reason)
+      end
+    end
+  end
+
+  @doc """
+  Renames a portfolio — `PUT /portfolios/{portfolio_uuid}`.
+
+  The only thing this edits is the name. It does not move funds, close positions or change
+  what the portfolio can do.
+  """
+  @spec rename_portfolio(map(), String.t(), String.t(), keyword()) ::
+          {:ok, Types.Portfolio.t()} | {:error, term()} | {:refused, term()}
+  def rename_portfolio(credentials, portfolio_uuid, name, opts)
+      when is_binary(portfolio_uuid) and is_binary(name) do
+    case put_json("/portfolios/#{portfolio_uuid}", %{"name" => name}, credentials, opts) do
+      {:ok, %{body: %{"portfolio" => portfolio}}} when is_map(portfolio) ->
+        {:ok, to_portfolio(portfolio)}
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_response_shape}
+
+      {:error, reason} ->
+        classify(reason)
+    end
+  end
+
+  @doc """
+  Deletes a portfolio — `DELETE /portfolios/{portfolio_uuid}`.
+
+  **This is irreversible from this package's side**, and the venue refuses it while the
+  portfolio holds funds or open orders — which is the venue's guard, not this one's. A caller
+  emptying a portfolio first should use `transfer_internal/4`, and should read
+  `list_portfolios/2` afterwards rather than assume: the venue keeps deleted portfolios in
+  the listing with `deleted: true`, because old orders still name them.
+  """
+  @spec delete_portfolio(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def delete_portfolio(credentials, portfolio_uuid, opts) when is_binary(portfolio_uuid) do
+    case request(:delete, "/portfolios/#{portfolio_uuid}", credentials, opts) do
+      {:ok, %{body: %{} = result}} -> {:ok, result}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  defp required_name(opts) do
+    case Keyword.get(opts, :name) do
+      name when is_binary(name) -> {:ok, name}
+      _missing -> {:error, :name_required}
+    end
+  end
+
+  # --- convert ------------------------------------------------------------
+
+  @doc """
+  Quotes a conversion — `POST /convert/quote`. **Nothing moves.**
+
+  Returns `status: :quoted`. The rate is held for a window and `commit_conversion/3` is the
+  separate call that accepts it; a caller that never commits has done nothing but ask.
+
+  **Coinbase names accounts by currency, not by uuid**: `from_account` is `"USD"`, not an
+  account id. `from` and `to` are passed straight through as the venue's own account
+  identifiers.
+
+  `opts[:trade_incentive_metadata]` carries the venue's fee-waiver object where a caller has
+  one; nothing is invented for it.
+
+  **`expires_at` is `nil` where the venue does not state one, and that is not "no expiry".**
+  A caller committing a lapsed quote can get a fill at the *current* rate rather than an
+  error, which is the dangerous case: the operation looks like it succeeded and every number
+  in it is real.
+  """
+  @spec quote_conversion(map(), String.t(), String.t(), Decimal.t(), keyword()) ::
+          {:ok, Types.Conversion.t()} | {:error, term()} | {:refused, term()}
+  def quote_conversion(credentials, from, to, amount, opts) do
+    body =
+      %{
+        "from_account" => from,
+        "to_account" => to,
+        "amount" => Decimal.to_string(amount, :normal)
+      }
+      |> put_raw_unless_nil(
+        "trade_incentive_metadata",
+        Keyword.get(opts, :trade_incentive_metadata)
+      )
+
+    with {:ok, trade} <- convert_trade(post_json("/convert/quote", body, credentials, opts)) do
+      {:ok, to_conversion(trade, from, to)}
+    end
+  end
+
+  @doc """
+  Commits a quoted conversion — `POST /convert/trade/{trade_id}`. **This moves funds.**
+
+  **The venue re-asks for both accounts**, and this package does not fill them in from the
+  quote: `opts[:from]` and `opts[:to]` are required and refused when missing. Committing
+  against accounts the caller did not name is how a conversion happens between the wrong two
+  balances.
+  """
+  @spec commit_conversion(map(), String.t(), keyword()) ::
+          {:ok, Types.Conversion.t()} | {:error, term()} | {:refused, term()}
+  def commit_conversion(credentials, trade_id, opts) when is_binary(trade_id) do
+    with {:ok, from, to} <- convert_accounts(opts) do
+      body = %{"from_account" => from, "to_account" => to}
+
+      with {:ok, trade} <-
+             convert_trade(post_json("/convert/trade/#{trade_id}", body, credentials, opts)) do
+        {:ok, to_conversion(trade, from, to)}
+      end
+    end
+  end
+
+  @doc """
+  A conversion's current state — `GET /convert/trade/{trade_id}`.
+
+  **Both accounts are required query parameters here**, which is unusual for a read and is
+  the venue's own rule. They are refused when missing rather than guessed, because a read
+  addressed with the wrong pair is not this trade.
+  """
+  @spec get_conversion(map(), String.t(), keyword()) ::
+          {:ok, Types.Conversion.t()} | {:error, term()} | {:refused, term()}
+  def get_conversion(credentials, trade_id, opts) when is_binary(trade_id) do
+    with {:ok, from, to} <- convert_accounts(opts) do
+      params = %{"from_account" => from, "to_account" => to}
+
+      with {:ok, trade} <-
+             convert_trade(request(:get, "/convert/trade/#{trade_id}", credentials, opts, params)) do
+        {:ok, to_conversion(trade, from, to)}
+      end
+    end
+  end
+
+  defp convert_accounts(opts) do
+    case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
+      {from, to} when is_binary(from) and is_binary(to) -> {:ok, from, to}
+      _missing -> {:error, :from_and_to_required}
+    end
+  end
+
+  defp convert_trade({:ok, %{body: %{"trade" => trade}}}) when is_map(trade), do: {:ok, trade}
+  defp convert_trade({:ok, _unexpected}), do: {:error, :unexpected_response_shape}
+  defp convert_trade({:error, reason}), do: classify(reason)
+
+  # `from_asset` and `to_asset` come from what the caller asked for, not from the response:
+  # the venue's amounts carry a currency each, but which is the source and which the
+  # destination is the caller's question and the response does not label them.
+  defp to_conversion(trade, from, to) do
+    %Types.Conversion{
+      id: trade["id"],
+      status: conversion_status(trade["status"]),
+      from_asset: from,
+      to_asset: to,
+      from_amount: amount_value(trade["user_entered_amount"]),
+      to_amount: amount_value(trade["total"]),
+      rate: nil,
+      fee: amount_value(trade["fees"]),
+      # Advanced Trade states no expiry on a convert quote. `nil` here is "not stated", and
+      # a caller must not read it as open-ended — see `Types.Conversion`.
+      expires_at: nil,
+      venue_time: nil,
+      provider: :coinbase
+    }
+  end
+
+  # The venue's own enum. Anything this package does not know maps to `nil` rather than to
+  # the nearest status: reporting a quote as settled is the failure this field exists to
+  # prevent, and reporting a failure as a quote is the same mistake backwards.
+  defp conversion_status("TRADE_STATUS_CREATED"), do: :quoted
+  defp conversion_status("TRADE_STATUS_STARTED"), do: :committed
+  defp conversion_status("TRADE_STATUS_COMPLETED"), do: :settled
+  defp conversion_status("TRADE_STATUS_CANCELED"), do: :expired
+  defp conversion_status("TRADE_STATUS_EXPIRED"), do: :expired
+  defp conversion_status("TRADE_STATUS_FAILED"), do: :failed
+  defp conversion_status(_other), do: nil
+
   # --- US derivatives (CFM) -----------------------------------------------
 
   @doc """
@@ -1298,6 +1635,10 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp put_unless_nil(map, _key, nil), do: map
   defp put_unless_nil(map, key, value), do: Map.put(map, key, to_string(value))
+  # The venue's own object, sent as it was given. `put_unless_nil/3` stringifies, which turns
+  # a nested map into its inspect form and the venue into a caller error.
+  defp put_raw_unless_nil(map, _key, nil), do: map
+  defp put_raw_unless_nil(map, key, value), do: Map.put(map, key, value)
 
   defp required_field(request, key, error) do
     case Map.get(request, key) do
@@ -1341,10 +1682,16 @@ defmodule DpExchange.Coinbase.Rest do
   # The body is **not** signed: this venue's JWT is scoped to the method and URI, so the
   # signature does not cover the payload (see `Auth.rest_headers/4`, whose body argument is
   # ignored on purpose).
-  defp post_json(path, body, credentials, opts) do
+  defp post_json(path, body, credentials, opts),
+    do: json_request(:post, path, body, credentials, opts)
+
+  defp put_json(path, body, credentials, opts),
+    do: json_request(:put, path, body, credentials, opts)
+
+  defp json_request(method, path, body, credentials, opts) do
     headers =
       HttpClient.build_auth_headers(
-        :post,
+        method,
         @api_path <> path,
         nil,
         credentials,
@@ -1358,7 +1705,7 @@ defmodule DpExchange.Coinbase.Rest do
       |> Keyword.put_new(:limiter, Keyword.get(opts, :limiter, DpExchange.Coinbase.RateLimiter))
 
     HttpClient.request(
-      :post,
+      method,
       @base_url <> @api_path <> path,
       headers,
       Jason.encode!(body),

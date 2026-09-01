@@ -74,15 +74,6 @@ defmodule DpExchange.Coinbase do
     # `POST /conversions`, but it belongs to the **Exchange** API, a different product this
     # package does not reach. So `convert/4` has no endpoint on this package's surface.
     {:convert, 4},
-    # `/products/volume-summary` is **market** volume and lives on the Exchange API too.
-    # `get_trade_volume/2` asks what *this account* traded, which Advanced Trade does not
-    # aggregate — it reports fills, and summing them here would be this package's
-    # arithmetic rather than the venue's ledger.
-    {:get_trade_volume, 2},
-    {:quote_conversion, 4},
-    {:commit_conversion, 2},
-    {:get_conversion, 2},
-    {:list_portfolios, 1},
     {:get_deposit_address, 3},
     {:list_approved_addresses, 1},
     {:estimate_withdrawal_fee, 4},
@@ -119,8 +110,6 @@ defmodule DpExchange.Coinbase do
     {:get_filings, 2},
     {:get_news, 1},
     {:get_screener, 2},
-    {:create_account, 1},
-    {:rename_account, 3},
     {:get_roles, 1},
     # **No bulk cancel here — checked against the venue's reference on 2026-09-01.**
     # `POST /orders/batch_cancel` takes an explicit `order_ids` list; it is the endpoint
@@ -138,7 +127,6 @@ defmodule DpExchange.Coinbase do
     {:get_volume_profile, 3},
     {:get_market_overview, 1},
     {:list_instruments, 1},
-    {:get_fees, 2},
     {:test_connection, 2},
     {:get_rate_limit_status, 2}
   ]
@@ -287,8 +275,15 @@ defmodule DpExchange.Coinbase do
   """
   def get_accounts(credentials, opts), do: Rest.get_accounts(credentials, opts)
 
+  @doc """
+  The fee schedule that applies to this credential.
+
+  See `DpExchange.Coinbase.Rest.get_fees/2`. Both the promotional tier and the tier without
+  the promotion travel, because they differ while one is running and it can end between two
+  calls.
+  """
   @impl true
-  def get_fees(_credentials, _opts), do: Venue.not_supported()
+  def get_fees(credentials, opts), do: Rest.get_fees(credentials, opts)
 
   @impl true
   def get_transfers(_credentials, _opts), do: Venue.not_supported()
@@ -615,23 +610,81 @@ defmodule DpExchange.Coinbase do
   defp prime_wallet(:unstake, credentials, portfolio, wallet, asset, amount, opts),
     do: Prime.unstake_wallet(credentials, portfolio, wallet, asset, amount, opts)
 
-  @impl true
-  def quote_conversion(_from, _to, _amount, _opts), do: Venue.not_supported()
+  @doc """
+  Quotes a conversion. **Nothing moves.**
 
+  See `DpExchange.Coinbase.Rest.quote_conversion/5`. Coinbase names accounts by currency, and
+  `expires_at` is `nil` because Advanced Trade states none — which is "not stated", not
+  "open-ended".
+  """
   @impl true
-  def commit_conversion(_id, _opts), do: Venue.not_supported()
+  def quote_conversion(from, to, amount, opts),
+    do: Rest.quote_conversion(Keyword.get(opts, :credentials, %{}), from, to, amount, opts)
 
+  @doc """
+  Commits a quoted conversion. **This moves funds.**
+
+  See `DpExchange.Coinbase.Rest.commit_conversion/3`. The venue re-asks for both accounts and
+  this package fills neither in — `opts[:from]` and `opts[:to]` are required.
+  """
   @impl true
-  def get_conversion(_id, _opts), do: Venue.not_supported()
+  def commit_conversion(id, opts),
+    do: Rest.commit_conversion(Keyword.get(opts, :credentials, %{}), id, opts)
+
+  @doc """
+  A conversion's current state.
+
+  See `DpExchange.Coinbase.Rest.get_conversion/3`. Both accounts are required query
+  parameters here — the venue's own rule, and unusual for a read.
+  """
+  @impl true
+  def get_conversion(id, opts),
+    do: Rest.get_conversion(Keyword.get(opts, :credentials, %{}), id, opts)
 
   @impl true
   def convert(_from, _to, _amount, _opts), do: Venue.not_supported()
 
-  @impl true
-  def get_trade_volume(_credentials, _opts), do: Venue.not_supported()
+  @doc """
+  What this account has traded.
 
+  See `DpExchange.Coinbase.Rest.get_trade_volume/2`. This package claimed until 2026-09-01
+  that Advanced Trade does not aggregate it; the transaction summary does, and the claim had
+  been made from the *market* volume endpoint's absence, which is a different question.
+  """
   @impl true
-  def list_portfolios(_opts), do: Venue.not_supported()
+  def get_trade_volume(credentials, opts), do: Rest.get_trade_volume(credentials, opts)
+
+  @doc """
+  The portfolios this credential can address.
+
+  See `DpExchange.Coinbase.Rest.list_portfolios/2`. A portfolio is an address, not a value,
+  and deleted ones stay in the listing because old orders still name them.
+  """
+  @impl true
+  def list_portfolios(opts),
+    do: Rest.list_portfolios(Keyword.get(opts, :credentials, %{}), opts)
+
+  @doc """
+  One portfolio's full breakdown — balances, positions and margin inside it.
+
+  See `DpExchange.Coinbase.Rest.get_portfolio_breakdown/3`. **Not `list_portfolios/1`
+  narrowed to one**: the listing names portfolios, this returns what is inside one.
+  """
+  @spec get_portfolio_breakdown(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_portfolio_breakdown(credentials, portfolio_uuid, opts),
+    do: Rest.get_portfolio_breakdown(credentials, portfolio_uuid, opts)
+
+  @doc """
+  Deletes a portfolio. **Irreversible from this package's side.**
+
+  See `DpExchange.Coinbase.Rest.delete_portfolio/3` — the venue refuses while the portfolio
+  holds funds or open orders, which is the venue's guard and not this one's.
+  """
+  @spec delete_portfolio(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def delete_portfolio(credentials, portfolio_uuid, opts),
+    do: Rest.delete_portfolio(credentials, portfolio_uuid, opts)
 
   @impl true
   def get_deposit_address(_asset, _network, _opts), do: Venue.not_supported()
@@ -747,11 +800,27 @@ defmodule DpExchange.Coinbase do
   @impl true
   def get_screener(_name, _opts), do: Venue.not_supported()
 
-  @impl true
-  def create_account(_opts), do: Venue.not_supported()
+  @doc """
+  Creates a portfolio, which is what this venue calls a sub-account.
 
+  `opts[:name]` is required. See `DpExchange.Coinbase.Rest.create_portfolio/2`.
+
+  **Advanced Trade has no notion of creating an *account*** — an account is opened by a
+  person with Coinbase. A portfolio is the subdivision an API can make, and it is what this
+  callback means here.
+  """
   @impl true
-  def rename_account(_id, _name, _opts), do: Venue.not_supported()
+  def create_account(opts),
+    do: Rest.create_portfolio(Keyword.get(opts, :credentials, %{}), opts)
+
+  @doc """
+  Renames a portfolio.
+
+  See `DpExchange.Coinbase.Rest.rename_portfolio/4`. The only thing this edits is the name.
+  """
+  @impl true
+  def rename_account(id, name, opts),
+    do: Rest.rename_portfolio(Keyword.get(opts, :credentials, %{}), id, name, opts)
 
   @impl true
   def get_roles(_opts), do: Venue.not_supported()
