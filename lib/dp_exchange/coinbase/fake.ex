@@ -130,8 +130,28 @@ defmodule DpExchange.Coinbase.Fake do
          {:range_too_wide, requested: requested(range, timeframe), max: Rest.max_candles()}}
 
       true ->
-        {:ok, [elem(get_price(symbol, []), 1)]}
+        # A bar, not a quote. The fake returned `get_price/2`'s `Quote` here, which agreed
+        # with the real package's own defect — a suite reproducing the bug it is meant to
+        # catch.
+        {:ok, [fake_candle(symbol, timeframe)]}
     end
+  end
+
+  defp fake_candle(symbol, timeframe) do
+    price = Decimal.new(@price[symbol])
+
+    %Types.Candle{
+      symbol: symbol,
+      timeframe: timeframe,
+      opened_at: @at,
+      # A bar with a real range, so a caller reading `high` gets something a `close` is not.
+      open: Decimal.sub(price, Decimal.new("5")),
+      high: Decimal.add(price, Decimal.new("12")),
+      low: Decimal.sub(price, Decimal.new("9")),
+      close: price,
+      volume: Decimal.new("3.5"),
+      provider: :coinbase
+    }
   end
 
   @impl true
@@ -374,6 +394,8 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
+  def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
+  @impl true
   def cancel_order(_credentials, order_id, _opts \\ []) do
     # The fake refuses the same way the venue does: an order that is not open cannot be
     # cancelled, and saying :ok would let a consumer's retry logic go untested.
@@ -441,6 +463,50 @@ defmodule DpExchange.Coinbase.Fake do
       unsupported ->
         {:error, {:unsupported_order_edit, unsupported}}
     end
+  end
+
+  @impl true
+  def preview_replace(_credentials, order_id, changes, _opts \\ []) do
+    # The same edit surface replace_order/4 enforces — price and size only. Anything else is
+    # an edit the venue refuses, and a fake that priced it would let a consumer's suite go
+    # green on a call that cannot be made.
+    case Map.keys(changes) -- [:price, :quantity] do
+      [] ->
+        {:ok,
+         %{
+           order_total: Decimal.new("20000.00"),
+           commission_total: Decimal.new("10.00"),
+           base_size: Map.get(changes, :quantity),
+           quote_size: nil,
+           best_bid: Decimal.new("39990"),
+           best_ask: Decimal.new("40010"),
+           average_filled_price: Decimal.new("40000"),
+           order_margin_total: nil,
+           slippage: Decimal.new("0.001"),
+           order_id: order_id
+         }}
+
+      unsupported ->
+        {:error, {:unsupported_order_edit, unsupported}}
+    end
+  end
+
+  @impl true
+  def close_position(_credentials, symbol, _opts \\ []) do
+    # Side stays nil, as it does in the real package: the venue never states it and this
+    # package never read the position. A fake that filled in :sell would teach a consumer
+    # to rely on a field that is nil in production.
+    {:ok,
+     %Types.Order{
+       id: "fake-close-1",
+       symbol: symbol,
+       side: nil,
+       order_type: :market,
+       time_in_force: :ioc,
+       quantity: Decimal.new("1"),
+       status: :pending,
+       provider: :coinbase
+     }}
   end
 
   defp fake_combination(request) do

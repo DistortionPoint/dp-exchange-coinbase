@@ -116,7 +116,7 @@ defmodule DpExchange.Coinbase.Rest do
       native = SymbolFormat.to_exchange_symbol(symbol)
 
       case request(:get, "/market/products/#{native}/candles", nil, opts, params) do
-        {:ok, %{body: body}} -> to_candles(body, symbol)
+        {:ok, %{body: body}} -> to_candles(body, symbol, timeframe)
         {:error, reason} -> classify(reason)
       end
     end
@@ -296,23 +296,58 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp top_of_book_time(_body), do: nil
 
-  defp to_candles(%{"candles" => candles}, symbol) do
-    {:ok,
-     candles
-     |> Enum.map(fn candle ->
-       %Types.Quote{
-         symbol: symbol,
-         price: decimal(candle["close"]),
-         volume: decimal(candle["volume"]),
-         # The venue's own bucket start, used as-is. Not re-derived, not rounded.
-         timestamp: candle["start"] |> String.to_integer() |> DateTime.from_unix!(),
-         provider: :coinbase
-       }
-     end)
-     |> Enum.sort_by(& &1.timestamp, DateTime)}
+  # **This built `Quote`s with `price: close` until 2026-09-01.** The venue sends open,
+  # high, low and close; three of them were discarded here, at the boundary, where no
+  # caller could see it happen. Every value that came out was real, and a caller reading
+  # `price` had no way to learn it was holding one corner of a bar.
+  #
+  # It is the same defect 2.10 of the coverage plan found in Schwab, and the reasoning
+  # behind it was the same: "a bar's price, for a series, is where it ended".
+  defp to_candles(%{"candles" => candles}, symbol, timeframe) do
+    candles
+    |> Enum.reduce_while({:ok, []}, fn candle, {:ok, acc} ->
+      case to_candle(candle, symbol, timeframe) do
+        {:ok, bar} -> {:cont, {:ok, [bar | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, bars} -> {:ok, bars |> Enum.reverse() |> Enum.sort_by(& &1.opened_at, DateTime)}
+      error -> error
+    end
   end
 
-  defp to_candles(_body, _symbol), do: {:error, :unexpected_response_shape}
+  defp to_candles(_body, _symbol, _timeframe), do: {:error, :unexpected_response_shape}
+
+  defp to_candle(candle, symbol, timeframe) do
+    with {:ok, opened_at} <- candle_start(candle["start"]) do
+      {:ok,
+       %Types.Candle{
+         symbol: symbol,
+         timeframe: timeframe,
+         # The venue's own bucket start, used as-is. Not re-derived, not rounded.
+         opened_at: opened_at,
+         open: decimal(candle["open"]),
+         high: decimal(candle["high"]),
+         low: decimal(candle["low"]),
+         close: decimal(candle["close"]),
+         volume: decimal(candle["volume"]),
+         provider: :coinbase
+       }}
+    end
+  end
+
+  # An undated bar cannot be placed in a series, and the local clock would place it wrongly
+  # while looking right. Refuse instead.
+  defp candle_start(start) when is_binary(start) do
+    case Integer.parse(start) do
+      {seconds, ""} -> {:ok, DateTime.from_unix!(seconds)}
+      _not_an_epoch -> {:error, :missing_venue_timestamp}
+    end
+  end
+
+  defp candle_start(start) when is_integer(start), do: {:ok, DateTime.from_unix!(start)}
+  defp candle_start(_absent), do: {:error, :missing_venue_timestamp}
 
   # `nil` rather than zero for an absent number. Zero is a price, and a venue that did
   # not report volume has not reported zero volume.
@@ -758,6 +793,137 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp preview_result(_other), do: {:error, :unexpected_response_shape}
+
+  @doc """
+  Prices an amendment to a working order **without making it**.
+
+  `/orders/edit_preview` takes the same body as `/orders/edit` and answers with what the
+  amended order would cost. The reason this is not `preview_order/3` with an id: the venue
+  prices the amendment against the resting order's own state, including whatever of it has
+  already filled. Asking what a fresh order of the new size would cost is a different
+  question with a different answer.
+
+  Accepts the same changes `replace_order/4` does — `:price` and `:quantity`, at least one
+  of them — and refuses anything else here rather than sending it and reading the venue's
+  business error.
+
+  **The response's `errors` array is the refusal.** As with `/orders/preview`, an HTTP 200
+  carrying errors is the venue saying no; this returns `{:refused, …}` rather than an `:ok`
+  a caller would read as a green light.
+  """
+  @spec preview_replace(map(), String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def preview_replace(credentials, order_id, changes, opts) do
+    with :ok <- editable_changes(changes) do
+      body =
+        %{"order_id" => order_id}
+        |> put_unless_nil("price", Map.get(changes, :price))
+        |> put_unless_nil("size", Map.get(changes, :quantity))
+
+      case post_json("/orders/edit_preview", body, credentials, opts) do
+        {:ok, %{body: response}} -> edit_preview_result(response)
+        {:error, reason} -> classify(reason)
+      end
+    end
+  end
+
+  defp edit_preview_result(%{"errors" => errors}) when is_list(errors) and errors != [] do
+    {:refused, {:edit_preview_rejected, errors}}
+  end
+
+  defp edit_preview_result(%{} = response) do
+    {:ok,
+     %{
+       order_total: decimal(response["order_total"]),
+       commission_total: decimal(response["commission_total"]),
+       base_size: decimal(response["base_size"]),
+       quote_size: decimal(response["quote_size"]),
+       best_bid: decimal(response["best_bid"]),
+       best_ask: decimal(response["best_ask"]),
+       average_filled_price: decimal(response["average_filled_price"]),
+       order_margin_total: decimal(response["order_margin_total"]),
+       slippage: decimal(response["slippage"])
+     }}
+  end
+
+  defp edit_preview_result(_other), do: {:error, :unexpected_response_shape}
+
+  @doc """
+  Flattens an open position on `symbol` by having the venue place the closing order.
+
+  **This places an order.** The venue works out the side and the size from the position it
+  holds, which is the whole point: a caller doing `get_positions/1` then `place_order/3`
+  sizes against the position as of its last read, and a position that moved in between
+  leaves a residue or overshoots into a position the other way. Only the venue closes to
+  exactly zero.
+
+  `size` is optional and partial-closes when given, in **contracts**, not base units — the
+  venue's own wording. Omitted, the whole position goes.
+
+  The response envelope is `/orders`'s, so a refusal arrives as a `200` with
+  `"success" => false` and is returned as `{:refused, …}`.
+
+  **The returned `Order` carries no side.** The venue does not echo one and this package
+  will not infer it: the side of a closing order is the opposite of a position whose
+  direction was never read here, and guessing it is exactly the substitution this family
+  refuses.
+  """
+  @spec close_position(map(), String.t(), keyword()) ::
+          {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
+  def close_position(credentials, symbol, opts) do
+    body =
+      %{
+        "client_order_id" => Keyword.get(opts, :client_order_id) || generate_client_order_id(),
+        "product_id" => SymbolFormat.to_exchange_symbol(symbol)
+      }
+      |> put_unless_nil("size", Keyword.get(opts, :size))
+
+    case post_json("/orders/close_position", body, credentials, opts) do
+      {:ok, %{body: response}} -> to_closing_order(response, symbol)
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  defp to_closing_order(%{"success" => true, "success_response" => success} = response, symbol) do
+    # The venue echoes the order it placed in `order_configuration`, which is the only
+    # statement of what this order *is* — the caller never said. Read from there rather
+    # than assumed, and `nil` for anything it does not name.
+    {type, tif, quantity} = closing_configuration(response["order_configuration"])
+
+    {:ok,
+     %Types.Order{
+       id: success["order_id"],
+       symbol: symbol,
+       # **Not inferred.** A closing order's side is the opposite of the position's, and
+       # this package never read the position — the venue did. Filling in `:sell` because
+       # closing is usually selling is the substitution this family refuses.
+       side: nil,
+       order_type: type,
+       time_in_force: tif,
+       quantity: quantity,
+       status: :pending,
+       provider: :coinbase
+     }}
+  end
+
+  defp to_closing_order(%{"success" => false} = response, _symbol) do
+    {:refused, {:close_rejected, failure_reason(response)}}
+  end
+
+  defp to_closing_order(_other, _symbol), do: {:error, :unexpected_response_shape}
+
+  # `@configurations` read backwards. The venue's single key names the type and the
+  # time-in-force at once, so one lookup answers both — and a key this package does not know
+  # answers neither rather than the nearest pair.
+  @configuration_names Map.new(@configurations, fn {pair, name} -> {name, pair} end)
+
+  defp closing_configuration(%{} = configuration) when map_size(configuration) == 1 do
+    [{name, leaf}] = Map.to_list(configuration)
+    {type, tif} = Map.get(@configuration_names, name, {nil, nil})
+    {type, tif, decimal(is_map(leaf) && leaf["base_size"])}
+  end
+
+  defp closing_configuration(_absent), do: {nil, nil, nil}
 
   @doc """
   Changes the price or size of a working order.

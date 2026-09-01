@@ -20,6 +20,50 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+- **`preview_replace/4` and `close_position/3`.** Two documented endpoints this package had
+  no facade for.
+
+  `POST /orders/edit_preview` prices an amendment before it is made. It is not
+  `preview_order/3` with an order id: the venue prices the amendment against the resting
+  order's own state, including whatever of it has already filled, and its response carries
+  `average_filled_price` and `order_margin_total` — numbers a fresh order does not have.
+  It takes the same `:price` / `:quantity` change set `replace_order/4` does and refuses
+  anything else before the request.
+
+  `POST /orders/close_position` flattens a position by having the venue place the closing
+  order. **The returned `Order` carries no side.** The venue never states one, and it
+  worked the side out from a position this package did not read — filling in `:sell`
+  because closing is usually selling is wrong exactly where it matters, on a short. The
+  order type, time in force and size *are* read, from the `order_configuration` the venue
+  echoes back, and a configuration key this package does not recognise leaves them `nil`
+  rather than picking the nearest.
+
+### Fixed
+
+- **`cancel_all_orders/2` is declared unsupported, with the reason checked.**
+  `POST /orders/batch_cancel` takes an explicit `order_ids` list — it is the endpoint
+  `cancel_order/3` already uses, one id at a time. There is no "cancel everything" call
+  here, and assembling one from `get_orders/2` plus a batch would be N partial outcomes
+  with no way to reach an order that appeared between the listing and the cancel.
+
+- **BREAKING: `get_historical_prices/4` returns `Core.Types.Candle`. It was returning
+  `Quote`s with `price: close`.**
+
+  The venue sends open, high, low and close for every bar. Three of them were discarded
+  here, at the boundary, where no caller could see it happen — and everything that came out
+  was a real number, so nothing looked wrong. A caller reading `price` was holding one
+  corner of a bar with no way to learn it.
+
+  **This is the same defect the coverage plan's 2.10 found in Schwab**, with the same
+  reasoning behind it, still live here after that one was fixed. The fake had it too: it
+  returned `get_price/2`'s `Quote`, so the suite agreed with the bug it existed to catch.
+
+  Bars now carry all four prices and `:opened_at` — the venue's own bucket start, used
+  as-is. A bar the venue did not date is refused with `:missing_venue_timestamp` rather
+  than stamped with the local clock, which would place it wrongly while looking right.
+
+
 ### Fixed
 - **This package claimed the venue has no order preview and no atomic replace. It has
   both.** `supports_order_preview` and `supports_order_replace` were declared `false` on

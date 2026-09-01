@@ -83,9 +83,13 @@ defmodule DpExchange.Coinbase do
     {:create_account, 1},
     {:rename_account, 3},
     {:get_roles, 1},
-    # Neither exists on this venue. `preview_order/3` has no endpoint at all;
-    # `replace_order/4` means a caller cancels and re-places, which is NOT equivalent —
-    # it opens a window in which no order is live.
+    # **No bulk cancel here — checked against the venue's reference on 2026-09-01.**
+    # `POST /orders/batch_cancel` takes an explicit `order_ids` list; it is the endpoint
+    # `cancel_order/3` already uses, one id at a time. There is no "cancel everything"
+    # call, and building one from `get_orders/2` plus a batch of ids would be N partial
+    # outcomes with no way to reach an order that appeared between the listing and the
+    # cancel — a bulk cancel that is not one.
+    {:cancel_all_orders, 2},
     {:get_transfers, 2},
     {:quantization, 1},
     {:get_market_overview, 1},
@@ -238,6 +242,29 @@ defmodule DpExchange.Coinbase do
   @impl true
   def replace_order(credentials, order_id, changes, opts \\ []),
     do: Rest.replace_order(credentials, order_id, changes, opts)
+
+  @doc """
+  Prices an amendment to a working order without making it.
+
+  See `DpExchange.Coinbase.Rest.preview_replace/4` — in particular why this is not
+  `preview_order/3` with an order id.
+  """
+  @impl true
+  def preview_replace(credentials, order_id, changes, opts \\ []),
+    do: Rest.preview_replace(credentials, order_id, changes, opts)
+
+  @doc """
+  Flattens an open position by having the venue place the closing order.
+
+  See `DpExchange.Coinbase.Rest.close_position/3`, including why the returned order carries
+  no side.
+  """
+  @impl true
+  def close_position(credentials, symbol, opts \\ []),
+    do: Rest.close_position(credentials, symbol, opts)
+
+  @impl true
+  def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
 
   @impl true
   def cancel_order(credentials, order_id, opts \\ []),

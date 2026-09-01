@@ -70,6 +70,49 @@ defmodule DpExchange.Coinbase.FakeTest do
     end
   end
 
+  describe "candles" do
+    test "the fake returns bars, not quotes" do
+      # It returned `get_price/2`'s Quote here, which agreed with the real package's own
+      # `price: close` defect — a suite reproducing the bug it exists to catch.
+      assert {:ok, [bar]} = Fake.get_historical_prices("BTC-USD", "1h")
+
+      assert %Types.Candle{} = bar
+      assert bar.timeframe == "1h"
+      assert Types.Candle.coherent?(bar)
+    end
+
+    test "the bar has a real range, so high is not close" do
+      assert {:ok, [bar]} = Fake.get_historical_prices("BTC-USD", "1h")
+
+      refute Decimal.equal?(bar.high, bar.close)
+      refute Decimal.equal?(bar.low, bar.open)
+    end
+  end
+
+  describe "the two endpoints the family had no facade for" do
+    test "close_position returns an order with no side" do
+      # nil in the fake because it is nil in production: the venue never states the side of
+      # a closing order, and a fake that filled in :sell would teach a consumer to rely on
+      # a field that is not there.
+      assert {:ok, %Types.Order{} = order} = Fake.close_position(%{}, "BTC-USD")
+
+      assert order.side == nil
+      assert order.status == :pending
+      assert order.provider == :coinbase
+    end
+
+    test "preview_replace prices price and size changes" do
+      assert {:ok, preview} = Fake.preview_replace(%{}, "abc", %{price: Decimal.new("41000")})
+      assert Decimal.equal?(preview.order_total, Decimal.new("20000.00"))
+      assert preview.order_id == "abc"
+    end
+
+    test "preview_replace refuses an edit the venue refuses" do
+      assert {:error, {:unsupported_order_edit, [:side]}} =
+               Fake.preview_replace(%{}, "abc", %{side: :sell})
+    end
+  end
+
   describe "streaming" do
     test "subscribe pushes immediately, as a first tick would" do
       assert :ok = Fake.subscribe(~w(BTC-USD), to: self())

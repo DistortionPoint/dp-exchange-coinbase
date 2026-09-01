@@ -139,9 +139,62 @@ defmodule DpExchange.Coinbase.RestTest do
                  retry_attempts: 0
                )
 
-      assert first.timestamp == DateTime.from_unix!(1_787_928_660)
-      assert second.timestamp == DateTime.from_unix!(1_787_928_720)
-      assert DpExchange.Core.Timeframe.aligned?(first.timestamp, "1m")
+      assert first.opened_at == DateTime.from_unix!(1_787_928_660)
+      assert second.opened_at == DateTime.from_unix!(1_787_928_720)
+      assert DpExchange.Core.Timeframe.aligned?(first.opened_at, "1m")
+    end
+
+    test "all four prices survive the boundary" do
+      # This package built `Quote`s with `price: close` until 2026-09-01, discarding open,
+      # high and low where no caller could see it happen. Every value that came out was
+      # real; a caller reading `price` simply had no way to learn it held one corner of a
+      # bar. This is the assertion that would have caught it.
+      assert {:ok, [first | _rest]} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: responding(@candles),
+                 retry_attempts: 0
+               )
+
+      assert %Types.Candle{} = first
+      assert Decimal.equal?(first.open, Decimal.new("1"))
+      assert Decimal.equal?(first.high, Decimal.new("2"))
+      assert Decimal.equal?(first.low, Decimal.new("0.5"))
+      assert Decimal.equal?(first.close, Decimal.new("1.4"))
+      assert Decimal.equal?(first.volume, Decimal.new("11"))
+      assert first.timeframe == "1m"
+      refute Map.has_key?(first, :price)
+    end
+
+    test "a bar the venue did not date is refused, never stamped with the local clock" do
+      # An undated bar cannot be placed in a series, and a local timestamp would place it
+      # wrongly while looking entirely right.
+      undated = %{"candles" => [%{"open" => "1", "high" => "2", "low" => "1", "close" => "1"}]}
+
+      assert {:error, :missing_venue_timestamp} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: responding(undated),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a start that is not an epoch is refused rather than parsed loosely" do
+      bad = %{"candles" => [%{"start" => "2026-08-28", "open" => "1", "close" => "1"}]}
+
+      assert {:error, :missing_venue_timestamp} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: responding(bad),
+                 retry_attempts: 0
+               )
+    end
+
+    test "the venue's own bars are internally consistent, and this says so" do
+      assert {:ok, bars} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: responding(@candles),
+                 retry_attempts: 0
+               )
+
+      assert Enum.all?(bars, &Types.Candle.coherent?/1)
     end
 
     test "a width Coinbase does not serve is an ERROR, never the nearest one" do
