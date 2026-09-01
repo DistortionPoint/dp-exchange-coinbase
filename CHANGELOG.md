@@ -22,6 +22,41 @@ acceptable changelog line.
 
 ### Added
 
+- **Coinbase Prime custodial staking** — `DpExchange.Coinbase.Prime`, all nine endpoints,
+  with `stake/3` and `unstake/3` now live on the facade.
+
+  **A different product, host and signing scheme.** Everything else in this package talks to
+  `api.coinbase.com/api/v3/brokerage` and signs a CDP JWT; Prime talks to
+  `api.prime.coinbase.com/v1` and signs an HMAC under an access key, a passphrase and a
+  signing key that Advanced Trade neither issues nor accepts. Two of the three credentials
+  is `{:error, :missing_prime_credentials}` rather than a request that is signed and wrong.
+
+  **These are not the CDP Staking API.** Those seven are on-chain: they take a wallet
+  address and return **unsigned transactions for the caller to sign and broadcast**.
+  Reaching them through `stake/3` would be this family's recurring failure at its most
+  expensive — a caller believing it had staked while holding a transaction nobody sent.
+
+  **Two scopes, and this package picks neither for you.** Prime publishes every staking
+  operation across a portfolio and again on one wallet, and the two are not interchangeable:
+  a portfolio-scoped unstake redeems across every wallet in the portfolio. `stake/3` and
+  `unstake/3` follow only what the caller said — a `:wallet_id` means the wallet, its
+  absence means the portfolio — and `opts[:portfolio_id]` is required, refused as
+  `{:error, :missing_portfolio}` before a request is made.
+
+  Four callbacks stay declared **absent with the reason**: Prime publishes no rate schedule
+  and no staking history at either scope; `staking/status` names one wallet and is not
+  "every staked position, one per asset" (reachable as `Prime.staking_status/4`); and
+  `claim_rewards` is a write that moves accrued rewards, not a report of what accrued.
+
+  **Nothing here has been run against Prime.** The paths are read from the vendor's pages on
+  2026-08-31 — thirteen pages, nine endpoints, four pairs documenting one path under two
+  names — and the signing scheme from Prime's authentication documentation. This repository
+  holds no Prime credential and money-moving endpoints are answered in production, not by a
+  test here. Responses come back as the venue's own maps for the same reason: a
+  `Types.StakingBalance` built from an unverified field name is a plausible number in the
+  wrong field.
+
+
 - **Payment methods and the internal move**: `list_payment_methods/2`,
   `get_payment_method/3` (`GET /payment_methods`, `GET /payment_methods/{id}`) and
   `transfer_internal/4` (`POST /portfolios/move_funds`).

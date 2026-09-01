@@ -44,7 +44,7 @@ defmodule DpExchange.Coinbase do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Coinbase.{Feed, Rest, Supervisor}
+  alias DpExchange.Coinbase.{Feed, Prime, Rest, Supervisor}
   alias DpExchange.Core.{Capabilities, Venue}
 
   @unsupported [
@@ -53,12 +53,21 @@ defmodule DpExchange.Coinbase do
     {:get_positions, 1},
     {:get_funding, 2},
     {:get_contract_stats, 2},
+    # **Prime publishes staking; it does not publish these four.** `stake/3` and
+    # `unstake/3` are live against Prime — see `DpExchange.Coinbase.Prime` — and these are
+    # the reads that have no endpoint behind them:
+    #
+    # * no rate schedule is published at all
+    # * `staking/status` names **one wallet** and reports that wallet's state, which is not
+    #   "every staked position, one per asset". Returning it here would answer a narrower
+    #   question while looking like the wider one; it is reachable as
+    #   `Prime.staking_status/4`.
+    # * `claim_rewards` is a write that moves accrued rewards, not a report of what accrued
+    # * there is no staking history endpoint at either scope
     {:get_staking_rates, 1},
     {:get_staking_balances, 1},
     {:get_staking_rewards, 1},
     {:get_staking_history, 1},
-    {:stake, 3},
-    {:unstake, 3},
     # **Coinbase's convert is the two-step form, not the one-step one.** Advanced Trade
     # publishes `POST /convert/quote`, `POST /convert/trade/{id}` and
     # `GET /convert/trade/{id}` — quote, commit, read — which is `quote_conversion/4` and
@@ -435,11 +444,70 @@ defmodule DpExchange.Coinbase do
   @impl true
   def get_staking_history(_opts), do: Venue.not_supported()
 
-  @impl true
-  def stake(_asset, _amount, _opts), do: Venue.not_supported()
+  @doc """
+  Stakes `amount` of `asset` through **Coinbase Prime**. **This moves funds.**
 
+  Prime, not Advanced Trade: a different host, a different signing scheme and a separate
+  credential triple. `opts[:credentials]` carries Prime's `%{access_key:, passphrase:,
+  signing_key:}`; the CDP key pair the rest of this package uses is not accepted there.
+
+  **`opts[:portfolio_id]` is required and is not defaulted.** Missing it is
+  `{:error, :missing_portfolio}` before a request is made — picking the first portfolio
+  would stake in one the caller never named.
+
+  **The scope follows what the caller said, and nothing more.** With `opts[:wallet_id]`
+  this stakes on that wallet; without, it stakes across the portfolio. The two are
+  different operations, so neither is inferred from the other.
+
+  See `DpExchange.Coinbase.Prime` for the endpoints themselves and for what has and has
+  not been measured.
+  """
   @impl true
-  def unstake(_asset, _amount, _opts), do: Venue.not_supported()
+  def stake(asset, amount, opts) do
+    prime_write(:stake, asset, amount, opts)
+  end
+
+  @doc """
+  Redeems `amount` of a staked `asset` through **Coinbase Prime**.
+
+  **Returns before the redemption completes.** The asset unbonds on the chain's schedule
+  and arrives in parts; `DpExchange.Coinbase.Prime.unstake_status/4` is what reports
+  progress. A caller treating this return value as settled will spend an asset it does not
+  have yet.
+
+  Scope and credentials work exactly as they do on `stake/3`.
+  """
+  @impl true
+  def unstake(asset, amount, opts) do
+    prime_write(:unstake, asset, amount, opts)
+  end
+
+  defp prime_write(operation, asset, amount, opts) do
+    credentials = Keyword.get(opts, :credentials, %{})
+
+    case {Keyword.get(opts, :portfolio_id), Keyword.get(opts, :wallet_id)} do
+      {nil, _wallet} ->
+        {:error, :missing_portfolio}
+
+      {portfolio, nil} ->
+        prime_portfolio(operation, credentials, portfolio, asset, amount, opts)
+
+      {portfolio, wallet} ->
+        prime_wallet(operation, credentials, portfolio, wallet, asset, amount, opts)
+    end
+  end
+
+  defp prime_portfolio(:stake, credentials, portfolio, asset, amount, opts),
+    do: Prime.stake_portfolio(credentials, portfolio, asset, amount, opts)
+
+  defp prime_portfolio(:unstake, credentials, portfolio, asset, amount, opts),
+    do: Prime.unstake_portfolio(credentials, portfolio, asset, amount, opts)
+
+  defp prime_wallet(:stake, credentials, portfolio, wallet, asset, amount, opts),
+    do: Prime.stake_wallet(credentials, portfolio, wallet, asset, amount, opts)
+
+  defp prime_wallet(:unstake, credentials, portfolio, wallet, asset, amount, opts),
+    do: Prime.unstake_wallet(credentials, portfolio, wallet, asset, amount, opts)
 
   @impl true
   def quote_conversion(_from, _to, _amount, _opts), do: Venue.not_supported()

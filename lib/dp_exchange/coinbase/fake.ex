@@ -452,10 +452,48 @@ defmodule DpExchange.Coinbase.Fake do
   def get_staking_history(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def stake(_asset, _amount, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def stake(asset, amount, opts \\ []) do
+    # Same guard as the package: a portfolio or nothing. A fake that defaulted one would
+    # let a consumer ship a stake into a portfolio it never named.
+    with {:ok, portfolio} <- fake_portfolio(opts) do
+      {:ok,
+       %{
+         "currency" => String.upcase(asset),
+         "amount" => Decimal.to_string(amount, :normal),
+         "portfolio_id" => portfolio,
+         "wallet_id" => Keyword.get(opts, :wallet_id),
+         "scope" => fake_scope(opts)
+       }}
+    end
+  end
 
   @impl true
-  def unstake(_asset, _amount, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def unstake(asset, amount, opts \\ []) do
+    with {:ok, portfolio} <- fake_portfolio(opts) do
+      # Nothing has arrived. An unstake that reported itself settled would teach a consumer
+      # to spend an asset that is still unbonding.
+      {:ok,
+       %{
+         "currency" => String.upcase(asset),
+         "amount" => Decimal.to_string(amount, :normal),
+         "portfolio_id" => portfolio,
+         "wallet_id" => Keyword.get(opts, :wallet_id),
+         "scope" => fake_scope(opts),
+         "settled" => false
+       }}
+    end
+  end
+
+  defp fake_portfolio(opts) do
+    case Keyword.get(opts, :portfolio_id) do
+      nil -> {:error, :missing_portfolio}
+      portfolio -> {:ok, portfolio}
+    end
+  end
+
+  defp fake_scope(opts) do
+    if Keyword.get(opts, :wallet_id), do: "wallet", else: "portfolio"
+  end
 
   @impl true
   def quote_conversion(_from, _to, _amount, _opts \\ []),
