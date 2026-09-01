@@ -365,4 +365,95 @@ defmodule DpExchange.Coinbase.OrderBookTest do
                Rest.get_trades("BTC-USD", plug: responding(%{}), retry_attempts: 0)
     end
   end
+
+  describe "quantization — four increments, and they are not interchangeable" do
+    @product %{
+      "product_id" => "BTC-USD",
+      "base_increment" => "0.00000001",
+      "quote_increment" => "0.01",
+      "base_min_size" => "0.000016",
+      "quote_min_size" => "1",
+      "base_max_size" => "3500",
+      "quote_max_size" => "150000000",
+      "status" => "online"
+    }
+
+    test "the PRICE increment is quote_increment, not base_increment" do
+      # A caller rounding a price to the base increment produces an order the venue rejects
+      # on a field it did not name.
+      assert {:ok, q} =
+               Rest.quantization("BTC-USD", plug: responding(@product), retry_attempts: 0)
+
+      assert Decimal.equal?(q.price_increment, Decimal.new("0.01"))
+      assert Decimal.equal?(q.quantity_increment, Decimal.new("0.00000001"))
+      refute Decimal.equal?(q.price_increment, q.quantity_increment)
+    end
+
+    test "both minima are carried, because they bound different things" do
+      # base_min_size is units of the base asset; quote_min_size is cash. A market order
+      # sized in cash is bounded by the second and a limit order in units by the first.
+      assert {:ok, q} =
+               Rest.quantization("BTC-USD", plug: responding(@product), retry_attempts: 0)
+
+      assert Decimal.equal?(q.min_quantity, Decimal.new("0.000016"))
+      assert Decimal.equal?(q.min_quote_size, Decimal.new("1"))
+    end
+
+    test "the status is the venue's own word, not a boolean" do
+      # A boolean loses the difference between a product that is paused and one that is gone.
+      assert {:ok, q} =
+               Rest.quantization("BTC-USD",
+                 plug: responding(%{@product | "status" => "delisted"}),
+                 retry_attempts: 0
+               )
+
+      assert q.status == "delisted"
+    end
+
+    test "the public path is used without a credential and the private one with" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(@product))
+      end
+
+      assert {:ok, _q} = Rest.quantization("BTC-USD", plug: plug, retry_attempts: 0)
+      assert_receive {:path, public}
+      assert public =~ "/market/products/BTC-USD"
+
+      credentials = %{
+        api_key: "organizations/x/apiKeys/y",
+        api_secret: "-----BEGIN EC PRIVATE KEY-----"
+      }
+
+      assert {:ok, _q2} =
+               Rest.quantization("BTC-USD",
+                 credentials: credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, private}
+      refute private =~ "/market/"
+    end
+
+    test "get_product/2 returns the whole record, which quantization does not" do
+      # A caller choosing a market wants the status and the display names; a caller rounding
+      # an order does not.
+      assert {:ok, product} =
+               Rest.get_product("BTC-USD", plug: responding(@product), retry_attempts: 0)
+
+      assert product["product_id"] == "BTC-USD"
+      assert product["base_max_size"] == "3500"
+    end
+
+    test "a body that is not a product is unreadable" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.quantization("BTC-USD", plug: responding(%{}), retry_attempts: 0)
+    end
+  end
 end

@@ -390,7 +390,24 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def market_status(_opts), do: {:ok, :open}
   @impl true
-  def quantization(_symbol), do: Venue.not_supported()
+  def quantization(symbol) do
+    if Map.has_key?(@price, symbol) do
+      {:ok,
+       %{
+         # Deliberately different from quantity_increment: a fake where they match would
+         # never catch a caller rounding a price to the base increment.
+         price_increment: Decimal.new("0.01"),
+         quantity_increment: Decimal.new("0.00000001"),
+         min_quantity: Decimal.new("0.00000001"),
+         min_quote_size: Decimal.new("1"),
+         max_quantity: Decimal.new("1000"),
+         max_quote_size: Decimal.new("50000000"),
+         status: "online"
+       }}
+    else
+      {:refused, :not_listed}
+    end
+  end
 
   defp requested(range, timeframe) do
     finish = Keyword.get(range, :end, @at)

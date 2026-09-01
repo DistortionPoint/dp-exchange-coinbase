@@ -22,6 +22,24 @@ acceptable changelog line.
 
 ### Added
 
+- **`quantization/1` — what the venue will actually accept**, and `Rest.get_product/2` for
+  the whole record. Both were `:unsupported`.
+
+  **The venue names four increments and they are not interchangeable.** `quote_increment`
+  bounds the *price* and `base_increment` the *quantity*; a caller rounding a price to the
+  base increment produces an order the venue rejects on a field it did not name. Both
+  minima are carried too — `base_min_size` is units and `quote_min_size` is cash, and a
+  market order sized in cash is bounded by the second where a limit order in units is
+  bounded by the first.
+
+  `status` is the venue's own word, unmapped: a boolean would lose the difference between a
+  product that is paused and one that is gone.
+
+- **`get_symbols/1` reads the authenticated catalogue when a credential is present.** Third
+  and last of the public/private path corrections — the book, the candles and now the
+  product list were all reading `/market/…` regardless.
+
+
 - **`get_trades/2` — the public tape.** `get_price/2` already reads this payload and keeps
   only the newest print, because a `Quote` has room for one price; the rest were discarded
   at the boundary. This returns them.

@@ -135,7 +135,12 @@ defmodule DpExchange.Coinbase.Rest do
   @doc "Every product Coinbase lists, as canonical symbols."
   @spec get_symbols(keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def get_symbols(opts) do
-    case request(:get, "/market/products", nil, opts) do
+    # Public and private again: the venue publishes the catalogue at both paths, and a
+    # caller holding a credential should see the authenticated view.
+    credentials = Keyword.get(opts, :credentials)
+    path = if credentials, do: "/products", else: "/market/products"
+
+    case request(:get, path, credentials, opts) do
       {:ok, %{body: %{"products" => products}}} ->
         {:ok, Enum.map(products, &SymbolFormat.to_canonical_symbol(&1["product_id"]))}
 
@@ -375,6 +380,74 @@ defmodule DpExchange.Coinbase.Rest do
   # Includes the venue's own `UNKNOWN_LIQUIDITY_INDICATOR`, which is the venue saying it
   # does not know. Neither :maker nor :taker is the honest answer to that.
   defp liquidity_atom(_other), do: nil
+
+  @doc """
+  What the venue will actually accept for `symbol` — `GET /products/{product_id}`.
+
+  The venue names four increments and this carries all of them, because **they are not
+  interchangeable**: `base_increment` bounds the *quantity* and `quote_increment` the
+  *price*, and a caller rounding a price to the base increment produces an order the venue
+  rejects on a field it did not name.
+
+  `base_min_size` and `quote_min_size` are also both published, and are minima on different
+  things — units of the base asset versus cash. A market order sized in cash is bounded by
+  the second and a limit order in units by the first.
+
+  ## The public and private paths again
+
+  `/market/products/{id}` without a credential, `/products/{id}` with one. Same rule as the
+  book and the candles: reading the public one while holding a credential silently forgoes
+  whatever the authenticated view adds.
+
+  `status` is the venue's own word — `online`, `delisted` and so on — carried unmapped. A
+  package that reduced it to a boolean would lose the difference between a product that is
+  paused and one that is gone.
+  """
+  @spec quantization(String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def quantization(symbol, opts) do
+    with {:ok, product} <- get_product(symbol, opts) do
+      {:ok,
+       %{
+         # The price's increment. NOT base_increment — rounding a price to that produces an
+         # order the venue rejects on a field it did not name.
+         price_increment: decimal(product["quote_increment"]),
+         quantity_increment: decimal(product["base_increment"]),
+         min_quantity: decimal(product["base_min_size"]),
+         # A separate minimum on a different thing: cash, not units.
+         min_quote_size: decimal(product["quote_min_size"]),
+         max_quantity: decimal(product["base_max_size"]),
+         max_quote_size: decimal(product["quote_max_size"]),
+         # The venue's own word, unmapped: a boolean would lose the difference between a
+         # product that is paused and one that is gone.
+         status: product["status"]
+       }}
+    end
+  end
+
+  @doc """
+  One product's full record, as the venue publishes it.
+
+  Separate from `quantization/2` because a product carries more than its increments — the
+  status, the display names, the 24-hour statistics — and a caller choosing a market wants
+  those where a caller rounding an order does not.
+  """
+  @spec get_product(String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_product(symbol, opts) do
+    native = SymbolFormat.to_exchange_symbol(symbol)
+    credentials = Keyword.get(opts, :credentials)
+
+    path =
+      if credentials, do: "/products/#{native}", else: "/market/products/#{native}"
+
+    case request(:get, path, credentials, opts) do
+      {:ok, %{body: %{"product_id" => _id} = product}} -> {:ok, product}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
   # --- internal ----------------------------------------------------------
 
   defp granularity_enum(timeframe) do

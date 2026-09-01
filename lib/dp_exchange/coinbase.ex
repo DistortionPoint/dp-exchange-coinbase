@@ -103,7 +103,6 @@ defmodule DpExchange.Coinbase do
     # cancel — a bulk cancel that is not one.
     {:cancel_all_orders, 2},
     {:get_transfers, 2},
-    {:quantization, 1},
     # **This venue runs no auctions and publishes no footprints.** A crypto book trades
     # continuously — there is no opening or closing auction to have an imbalance in — and
     # the venue publishes no volume-at-price split. Not "unimplemented": there is nothing
@@ -377,7 +376,13 @@ defmodule DpExchange.Coinbase do
   def market_status(_opts), do: {:ok, :open}
 
   @impl true
-  def quantization(_symbol), do: Venue.not_supported()
+  @doc """
+  What the venue will actually accept for `symbol`.
+
+  See `DpExchange.Coinbase.Rest.quantization/2` — in particular why the price and quantity
+  increments are different fields.
+  """
+  def quantization(symbol), do: Rest.quantization(symbol, [])
 
   # --- Declared but not yet implemented -----------------------------------
   #
