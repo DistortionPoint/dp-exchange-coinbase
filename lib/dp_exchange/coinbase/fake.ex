@@ -183,6 +183,41 @@ defmodule DpExchange.Coinbase.Fake do
     end
   end
 
+  @impl true
+  def get_trades(symbol, _opts \\ []) do
+    case Map.fetch(@price, symbol) do
+      {:ok, price} ->
+        # More than one print, because the whole point of the tape is that get_price/2
+        # keeps only the newest and this does not.
+        {:ok,
+         [
+           %Types.Trade{
+             id: "t-1",
+             symbol: symbol,
+             side: :buy,
+             price: Decimal.new(price),
+             quantity: Decimal.new("0.25"),
+             timestamp: @at,
+             broken: false,
+             provider: :coinbase
+           },
+           %Types.Trade{
+             id: "t-2",
+             symbol: symbol,
+             side: :sell,
+             price: Decimal.sub(Decimal.new(price), Decimal.new("1.50")),
+             quantity: Decimal.new("0.10"),
+             timestamp: DateTime.add(@at, -5, :second),
+             broken: false,
+             provider: :coinbase
+           }
+         ]}
+
+      :error ->
+        {:refused, :not_listed}
+    end
+  end
+
   defp book_side(mid, limit, direction) do
     for step <- 1..limit do
       offset = Decimal.mult(Decimal.new("0.50"), Decimal.new(step))
@@ -193,6 +228,12 @@ defmodule DpExchange.Coinbase.Fake do
 
   @impl true
   def get_market_overview(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_volume_profile(_symbol, _timeframe, _opts \\ []), do: Venue.not_supported()
   @impl true
   def list_instruments(_opts), do: Venue.not_supported()
   @impl true

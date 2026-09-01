@@ -472,6 +472,79 @@ defmodule DpExchange.Coinbase.Rest do
   defp to_quote(_body, _symbol), do: {:error, :unexpected_response_shape}
 
   @doc """
+  Recent public trades for `symbol` — the tape.
+
+  **`get_price/2` already reads this payload and keeps only the newest print.** The ticker
+  returns a `trades` array; a `Quote` has room for one price, so the rest were discarded at
+  the boundary. This returns them.
+
+  Not `get_trade_history/2`, which is the credential's own fills. The tape is everyone's
+  executions and has no order of yours behind it.
+
+  `opts[:limit]` is the venue's own, passed through. **Coinbase publishes no bust flag on
+  the ticker**, so `broken` is `false` on every print — a venue with nothing busted reports
+  nothing busted, which is the same answer, and `opts[:include_broken]` therefore changes
+  nothing here.
+  """
+  @spec get_trades(String.t(), keyword()) ::
+          {:ok, [Types.Trade.t()]} | {:error, term()} | {:refused, term()}
+  def get_trades(symbol, opts) do
+    native = SymbolFormat.to_exchange_symbol(symbol)
+    credentials = Keyword.get(opts, :credentials)
+
+    path =
+      if credentials,
+        do: "/products/#{native}/ticker",
+        else: "/market/products/#{native}/ticker"
+
+    params = put_unless_nil(%{}, "limit", Keyword.get(opts, :limit))
+
+    case request(:get, path, credentials, opts, params) do
+      {:ok, %{body: %{"trades" => trades}}} when is_list(trades) ->
+        decode_trades(trades, symbol)
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_response_shape}
+
+      {:error, reason} ->
+        classify(reason)
+    end
+  end
+
+  defp decode_trades(trades, symbol) do
+    trades
+    |> Enum.reduce_while({:ok, []}, fn trade, {:ok, acc} ->
+      case to_trade(trade, symbol) do
+        {:ok, decoded} -> {:cont, {:ok, [decoded | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, decoded} -> {:ok, Enum.reverse(decoded)}
+      error -> error
+    end
+  end
+
+  defp to_trade(trade, symbol) do
+    with {:ok, at} <- parse_time(trade["time"]) do
+      {:ok,
+       %Types.Trade{
+         id: trade["trade_id"],
+         symbol: symbol,
+         # The venue's `side` on a ticker trade is the taker's. `nil` for anything else
+         # rather than the nearer of the two.
+         side: side_atom(trade["side"]),
+         price: decimal(trade["price"]),
+         quantity: decimal(trade["size"]),
+         timestamp: at,
+         # No bust flag on this endpoint.
+         broken: false,
+         provider: :coinbase
+       }}
+    end
+  end
+
+  @doc """
   Best bid and ask for `symbol`, **with the sizes**.
 
   ## This used to read the ticker, and the ticker has no sizes

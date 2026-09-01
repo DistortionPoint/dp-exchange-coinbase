@@ -22,6 +22,15 @@ acceptable changelog line.
 
 ### Added
 
+- **`get_trades/2` — the public tape.** `get_price/2` already reads this payload and keeps
+  only the newest print, because a `Quote` has room for one price; the rest were discarded
+  at the boundary. This returns them.
+
+  Not `get_trade_history/2`, which is the credential's own fills. `broken` is `false` on
+  every print — the ticker publishes no bust flag, and a venue with nothing busted reports
+  nothing busted.
+
+
 - **`get_order_book/2` — depth, which this package declared `:unsupported`.**
   `GET /product_book` for a credential and `/market/product_book` without one — the venue
   publishes the same book twice, and reading the public one while holding a credential

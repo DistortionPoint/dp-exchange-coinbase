@@ -104,6 +104,12 @@ defmodule DpExchange.Coinbase do
     {:cancel_all_orders, 2},
     {:get_transfers, 2},
     {:quantization, 1},
+    # **This venue runs no auctions and publishes no footprints.** A crypto book trades
+    # continuously — there is no opening or closing auction to have an imbalance in — and
+    # the venue publishes no volume-at-price split. Not "unimplemented": there is nothing
+    # to implement.
+    {:get_auction_imbalance, 2},
+    {:get_volume_profile, 3},
     {:get_market_overview, 1},
     {:list_instruments, 1},
     {:get_fees, 2},
@@ -209,8 +215,23 @@ defmodule DpExchange.Coinbase do
   """
   def get_order_book(symbol, opts \\ []), do: Rest.get_order_book(symbol, opts)
 
+  @doc """
+  Recent public trades — the tape.
+
+  See `DpExchange.Coinbase.Rest.get_trades/2`: `get_price/2` reads the same payload and
+  keeps only the newest print.
+  """
+  @impl true
+  def get_trades(symbol, opts \\ []), do: Rest.get_trades(symbol, opts)
+
   @impl true
   def get_market_overview(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_volume_profile(_symbol, _timeframe, _opts \\ []), do: Venue.not_supported()
 
   @impl true
   def list_instruments(_opts), do: Venue.not_supported()

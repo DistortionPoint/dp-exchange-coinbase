@@ -172,6 +172,26 @@ defmodule DpExchange.Coinbase.FakeTest do
     end
   end
 
+  describe "the tape" do
+    test "more than one print comes back" do
+      # The whole point of the tape is that get_price/2 keeps only the newest and this does
+      # not. A fake with one print would never show the difference.
+      assert {:ok, trades} = Fake.get_trades("BTC-USD")
+
+      assert length(trades) == 2
+      assert Enum.map(trades, & &1.side) == [:buy, :sell]
+    end
+
+    test "an unlisted symbol is refused, not an empty tape" do
+      assert {:refused, :not_listed} = Fake.get_trades("NOPE-USD")
+    end
+
+    test "no print is marked broken — this venue publishes no bust flag" do
+      assert {:ok, trades} = Fake.get_trades("BTC-USD")
+      refute Enum.any?(trades, & &1.broken)
+    end
+  end
+
   describe "streaming" do
     test "subscribe pushes immediately, as a first tick would" do
       assert :ok = Fake.subscribe(~w(BTC-USD), to: self())

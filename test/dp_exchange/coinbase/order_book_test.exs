@@ -271,4 +271,98 @@ defmodule DpExchange.Coinbase.OrderBookTest do
                Rest.get_order_book("BTC-USD", plug: responding(%{}), retry_attempts: 0)
     end
   end
+
+  describe "get_trades/2 — the prints get_price/2 discards" do
+    test "every print comes back, not just the newest" do
+      # get_price/2 reads this same payload and keeps one, because a Quote has room for one
+      # price. The rest were discarded at the boundary.
+      body = %{
+        "trades" => [
+          %{
+            "trade_id" => "t-1",
+            "price" => "79478.70",
+            "size" => "0.25",
+            "time" => "2026-08-28T14:53:45.649112Z",
+            "side" => "BUY"
+          },
+          %{
+            "trade_id" => "t-2",
+            "price" => "79477.10",
+            "size" => "0.10",
+            "time" => "2026-08-28T14:53:40.649112Z",
+            "side" => "SELL"
+          }
+        ]
+      }
+
+      assert {:ok, trades} =
+               Rest.get_trades("BTC-USD", plug: responding(body), retry_attempts: 0)
+
+      assert length(trades) == 2
+      assert Enum.map(trades, & &1.id) == ["t-1", "t-2"]
+      assert [%Types.Trade{} | _rest] = trades
+    end
+
+    test "the sides map, and an unknown one is nil" do
+      body = %{
+        "trades" => [
+          %{
+            "trade_id" => "t-1",
+            "price" => "1",
+            "size" => "1",
+            "time" => "2026-08-28T14:53:45.649112Z",
+            "side" => "SIDEWAYS"
+          }
+        ]
+      }
+
+      assert {:ok, [t]} = Rest.get_trades("BTC-USD", plug: responding(body), retry_attempts: 0)
+      assert t.side == nil
+    end
+
+    test "an undated print is refused" do
+      body = %{"trades" => [%{"trade_id" => "t-1", "price" => "1", "size" => "1"}]}
+
+      assert {:error, :missing_venue_timestamp} =
+               Rest.get_trades("BTC-USD", plug: responding(body), retry_attempts: 0)
+    end
+
+    test "broken is false — this venue publishes no bust flag here" do
+      body = %{
+        "trades" => [
+          %{
+            "trade_id" => "t-1",
+            "price" => "1",
+            "size" => "1",
+            "time" => "2026-08-28T14:53:45.649112Z",
+            "side" => "BUY"
+          }
+        ]
+      }
+
+      assert {:ok, [t]} = Rest.get_trades("BTC-USD", plug: responding(body), retry_attempts: 0)
+      refute t.broken
+    end
+
+    test "the public path is used without a credential" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"trades" => []}))
+      end
+
+      assert {:ok, []} = Rest.get_trades("BTC-USD", plug: plug, retry_attempts: 0)
+      assert_receive {:path, path}
+      assert path =~ "/market/products/BTC-USD/ticker"
+    end
+
+    test "a body with no trades key is unreadable" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_trades("BTC-USD", plug: responding(%{}), retry_attempts: 0)
+    end
+  end
 end
