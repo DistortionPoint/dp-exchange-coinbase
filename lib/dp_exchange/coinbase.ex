@@ -107,7 +107,6 @@ defmodule DpExchange.Coinbase do
     {:get_market_overview, 1},
     {:list_instruments, 1},
     {:get_fees, 2},
-    {:get_order_book, 2},
     {:test_connection, 2},
     {:get_rate_limit_status, 2}
   ]
@@ -202,7 +201,13 @@ defmodule DpExchange.Coinbase do
   def get_symbols(opts \\ []), do: Rest.get_symbols(opts)
 
   @impl true
-  def get_order_book(_symbol, _opts), do: Venue.not_supported()
+  @doc """
+  The order book for `symbol`.
+
+  See `DpExchange.Coinbase.Rest.get_order_book/2` — including why the levels are not
+  re-sorted here, and why an undated book is refused.
+  """
+  def get_order_book(symbol, opts \\ []), do: Rest.get_order_book(symbol, opts)
 
   @impl true
   def get_market_overview(_opts), do: Venue.not_supported()

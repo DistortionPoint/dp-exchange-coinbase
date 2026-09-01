@@ -158,7 +158,39 @@ defmodule DpExchange.Coinbase.Fake do
   def get_symbols(_opts \\ []), do: {:ok, @symbols}
 
   @impl true
-  def get_order_book(_symbol, _opts), do: Venue.not_supported()
+  def get_order_book(symbol, opts \\ []) do
+    case Map.fetch(@price, symbol) do
+      {:ok, price} ->
+        mid = Decimal.new(price)
+        limit = Keyword.get(opts, :limit, 3)
+
+        {:ok,
+         %Types.OrderBook{
+           symbol: symbol,
+           # Descending bids, ascending asks — the venue's own ordering, and the sizes
+           # differ per level so a caller reading only the top learns it is reading a book.
+           bids: book_side(mid, limit, :sub),
+           asks: book_side(mid, limit, :add),
+           timestamp: @at,
+           # The venue publishes no sequence on this endpoint, so neither does the fake: a
+           # caller must not learn to detect stream gaps from a REST book.
+           sequence: nil,
+           provider: :coinbase
+         }}
+
+      :error ->
+        {:refused, :not_listed}
+    end
+  end
+
+  defp book_side(mid, limit, direction) do
+    for step <- 1..limit do
+      offset = Decimal.mult(Decimal.new("0.50"), Decimal.new(step))
+      price = if direction == :sub, do: Decimal.sub(mid, offset), else: Decimal.add(mid, offset)
+      {price, Decimal.mult(Decimal.new("0.1"), Decimal.new(step))}
+    end
+  end
+
   @impl true
   def get_market_overview(_opts), do: Venue.not_supported()
   @impl true

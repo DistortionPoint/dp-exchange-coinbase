@@ -472,57 +472,134 @@ defmodule DpExchange.Coinbase.Rest do
   defp to_quote(_body, _symbol), do: {:error, :unexpected_response_shape}
 
   @doc """
-  Best bid and ask for `symbol` — the top of the book, not a traded price.
+  Best bid and ask for `symbol`, **with the sizes**.
 
-  Reads the same ticker payload as `get_price/2`, which carries `best_bid` and `best_ask`
-  alongside the trades. Those used to ride on the `Quote`; `Core.Types.Quote` has no fields
-  for them now, because a resting order is not an execution.
+  ## This used to read the ticker, and the ticker has no sizes
 
-  The payload publishes no sizes at the top, so `bid_size` and `ask_size` stay `nil` — not
-  published rather than zero.
+  `get_top_of_book/2` called `/products/{id}/ticker`, which publishes `best_bid` and
+  `best_ask` and nothing about how much is there — so `bid_size` and `ask_size` were `nil`
+  on every response. That is an honest `nil`, and it was also avoidable: the venue publishes
+  `/best_bid_ask`, whose pricebook carries the size at each level.
+
+  **A price without a size is half a top of book.** A caller sizing against the best bid
+  needs to know whether there is 0.01 BTC there or 40, and `nil` gives it no way to ask.
+
+  `/best_bid_ask` takes `product_ids` and returns one pricebook per product; this asks for
+  one and reads the first level of each side.
   """
   @spec get_top_of_book(String.t(), keyword()) ::
           {:ok, Types.TopOfBook.t()} | {:error, term()} | {:refused, term()}
   def get_top_of_book(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
     credentials = Keyword.get(opts, :credentials)
+    observed_at = DateTime.utc_now()
 
-    path =
-      if credentials,
-        do: "/products/#{native}/ticker",
-        else: "/market/products/#{native}/ticker"
+    case request(:get, "/best_bid_ask", credentials, opts, %{"product_ids" => native}) do
+      {:ok, %{body: %{"pricebooks" => [pricebook | _rest]}}} ->
+        build_top_of_book(native, pricebook, observed_at)
 
-    case request(:get, path, credentials, opts) do
-      {:ok, %{body: body}} -> build_top_of_book(native, body)
-      {:error, reason} -> classify(reason)
+      # The venue answered and named no book for this product. Not an error, and not an
+      # empty book either — there is nothing to quote.
+      {:ok, %{body: %{"pricebooks" => []}}} ->
+        {:refused, :not_listed}
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_response_shape}
+
+      {:error, reason} ->
+        classify(reason)
     end
   end
 
-  defp build_top_of_book(native, body) do
+  defp build_top_of_book(native, pricebook, observed_at) do
+    {bid, bid_size} = best_level(pricebook["bids"])
+    {ask, ask_size} = best_level(pricebook["asks"])
+
     {:ok,
      %Types.TopOfBook{
        symbol: SymbolFormat.to_canonical_symbol(native),
-       bid: decimal(body["best_bid"]),
-       ask: decimal(body["best_ask"]),
-       bid_size: nil,
-       ask_size: nil,
-       venue_time: top_of_book_time(body),
-       observed_at: DateTime.utc_now(),
+       bid: bid,
+       ask: ask,
+       bid_size: bid_size,
+       ask_size: ask_size,
+       venue_time: pricebook_time(pricebook),
+       observed_at: observed_at,
        provider: :coinbase
      }}
   end
 
-  # The ticker stamps its trades, not its book. Where the newest trade carries a time it is
-  # the closest thing the venue states to when this book was current; absent, `nil` rather
-  # than the local clock, which `observed_at` already holds and says so.
-  defp top_of_book_time(%{"trades" => [trade | _rest]}) do
-    case parse_time(trade["time"]) do
+  # An empty side is a real state — one side of a book can be empty — and `nil` says so.
+  # Zero would claim someone is quoting nothing at a price of nothing.
+  defp best_level([%{"price" => price, "size" => size} | _rest]),
+    do: {decimal(price), decimal(size)}
+
+  defp best_level(_absent), do: {nil, nil}
+
+  defp pricebook_time(%{"time" => time}) do
+    case parse_time(time) do
       {:ok, at} -> at
-      _unparsable -> nil
+      _no_time -> nil
     end
   end
 
-  defp top_of_book_time(_body), do: nil
+  defp pricebook_time(_absent), do: nil
+
+  @doc """
+  The order book for `symbol` — `GET /product_book`.
+
+  `opts[:limit]` bounds the levels per side; `opts[:aggregation_price_increment]` groups
+  them, which is the venue's own word for it.
+
+  **Both sides come back as the venue ordered them, unsorted here.** A book's order is the
+  venue's statement about its own matching, and re-sorting it would hide a venue that sent
+  a crossed or out-of-order book — which is exactly the thing worth seeing.
+
+  `timestamp` is the pricebook's own `time`. **A book the venue did not stamp is refused**:
+  a depth snapshot with the local clock on it cannot be told apart from a current one, and
+  a stale book read as current is the most expensive kind of wrong number here.
+  """
+  @spec get_order_book(String.t(), keyword()) ::
+          {:ok, Types.OrderBook.t()} | {:error, term()} | {:refused, term()}
+  def get_order_book(symbol, opts) do
+    native = SymbolFormat.to_exchange_symbol(symbol)
+    credentials = Keyword.get(opts, :credentials)
+
+    params =
+      %{"product_id" => native}
+      |> put_unless_nil("limit", Keyword.get(opts, :limit))
+      |> put_unless_nil(
+        "aggregation_price_increment",
+        Keyword.get(opts, :aggregation_price_increment)
+      )
+
+    case request(:get, "/product_book", credentials, opts, params) do
+      {:ok, %{body: %{"pricebook" => pricebook}}} -> build_order_book(native, pricebook)
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  defp build_order_book(native, pricebook) do
+    with {:ok, timestamp} <- parse_time(pricebook["time"]) do
+      {:ok,
+       %Types.OrderBook{
+         symbol: SymbolFormat.to_canonical_symbol(native),
+         bids: levels(pricebook["bids"]),
+         asks: levels(pricebook["asks"]),
+         timestamp: timestamp,
+         # The venue publishes no sequence number on this endpoint. `nil` means it did not
+         # say, so a caller cannot use this book to detect a gap in a stream.
+         sequence: nil,
+         provider: :coinbase
+       }}
+    end
+  end
+
+  defp levels(rows) when is_list(rows) do
+    for %{"price" => price, "size" => size} <- rows, do: {decimal(price), decimal(size)}
+  end
+
+  defp levels(_absent), do: []
 
   # **This built `Quote`s with `price: close` until 2026-09-01.** The venue sends open,
   # high, low and close; three of them were discarded here, at the boundary, where no

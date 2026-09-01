@@ -22,6 +22,32 @@ acceptable changelog line.
 
 ### Added
 
+- **`get_order_book/2` — depth, which this package declared `:unsupported`.**
+  `GET /product_book`, with the venue's `limit` and `aggregation_price_increment` passed
+  through.
+
+  **Both sides come back as the venue ordered them.** Re-sorting would hide a venue that
+  sent a crossed or out-of-order book, which is exactly the thing worth seeing.
+
+  **A book the venue did not date is refused.** A depth snapshot carrying the client's clock
+  cannot be told apart from a current one, and a stale book read as current is the most
+  expensive wrong number here. `sequence` stays `nil` — the endpoint publishes none, and a
+  caller must not learn to detect stream gaps from a REST book.
+
+### Fixed
+- **`get_top_of_book/2` now carries the sizes.** It read `/products/{id}/ticker`, which
+  publishes `best_bid` and `best_ask` and nothing about how much is there — so `bid_size`
+  and `ask_size` were `nil` on every response.
+
+  That `nil` was honest and it was avoidable: the venue publishes `/best_bid_ask`, whose
+  pricebook carries the size at each level. **A price without a size is half a top of
+  book** — a caller sizing against the best bid needs to know whether there is 0.01 there
+  or 40, and `nil` gave it no way to ask.
+
+  An empty side is still `nil` rather than zero: one side of a book can genuinely be empty,
+  and zero would claim someone is quoting nothing at a price of nothing.
+
+
 - **`get_trade_history/2` — past fills.**
 
   **`trade_type` is not decoration.** Regular fills carry `FILL`; the venue also emits

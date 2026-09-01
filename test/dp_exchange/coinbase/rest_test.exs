@@ -55,18 +55,18 @@ defmodule DpExchange.Coinbase.RestTest do
       assert quote_struct.provider == :coinbase
     end
 
-    test "an empty bid is nil, not zero" do
-      # Zero is a price. A venue that did not quote a bid has not quoted a bid of nothing.
-      # The assertion moved from `Quote` to `TopOfBook` when the book left the quote — same
-      # rule, same payload, a type that says which number it is holding.
-      body = put_in(@ticker["best_bid"], "")
-      body = put_in(body["best_ask"], "")
+    test "an empty side is nil, not zero" do
+      # Zero is a price. A venue quoting nothing on a side has not quoted a price of
+      # nothing — one side of a book can genuinely be empty.
+      body = %{"pricebooks" => [%{"product_id" => "BTC-USD", "bids" => [], "asks" => []}]}
 
       assert {:ok, top} =
                Rest.get_top_of_book("BTC-USD", plug: responding(body), retry_attempts: 0)
 
       assert top.bid == nil
       assert top.ask == nil
+      assert top.bid_size == nil
+      assert top.ask_size == nil
     end
 
     test "a response with no venue timestamp FAILS rather than substituting now" do
