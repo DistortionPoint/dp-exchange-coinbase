@@ -431,7 +431,29 @@ defmodule DpExchange.Coinbase.Fake do
   # not offer something, the comment beside it says so.
 
   @impl true
-  def get_positions(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_positions(_opts \\ []) do
+    # A short, and a `realised_pnl` of nil — the two things the mapping has to get right.
+    {:ok,
+     [
+       %Types.Position{
+         symbol: "BIT-28JUL23-CDE",
+         side: :short,
+         quantity: Decimal.new("3"),
+         instrument_type: :future,
+         average_cost: Decimal.new("30000"),
+         mark_price: Decimal.new("29500"),
+         notional_value: nil,
+         # The venue publishes a daily figure and no lifetime one; this field means the
+         # second. `list_futures_positions/1` is where the daily number lives.
+         realised_pnl: nil,
+         unrealised_pnl: Decimal.new("1500"),
+         liquidation_price: nil,
+         leverage: nil,
+         venue_time: nil,
+         provider: :coinbase
+       }
+     ]}
+  end
 
   @impl true
   def get_funding(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()

@@ -50,7 +50,6 @@ defmodule DpExchange.Coinbase do
   @unsupported [
     # Core 0.1.16's wider facade — declared, not yet implemented. Each is a Phase 3–13
     # item. `:unsupported` is about this package unless the note says otherwise.
-    {:get_positions, 1},
     {:get_funding, 2},
     {:get_contract_stats, 2},
     # **Prime publishes staking; it does not publish these four.** `stake/3` and
@@ -170,7 +169,12 @@ defmodule DpExchange.Coinbase do
     Capabilities.new(
       endpoints: endpoint_maturities(),
       supported_quotes: ~w(USDC USD EUR GBP BTC USDT ETH INR AUD CAD SGD),
-      supported_instrument_types: [:spot],
+      # `:future` joined on 2026-09-01 with the CFM surface — US derivatives are dated
+      # futures, margined in a separate account. `:perp` is **not** here: Advanced Trade's
+      # perpetuals live behind the INTX endpoints, which are `APPROVED-SKIP` as deprecated,
+      # and a declaration for a surface this package does not reach would be a claim about
+      # the venue standing in for one about the package.
+      supported_instrument_types: [:spot, :future],
       supports_short_selling: false,
       # Both were `false`, on an unchecked claim that the venue publishes neither endpoint.
       # It publishes `/orders/preview` and `/orders/edit`, and the second matters more than
@@ -423,8 +427,110 @@ defmodule DpExchange.Coinbase do
   # venue had no streaming API when it had fifteen services. Where the venue genuinely does
   # not offer something, the comment beside it says so.
 
+  @doc """
+  Open futures positions in the CFM account.
+
+  See `DpExchange.Coinbase.Rest.get_positions/2`. `:realised_pnl` is `nil` because the venue
+  publishes a *daily* figure and this field means the position's; `list_futures_positions/1`
+  returns the venue's own rows, where it keeps its own name.
+  """
   @impl true
-  def get_positions(_opts), do: Venue.not_supported()
+  def get_positions(opts),
+    do: Rest.get_positions(Keyword.get(opts, :credentials, %{}), opts)
+
+  @doc """
+  The venue's own futures position rows, unnormalised.
+
+  See `DpExchange.Coinbase.Rest.list_futures_positions/2`.
+  """
+  @spec list_futures_positions(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_futures_positions(opts),
+    do: Rest.list_futures_positions(Keyword.get(opts, :credentials, %{}), opts)
+
+  @doc """
+  One futures position by product id — expiry included.
+
+  See `DpExchange.Coinbase.Rest.get_futures_position/3`.
+  """
+  @spec get_futures_position(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_futures_position(credentials, product_id, opts),
+    do: Rest.get_futures_position(credentials, product_id, opts)
+
+  @doc """
+  The futures account's balances and margin.
+
+  See `DpExchange.Coinbase.Rest.get_futures_balance_summary/2`. Two accounts are named —
+  the spot one held with Coinbase Inc and the futures one held with Coinbase Financial
+  Markets — and only the second margins a position.
+  """
+  @spec get_futures_balance_summary(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_futures_balance_summary(credentials, opts),
+    do: Rest.get_futures_balance_summary(credentials, opts)
+
+  @doc """
+  Pending and processing sweeps out of the futures account.
+
+  See `DpExchange.Coinbase.Rest.list_futures_sweeps/2`. A listed sweep has not happened yet.
+  """
+  @spec list_futures_sweeps(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_futures_sweeps(credentials, opts),
+    do: Rest.list_futures_sweeps(credentials, opts)
+
+  @doc """
+  Schedules a sweep from the futures account to the spot one. **This moves funds.**
+
+  See `DpExchange.Coinbase.Rest.schedule_futures_sweep/2` — omitting the amount sweeps every
+  available excess dollar, which is the venue's default and not this package's.
+  """
+  @spec schedule_futures_sweep(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def schedule_futures_sweep(credentials, opts),
+    do: Rest.schedule_futures_sweep(credentials, opts)
+
+  @doc """
+  Cancels *the* pending sweep — the venue takes no id.
+
+  See `DpExchange.Coinbase.Rest.cancel_futures_sweep/2`.
+  """
+  @spec cancel_futures_sweep(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def cancel_futures_sweep(credentials, opts),
+    do: Rest.cancel_futures_sweep(credentials, opts)
+
+  @doc """
+  The account's intraday margin setting.
+
+  See `DpExchange.Coinbase.Rest.get_intraday_margin_setting/2`. `UNSPECIFIED` is the venue
+  declining to say, and is not `STANDARD`.
+  """
+  @spec get_intraday_margin_setting(map(), keyword()) ::
+          {:ok, String.t()} | {:error, term()} | {:refused, term()}
+  def get_intraday_margin_setting(credentials, opts),
+    do: Rest.get_intraday_margin_setting(credentials, opts)
+
+  @doc """
+  Sets the account's intraday margin setting. **This changes how much leverage it gets.**
+
+  See `DpExchange.Coinbase.Rest.set_intraday_margin_setting/3`.
+  """
+  @spec set_intraday_margin_setting(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def set_intraday_margin_setting(credentials, setting, opts),
+    do: Rest.set_intraday_margin_setting(credentials, setting, opts)
+
+  @doc """
+  Which margin window the account is in now, and whether the kill switches are on.
+
+  See `DpExchange.Coinbase.Rest.get_current_margin_window/2`.
+  """
+  @spec get_current_margin_window(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_current_margin_window(credentials, opts),
+    do: Rest.get_current_margin_window(credentials, opts)
 
   @impl true
   def get_funding(_symbol, _opts), do: Venue.not_supported()
@@ -546,7 +652,7 @@ defmodule DpExchange.Coinbase do
   `allow_withdraw` disagree with each other routinely; presence is not usability.
   """
   @impl true
-  def list_payment_methods(credentials, opts \\ []),
+  def list_payment_methods(credentials, opts),
     do: Rest.list_payment_methods(credentials, opts)
 
   @doc """
@@ -556,7 +662,7 @@ defmodule DpExchange.Coinbase do
   `list_payment_methods/2` is a snapshot.
   """
   @impl true
-  def get_payment_method(credentials, id, opts \\ []),
+  def get_payment_method(credentials, id, opts),
     do: Rest.get_payment_method(credentials, id, opts)
 
   @doc """

@@ -330,6 +330,255 @@ defmodule DpExchange.Coinbase.Rest do
   defp both_portfolios(from, to) when is_binary(from) and is_binary(to), do: :ok
   defp both_portfolios(_from, _to), do: {:error, :missing_portfolio}
 
+  # --- US derivatives (CFM) -----------------------------------------------
+
+  @doc """
+  Open futures positions — `GET /cfm/positions`.
+
+  These are **CFM** positions: futures margined in a separate account held with Coinbase
+  Financial Markets, not the spot account held with Coinbase Inc. `get_balances/2` reports
+  the second and says nothing about the first.
+
+  ## `:realised_pnl` is `nil`, and that is not an omission
+
+  The venue publishes `daily_realized_pnl` — what this position realised **today** — and no
+  lifetime figure. `Types.Position`'s `:realised_pnl` means realised P&L on the position, and
+  putting a daily number there would answer a different question with the same field name:
+  a caller summing it across reads would count one day repeatedly, and a caller comparing it
+  to `avg_entry_price` would be comparing a day to a lifetime.
+
+  The daily figure is real and is not discarded — `list_futures_positions/2` returns the
+  venue's own rows, where it keeps its own name.
+
+  `:liquidation_price` is `nil` too: this endpoint publishes none.
+  `get_futures_balance_summary/2` carries `liquidation_threshold` for the account.
+  """
+  @spec get_positions(map(), keyword()) ::
+          {:ok, [Types.Position.t()]} | {:error, term()} | {:refused, term()}
+  def get_positions(credentials, opts) do
+    with {:ok, rows} <- list_futures_positions(credentials, opts) do
+      {:ok, Enum.map(rows, &to_position/1)}
+    end
+  end
+
+  @doc """
+  The venue's own futures position rows — `GET /cfm/positions`.
+
+  Unnormalised, and the reason to reach for it over `get_positions/2` is
+  `daily_realized_pnl` and `expiration_time`, neither of which `Types.Position` has a place
+  for. A future expires; a perpetual does not, and the contract's type is shaped for the
+  second.
+  """
+  @spec list_futures_positions(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_futures_positions(credentials, opts) do
+    case request(:get, "/cfm/positions", credentials, opts) do
+      {:ok, %{body: %{"positions" => positions}}} when is_list(positions) -> {:ok, positions}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  @doc """
+  One futures position by product — `GET /cfm/positions/{product_id}`.
+
+  The product id is the contract, expiry included — `BIT-28JUL23-CDE`, not `BIT`. A future
+  is a different instrument each expiry, and a caller holding two months holds two positions.
+  """
+  @spec get_futures_position(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_futures_position(credentials, product_id, opts) when is_binary(product_id) do
+    case request(:get, "/cfm/positions/#{product_id}", credentials, opts) do
+      {:ok, %{body: %{"position" => position}}} when is_map(position) -> {:ok, position}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  # "UNKNOWN" is the venue's own value and maps to nil rather than to a side. A position
+  # filed the wrong way round is the most expensive mistake available in this mapping.
+  defp to_position(row) do
+    %Types.Position{
+      symbol: row["product_id"],
+      side: futures_side(row["side"]),
+      quantity: amount_value(row["number_of_contracts"]),
+      # The contract types this as an atom. `:future` is the vocabulary `Capabilities`
+      # already uses for the instrument kind, so it is the one used here.
+      instrument_type: :future,
+      average_cost: amount_value(row["avg_entry_price"]),
+      mark_price: amount_value(row["current_price"]),
+      notional_value: nil,
+      # See the moduledoc above: the venue publishes a *daily* realised figure and no
+      # lifetime one, and this field means the second.
+      realised_pnl: nil,
+      unrealised_pnl: amount_value(row["unrealized_pnl"]),
+      liquidation_price: nil,
+      leverage: nil,
+      venue_time: nil,
+      provider: :coinbase
+    }
+  end
+
+  defp futures_side("LONG"), do: :long
+  defp futures_side("SHORT"), do: :short
+  defp futures_side(_other), do: nil
+
+  defp amount_value(nil), do: nil
+  defp amount_value(%{"value" => value}), do: decimal(value)
+  defp amount_value(value), do: decimal(value)
+
+  @doc """
+  The futures account's balances and margin — `GET /cfm/balance_summary`.
+
+  **Two accounts, and the summary names both.** `cbi_usd_balance` is the spot account held
+  with Coinbase Inc; `cfm_usd_balance` is the futures account held with Coinbase Financial
+  Markets; `total_usd_balance` is the pair. Funds margin futures only from the second, and a
+  caller sizing against the total is sizing against money that is not there.
+
+  Every amount arrives as `%{"value" => _, "currency" => _, "cbrn" => _}` and is returned
+  that way. Flattening the currency off is how a caller adds two currencies together.
+
+  Carries `liquidation_threshold` and both `liquidation_buffer_*` fields, which is where a
+  caller judging room reads — `get_positions/2` publishes no liquidation price.
+  """
+  @spec get_futures_balance_summary(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_futures_balance_summary(credentials, opts) do
+    case request(:get, "/cfm/balance_summary", credentials, opts) do
+      {:ok, %{body: %{"balance_summary" => summary}}} when is_map(summary) -> {:ok, summary}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  @doc """
+  Pending and processing sweeps — `GET /cfm/sweeps`.
+
+  A sweep moves funds **out of** the futures account and into the spot one. Rows carry
+  `status` and `scheduled_time`: a listed sweep has not happened yet, and treating one as
+  settled is treating money that is still margining a position as available.
+
+  An empty list means no sweep is pending. It does not mean none has ever run — this
+  endpoint reports the queue, not the history.
+  """
+  @spec list_futures_sweeps(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_futures_sweeps(credentials, opts) do
+    case request(:get, "/cfm/sweeps", credentials, opts) do
+      {:ok, %{body: %{"sweeps" => sweeps}}} when is_list(sweeps) -> {:ok, sweeps}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  @doc """
+  Schedules a sweep from the futures account to the spot one —
+  `POST /cfm/sweeps/schedule`.
+
+  **This moves funds**, and it is a *schedule*: the venue queues it and
+  `list_futures_sweeps/2` reports the queue. A successful response is not money in the spot
+  account.
+
+  `opts[:usd_amount]` names the amount. **Omitting it sweeps every available excess dollar**
+  — that is the venue's documented default, not this package's, and it is stated here
+  because a caller that thought a missing amount meant "nothing" would move the lot.
+  """
+  @spec schedule_futures_sweep(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def schedule_futures_sweep(credentials, opts) do
+    body = put_unless_nil(%{}, "usd_amount", sweep_amount(Keyword.get(opts, :usd_amount)))
+
+    case post_json("/cfm/sweeps/schedule", body, credentials, opts) do
+      {:ok, %{body: %{} = result}} -> {:ok, result}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  # Full notation, never scientific — and a string, because that is what the venue's schema
+  # says `usd_amount` is.
+  defp sweep_amount(nil), do: nil
+  defp sweep_amount(%Decimal{} = amount), do: Decimal.to_string(amount, :normal)
+  defp sweep_amount(amount), do: to_string(amount)
+
+  @doc """
+  Cancels the pending sweep — `DELETE /cfm/sweeps`.
+
+  **Singular.** The venue cancels *the* pending sweep and takes no id; a caller with a
+  queue cannot choose which one this reaches. `list_futures_sweeps/2` before and after is
+  the only way to see what happened.
+  """
+  @spec cancel_futures_sweep(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def cancel_futures_sweep(credentials, opts) do
+    case request(:delete, "/cfm/sweeps", credentials, opts) do
+      {:ok, %{body: %{} = result}} -> {:ok, result}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  @doc """
+  The account's intraday margin setting — `GET /cfm/intraday/margin_setting`.
+
+  Three values, and the venue's own names are kept: `INTRADAY_MARGIN_SETTING_UNSPECIFIED`,
+  `_STANDARD` and `_INTRADAY`. **`UNSPECIFIED` is not `STANDARD`** — it is the venue
+  declining to say, and mapping it to the safer-sounding one would assert a setting the
+  account may not have.
+  """
+  @spec get_intraday_margin_setting(map(), keyword()) ::
+          {:ok, String.t()} | {:error, term()} | {:refused, term()}
+  def get_intraday_margin_setting(credentials, opts) do
+    case request(:get, "/cfm/intraday/margin_setting", credentials, opts) do
+      {:ok, %{body: %{"setting" => setting}}} when is_binary(setting) -> {:ok, setting}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  @doc """
+  Sets the account's intraday margin setting — `POST /cfm/intraday/margin_setting`.
+
+  **This changes how much leverage the account gets**, on weekdays between 8am and 4pm ET
+  excluding market holidays. It is a setting with money behind it: an account opted into
+  intraday margin is margined differently for the rest of the session.
+
+  `setting` is required and is passed through as the venue's own string. There is no
+  default: the venue's `UNSPECIFIED` is a value in the enum, and choosing it for a caller
+  who did not would be setting the account to something it did not ask for.
+  """
+  @spec set_intraday_margin_setting(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def set_intraday_margin_setting(credentials, setting, opts) when is_binary(setting) do
+    case post_json("/cfm/intraday/margin_setting", %{"setting" => setting}, credentials, opts) do
+      {:ok, %{body: %{} = result}} -> {:ok, result}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  @doc """
+  Which margin window the account is in now — `GET /cfm/intraday/current_margin_window`.
+
+  Carries `end_time`, which is when the current window closes, and two kill-switch flags.
+  **A kill switch being enabled means the venue has turned intraday margin off**, and an
+  account that believes it is on intraday margin while the switch is enabled has more
+  leverage in its plan than in its account.
+
+  `opts[:margin_profile_type]` is the venue's own enum and is sent only when given.
+  """
+  @spec get_current_margin_window(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_current_margin_window(credentials, opts) do
+    params = put_unless_nil(%{}, "margin_profile_type", Keyword.get(opts, :margin_profile_type))
+
+    case request(:get, "/cfm/intraday/current_margin_window", credentials, opts, params) do
+      {:ok, %{body: %{} = result}} -> {:ok, result}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
   defp to_balance(account, asked_at) do
     available = amount(account["available_balance"])
     hold = amount(account["hold"])

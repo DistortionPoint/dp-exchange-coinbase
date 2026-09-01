@@ -22,6 +22,46 @@ acceptable changelog line.
 
 ### Added
 
+- **US derivatives — the nine CFM endpoints.** `get_positions/1` and
+  `list_futures_positions/1`, `get_futures_position/3`, `get_futures_balance_summary/2`,
+  the three sweep calls, and the three intraday-margin calls.
+
+  **Two accounts, and the balance summary names both.** Futures margin from an account held
+  with Coinbase Financial Markets; spot sits in one held with Coinbase Inc. `cfm_usd_balance`
+  is the first, `cbi_usd_balance` the second, `total_usd_balance` the pair — and a caller
+  sizing a futures position against the total is sizing against money that is not there.
+  Every amount keeps its `currency`; flattening it off is how two currencies get added.
+
+  **`:realised_pnl` is `nil` on a `Types.Position` from this venue, and that is not an
+  omission.** Coinbase publishes `daily_realized_pnl` — what the position realised *today* —
+  and no lifetime figure. Putting a daily number in a field that means the position's answers
+  a different question under the same name: a caller summing it across reads counts one day
+  repeatedly. The daily figure is not discarded — `list_futures_positions/1` returns the
+  venue's own row, where it keeps its own name, along with `expiration_time`, which
+  `Types.Position` has no place for either because a future expires and a perpetual does not.
+
+  **A sweep is scheduled, not settled.** `schedule_futures_sweep/2` queues a move out of the
+  futures account and `list_futures_sweeps/2` reports the queue; a listed sweep has not
+  happened. **Omitting the amount sweeps every available excess dollar** — the venue's
+  documented default, stated here because a caller reading a missing amount as "nothing"
+  would move the lot. `cancel_futures_sweep/2` cancels *the* pending sweep and takes no id.
+
+  **`INTRADAY_MARGIN_SETTING_UNSPECIFIED` is not `_STANDARD`.** It is the venue declining to
+  say, and mapping it to the safer-sounding value would assert a setting the account may not
+  have. The venue's own strings are returned and required on the way in, with no default:
+  `UNSPECIFIED` is a value in the enum, and choosing it for a caller would set the account to
+  something it did not ask for.
+
+  `get_current_margin_window/2` carries both kill-switch flags. An account that believes it
+  is on intraday margin while the switch is enabled has more leverage in its plan than in its
+  account.
+
+  `supported_instrument_types` gains `:future`. `:perp` stays absent: Advanced Trade's
+  perpetuals are the INTX endpoints, which are `APPROVED-SKIP` as deprecated, and declaring a
+  surface this package does not reach would be a claim about the venue standing in for one
+  about the package.
+
+
 - **Coinbase Prime custodial staking** — `DpExchange.Coinbase.Prime`, all nine endpoints,
   with `stake/3` and `unstake/3` now live on the facade.
 
