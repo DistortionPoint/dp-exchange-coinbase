@@ -20,6 +20,29 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **Every negative this package makes is audited** —
+  `docs/reference/coinbase/negative-claims.md`, twelve claims with the source and date
+  consulted for each. Nine hold; **three were wrong**, and all three for the same reason:
+  each was a true statement about one endpoint restated as a claim about the venue.
+
+  `supports_order_preview: false` and `supports_order_replace: false` were assumed without
+  reading the list the endpoints are on — the second mattered more, because it told a caller
+  to cancel and re-place, opening a window in which no order is live. And
+  `get_trade_volume/2`'s "Advanced Trade does not aggregate" was read off
+  `/products/volume-summary`, which is *market* volume and a different question.
+
+  The check that would have caught all three is the one the table now enforces: **name the
+  endpoint you looked at, and the date.**
+
+- **`usage-rules.md` gains the surface this release added** — the two accounts a futures
+  position is margined from, Prime's separate host and credential triple, convert's absent
+  expiry, portfolios as addresses, and the fee/volume pair.
+
+- **`AGENTS.md` gains a pointer** to this package's own `usage-rules.md`, so a reader who
+  opens the generated file knows where the package's rules actually are.
+
 ### Changed
 
 - **Core dependency moves to `~> 0.1.36`**, and `place_orders/3` is declared **absent with

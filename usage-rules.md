@@ -98,3 +98,84 @@ suite as the real adapter.
 **Do not point tests at the live venue.** This package's own tier-2 tests do that, tagged
 and excluded, run by hand. A venue that sees a package polling it on a timer will
 rate-limit or block.
+
+## Two accounts, and only one of them margins a futures position
+
+Advanced Trade's US derivatives sit in an account held with **Coinbase Financial Markets**;
+spot sits in one held with **Coinbase Inc**. `get_futures_balance_summary/2` names both —
+`cfm_usd_balance`, `cbi_usd_balance`, `total_usd_balance` — and **sizing a futures position
+against the total is sizing against money that is not there.**
+
+`get_positions/1` returns CFM positions. Its `:realised_pnl` is `nil` and that is not an
+omission: the venue publishes `daily_realized_pnl`, which is what the position realised
+*today*, and putting a daily number in a field that means the position's answers a different
+question under the same name. `list_futures_positions/1` returns the venue's own row, where
+that figure keeps its own name — along with `expiration_time`, which a future has and
+`Types.Position` does not.
+
+**A sweep is scheduled, not settled.** `schedule_futures_sweep/2` queues a move out of the
+futures account; `list_futures_sweeps/2` reports the queue. **Omitting the amount sweeps
+every available excess dollar** — the venue's default, not this package's.
+
+`INTRADAY_MARGIN_SETTING_UNSPECIFIED` is the venue declining to say. It is **not**
+`_STANDARD`, and this package will not map it to one.
+
+## Prime is a different product, host and credential
+
+`DpExchange.Coinbase.Prime` reaches Coinbase **Prime**'s nine custodial staking endpoints.
+It talks to `api.prime.coinbase.com` and signs an HMAC under an access key, a passphrase and
+a signing key — **the CDP key pair the rest of this package uses is not accepted there**, and
+two of the three is refused locally rather than sent as a signature over the wrong string.
+
+`stake/3` and `unstake/3` reach it, and **pick a scope only from what you said**: a
+`:wallet_id` means the wallet, its absence means the portfolio, and `:portfolio_id` is always
+required. A portfolio-scoped unstake redeems across *every* wallet in the portfolio.
+
+These are **not** the CDP Staking API, whose seven endpoints return unsigned transactions for
+you to sign and broadcast. If you hold one of those, nothing has been staked.
+
+**Nothing in `Prime` has been run.** The paths come from the vendor's pages and the signing
+scheme from its authentication documentation; this repository holds no Prime credential.
+
+## Convert: two steps, and no expiry to rely on
+
+`quote_conversion/4` holds a rate; `commit_conversion/2` accepts it. **Advanced Trade states
+no expiry at all**, so `expires_at` is `nil` — which means "not stated", never "open-ended".
+A lapsed quote can be filled at the *current* rate rather than refused, which is the
+dangerous outcome because it looks like success and every number in it is real.
+
+**Both accounts are re-asked on the commit and even on the read.** `opts[:from]` and
+`opts[:to]` are required on `commit_conversion/2` and `get_conversion/2`, and this package
+fills neither in from the quote: a conversion committed against accounts you did not name
+happens between the wrong two balances.
+
+## Portfolios are addresses, not values
+
+"The account's BTC balance" is not a well-formed question here. `list_portfolios/1` names
+them; `get_portfolio_breakdown/3` returns what is *inside* one, which is a much larger
+answer. `create_account/1` and `rename_account/3` reach the portfolio endpoints, because
+Advanced Trade has no notion of creating an *account*.
+
+**Deleted portfolios stay in the listing.** The venue keeps them because old orders still
+name their ids; filtering them out would make a historical id look like one that never
+existed.
+
+## Fees, volume, and a claim that was wrong
+
+`get_fees/2` carries **both** `fee_tier` and `fee_tier_without_promotion` — they differ while
+a promotion runs, and it can end between two calls. The tax's `INCLUSIVE`/`EXCLUSIVE` flag
+survives too, because the same rate quoted either way is a different amount of money.
+
+`get_trade_volume/2` was declared unsupported until 2026-09-01 on the claim that "Advanced
+Trade does not aggregate" the account's own volume. **It does** — the transaction summary
+carries `volume_breakdown` per volume type. The claim had been made from the *market* volume
+endpoint's absence, which answers a different question. The two account totals ride alongside
+the breakdown rather than being folded in: Advanced Trade volume is documented as
+non-inclusive of Pro, so adding either to the breakdown double counts.
+
+## Every negative here is audited
+
+`docs/reference/coinbase/negative-claims.md` lists each one with the source and date
+consulted. Three were wrong and are corrected; the table records what the pattern was, so it
+is not repeated: **each was a true statement about one endpoint, restated as a claim about
+the venue.**
