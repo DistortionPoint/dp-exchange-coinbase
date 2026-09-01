@@ -59,6 +59,18 @@ defmodule DpExchange.Coinbase do
     {:get_staking_history, 1},
     {:stake, 3},
     {:unstake, 3},
+    # **Coinbase's convert is the two-step form, not the one-step one.** Advanced Trade
+    # publishes `POST /convert/quote`, `POST /convert/trade/{id}` and
+    # `GET /convert/trade/{id}` — quote, commit, read — which is `quote_conversion/4` and
+    # friends, still unimplemented and scheduled on their own. There is a one-step
+    # `POST /conversions`, but it belongs to the **Exchange** API, a different product this
+    # package does not reach. So `convert/4` has no endpoint on this package's surface.
+    {:convert, 4},
+    # `/products/volume-summary` is **market** volume and lives on the Exchange API too.
+    # `get_trade_volume/2` asks what *this account* traded, which Advanced Trade does not
+    # aggregate — it reports fills, and summing them here would be this package's
+    # arithmetic rather than the venue's ledger.
+    {:get_trade_volume, 2},
     {:quote_conversion, 4},
     {:commit_conversion, 2},
     {:get_conversion, 2},
@@ -372,6 +384,12 @@ defmodule DpExchange.Coinbase do
 
   @impl true
   def get_conversion(_id, _opts), do: Venue.not_supported()
+
+  @impl true
+  def convert(_from, _to, _amount, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_trade_volume(_credentials, _opts), do: Venue.not_supported()
 
   @impl true
   def list_portfolios(_opts), do: Venue.not_supported()

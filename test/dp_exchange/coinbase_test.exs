@@ -70,7 +70,7 @@ defmodule DpExchange.CoinbaseTest do
             {:estimate_withdrawal_fee, 4} ->
               ["BTC", "bitcoin", Decimal.new("1"), []]
 
-            {:quote_conversion, 4} ->
+            {n, 4} when n in [:quote_conversion, :convert] ->
               ["BTC", "USD", Decimal.new("1"), []]
 
             {:get_deposit_address, 3} ->

@@ -21,6 +21,15 @@ acceptable changelog line.
 ## [Unreleased]
 
 ### Added
+
+- **`convert/4` and `get_trade_volume/2` (Core 0.1.22) are declared unsupported, with the
+  reasons checked.** Advanced Trade's convert is the **two-step** form —
+  `POST /convert/quote`, `POST /convert/trade/{id}`, `GET /convert/trade/{id}` — which is
+  `quote_conversion/4` and friends, scheduled separately. The one-step `POST /conversions`
+  belongs to the **Exchange** API, a different product this package does not reach.
+  `/products/volume-summary` is market volume and lives there too; `get_trade_volume/2`
+  asks what *this account* traded, which Advanced Trade does not aggregate.
+
 - **`preview_replace/4` and `close_position/3`.** Two documented endpoints this package had
   no facade for.
 
