@@ -164,9 +164,57 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def list_instruments(_opts), do: Venue.not_supported()
   @impl true
-  def get_balances(_credentials, _opts), do: Venue.not_supported()
+  def get_balances(_credentials, _opts) do
+    # A held amount that is not zero, so a consumer reading `available_balance` as the
+    # total fails here rather than in production. The real venue reports both and no total.
+    available = Decimal.new("1.25")
+    hold = Decimal.new("0.25")
+
+    {:ok,
+     [
+       %Types.Balance{
+         currency: "BTC",
+         balance: Decimal.add(available, hold),
+         available_balance: available,
+         hold: hold,
+         # When we asked. A balance has no venue event time.
+         timestamp: DateTime.utc_now(),
+         provider: :coinbase
+       },
+       %Types.Balance{
+         currency: "USD",
+         balance: Decimal.new("10000"),
+         available_balance: Decimal.new("10000"),
+         hold: Decimal.new("0"),
+         timestamp: DateTime.utc_now(),
+         provider: :coinbase
+       }
+     ]}
+  end
+
   @impl true
-  def get_accounts(_credentials, _opts), do: Venue.not_supported()
+  def get_accounts(_credentials, opts) do
+    accounts = [
+      %{
+        "uuid" => "8bfc20d7-f7c6-4422-bf07-8243ca4169fe",
+        "name" => "BTC Wallet",
+        "currency" => "BTC",
+        "available_balance" => %{"value" => "1.25", "currency" => "BTC"},
+        "hold" => %{"value" => "0.25", "currency" => "BTC"},
+        "active" => true,
+        "ready" => true,
+        "platform" => "ACCOUNT_PLATFORM_CONSUMER"
+      }
+    ]
+
+    case Keyword.get(opts, :uuid) do
+      nil -> {:ok, accounts}
+      "8bfc20d7-f7c6-4422-bf07-8243ca4169fe" -> {:ok, accounts}
+      # An id the venue does not hold. `{:ok, []}` would read as "this account has nothing".
+      _unknown -> {:refused, :not_found}
+    end
+  end
+
   @impl true
   def get_fees(_credentials, _opts), do: Venue.not_supported()
   @impl true

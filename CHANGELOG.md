@@ -22,6 +22,28 @@ acceptable changelog line.
 
 ### Added
 
+- **`get_balances/2` and `get_accounts/2`.** The package could not say what the credential
+  holds.
+
+  **The venue reports `available_balance` and `hold` and no total.** The total here is
+  their sum — arithmetic on two numbers the venue stated, not an estimate — and it is `nil`
+  when either is missing rather than the other one alone. "Available 1.25, total unknown"
+  and "total equals available" are different claims, and a consumer sizing against the
+  second when the first is true trades against money that is held.
+
+  **The endpoint pages, at 49 by default and 250 at most, and this follows the cursor.** A
+  caller reading one page holds some of its balances with nothing to say which are missing,
+  and every number on that page is real — which is what makes stopping there worse than
+  failing. `@max_account_pages` bounds it, so a server that always says `has_next` errors
+  rather than looping inside a facade call.
+
+  `get_accounts/2` is separate because an account is more than a number: a caller routing an
+  order needs the uuid and the platform, and a caller sizing one needs the balance.
+  Collapsing them would lose the first. `opts[:uuid]` reads the single-account endpoint.
+
+  `:timestamp` is when the request was made — a balance has no venue event time.
+
+
 - **`convert/4` and `get_trade_volume/2` (Core 0.1.22) are declared unsupported, with the
   reasons checked.** Advanced Trade's convert is the **two-step** form —
   `POST /convert/quote`, `POST /convert/trade/{id}`, `GET /convert/trade/{id}` — which is

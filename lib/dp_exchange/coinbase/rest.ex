@@ -137,6 +137,118 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  @doc """
+  Every balance the credential can see, one per account.
+
+  **The venue reports `available_balance` and `hold`; it does not report a total.** The
+  total here is their sum, which is arithmetic on two numbers the venue stated rather than
+  an estimate — a balance of 1 BTC available with 0.5 held *is* 1.5 BTC, and there is no
+  judgement in saying so. Where either is absent the total is `nil` rather than the other
+  one alone, because "available, total unknown" and "total equals available" are different
+  claims and only one of them is safe to size against.
+
+  ## The pagination is not optional
+
+  This endpoint pages at 49 by default and 250 at most, and a caller reading one page has
+  *some* of its balances with nothing to say which are missing. A truncated balance list is
+  the worst shape this family has: every number in it is real. So this follows `cursor`
+  until `has_next` is false, bounded by `@max_pages` — a server that always says `has_next`
+  would otherwise loop forever inside a facade call.
+
+  `:timestamp` is when the request was made. A balance has no venue event time; see
+  `Core.Types.Balance`.
+  """
+  @spec get_balances(map(), keyword()) ::
+          {:ok, [Types.Balance.t()]} | {:error, term()} | {:refused, term()}
+  def get_balances(credentials, opts) do
+    asked_at = DateTime.utc_now()
+
+    with {:ok, accounts} <- all_accounts(credentials, opts, nil, [], 0) do
+      {:ok, Enum.map(accounts, &to_balance(&1, asked_at))}
+    end
+  end
+
+  @doc """
+  The venue's own account records, unnormalised.
+
+  Separate from `get_balances/2` because an account is more than a number: it carries a
+  uuid, a platform (`CONSUMER`, `CFM_CONSUMER`, `INTX`), whether it is ready to trade, and
+  which portfolio it belongs to. A caller routing an order needs the uuid; a caller sizing
+  one needs the balance. Collapsing them would lose the first.
+
+  With `opts[:uuid]` this reads the single account
+  (`GET /accounts/{account_uuid}`); without, it pages the list as `get_balances/2` does.
+  """
+  @spec get_accounts(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_accounts(credentials, opts) do
+    case Keyword.get(opts, :uuid) do
+      nil ->
+        all_accounts(credentials, opts, nil, [], 0)
+
+      uuid ->
+        case request(:get, "/accounts/#{uuid}", credentials, opts) do
+          {:ok, %{body: %{"account" => account}}} -> {:ok, [account]}
+          {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+          {:error, reason} -> classify(reason)
+        end
+    end
+  end
+
+  @max_account_pages 50
+
+  defp all_accounts(_credentials, _opts, _cursor, _acc, page) when page >= @max_account_pages,
+    do: {:error, :too_many_account_pages}
+
+  defp all_accounts(credentials, opts, cursor, acc, page) do
+    params =
+      %{}
+      |> put_unless_nil("limit", Keyword.get(opts, :limit))
+      |> put_unless_nil("cursor", cursor)
+
+    case request(:get, "/accounts", credentials, opts, params) do
+      {:ok, %{body: %{"accounts" => accounts} = body}} ->
+        collected = acc ++ accounts
+
+        # `has_next` is the venue's word for it. An empty page with `has_next` still true
+        # is the venue's business; the page counter is what stops this either way.
+        if body["has_next"] == true and is_binary(body["cursor"]) and body["cursor"] != "" do
+          all_accounts(credentials, opts, body["cursor"], collected, page + 1)
+        else
+          {:ok, collected}
+        end
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_response_shape}
+
+      {:error, reason} ->
+        classify(reason)
+    end
+  end
+
+  defp to_balance(account, asked_at) do
+    available = amount(account["available_balance"])
+    hold = amount(account["hold"])
+
+    %Types.Balance{
+      currency: account["currency"],
+      balance: total_balance(available, hold),
+      available_balance: available,
+      hold: hold,
+      timestamp: asked_at,
+      provider: :coinbase
+    }
+  end
+
+  # Both or nothing. "Available 1, total unknown" and "total equals available" are
+  # different claims, and a consumer sizing against the second when the first is true
+  # trades against money that is held.
+  defp total_balance(nil, _hold), do: nil
+  defp total_balance(_available, nil), do: nil
+  defp total_balance(available, hold), do: Decimal.add(available, hold)
+
+  defp amount(%{"value" => value}), do: decimal(value)
+  defp amount(_absent), do: nil
   # --- internal ----------------------------------------------------------
 
   defp granularity_enum(timeframe) do

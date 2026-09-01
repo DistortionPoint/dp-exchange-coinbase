@@ -113,6 +113,45 @@ defmodule DpExchange.Coinbase.FakeTest do
     end
   end
 
+  describe "balances and accounts" do
+    test "the fake's held amount is not zero, so available is not the total" do
+      # A consumer reading available_balance as the total fails here rather than in
+      # production, which is the only reason a fake has numbers at all.
+      assert {:ok, balances} = Fake.get_balances(%{}, [])
+      btc = Enum.find(balances, &(&1.currency == "BTC"))
+
+      refute Decimal.equal?(btc.hold, Decimal.new("0"))
+      refute Decimal.equal?(btc.available_balance, btc.balance)
+      assert Decimal.equal?(btc.balance, Decimal.add(btc.available_balance, btc.hold))
+    end
+
+    test "a balance is stamped when it was asked for" do
+      before = DateTime.utc_now()
+      assert {:ok, [balance | _rest]} = Fake.get_balances(%{}, [])
+
+      assert DateTime.compare(balance.timestamp, before) != :lt
+    end
+
+    test "accounts carry what a balance cannot — the uuid and the platform" do
+      assert {:ok, [account]} = Fake.get_accounts(%{}, [])
+
+      assert account["uuid"]
+      assert account["platform"] == "ACCOUNT_PLATFORM_CONSUMER"
+    end
+
+    test "a uuid the fake does not hold is refused, not an empty account" do
+      # `{:ok, []}` would read as "this account has nothing in it".
+      assert {:refused, :not_found} = Fake.get_accounts(%{}, uuid: "nope")
+    end
+
+    test "the fake's own uuid reads back" do
+      assert {:ok, [account]} =
+               Fake.get_accounts(%{}, uuid: "8bfc20d7-f7c6-4422-bf07-8243ca4169fe")
+
+      assert account["currency"] == "BTC"
+    end
+  end
+
   describe "streaming" do
     test "subscribe pushes immediately, as a first tick would" do
       assert :ok = Fake.subscribe(~w(BTC-USD), to: self())

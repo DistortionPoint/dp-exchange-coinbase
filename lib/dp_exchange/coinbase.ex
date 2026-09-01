@@ -106,11 +106,9 @@ defmodule DpExchange.Coinbase do
     {:quantization, 1},
     {:get_market_overview, 1},
     {:list_instruments, 1},
-    {:get_accounts, 2},
     {:get_fees, 2},
     {:get_order_book, 2},
     {:get_trade_history, 2},
-    {:get_balances, 2},
     {:test_connection, 2},
     {:get_rate_limit_status, 2}
   ]
@@ -216,10 +214,22 @@ defmodule DpExchange.Coinbase do
   # --- account and trading -----------------------------------------------
 
   @impl true
-  def get_balances(_credentials, _opts), do: Venue.not_supported()
+  @doc """
+  Every balance the credential can see, one per account.
+
+  See `DpExchange.Coinbase.Rest.get_balances/2` — in particular why the total is the sum of
+  the venue's two numbers and `nil` when either is missing.
+  """
+  def get_balances(credentials, opts), do: Rest.get_balances(credentials, opts)
 
   @impl true
-  def get_accounts(_credentials, _opts), do: Venue.not_supported()
+  @doc """
+  The venue's own account records — uuid, platform, portfolio, tradability.
+
+  Separate from `get_balances/2` because a caller routing an order needs the uuid and a
+  caller sizing one needs the balance. `opts[:uuid]` reads a single account.
+  """
+  def get_accounts(credentials, opts), do: Rest.get_accounts(credentials, opts)
 
   @impl true
   def get_fees(_credentials, _opts), do: Venue.not_supported()
