@@ -64,6 +64,24 @@ defmodule DpExchange.CoinbaseTest do
       for {name, arity} <- Capabilities.endpoints_at(caps, :unsupported) do
         args =
           case {name, arity} do
+            {:request_approved_address, 4} ->
+              ["BTC", "bitcoin", "addr", []]
+
+            {:get_fx_rate, 3} ->
+              ["AUDUSD", ~U[2026-09-01 00:00:00Z], []]
+
+            {:get_notional_balances, 3} ->
+              [@credentials, "usd", []]
+
+            {n, 2} when n in [:remove_approved_address, :list_networks] ->
+              ["bitcoin", []]
+
+            {n, 3} when n in [:remove_approved_address] ->
+              ["bitcoin", "addr", []]
+
+            {n, 2} when n in [:get_transactions, :list_custody_fees, :add_payment_method] ->
+              [@credentials, []]
+
             {:withdraw, 5} ->
               ["BTC", "bitcoin", Decimal.new("1"), "addr", []]
 

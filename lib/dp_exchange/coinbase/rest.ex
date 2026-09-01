@@ -241,6 +241,95 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  @doc """
+  The funding sources this account can move fiat through — `GET /payment_methods`.
+
+  Rows are Coinbase's own maps. A bank account, a card, a PayPal link and a fiat balance
+  are different things carrying different fields, and one struct would drop whichever the
+  caller needed.
+
+  **A method being listed is not the same as being usable.** Each row carries `verified`,
+  `allow_deposit` and `allow_withdraw`, and they disagree with each other routinely — a
+  method verified for deposit is not thereby verified for withdrawal. A caller filtering on
+  presence picks one the venue will refuse.
+
+  Unlike `/accounts`, this endpoint is not paged: the venue returns the set.
+  """
+  @spec list_payment_methods(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_payment_methods(credentials, opts) do
+    case request(:get, "/payment_methods", credentials, opts) do
+      {:ok, %{body: %{"payment_methods" => methods}}} when is_list(methods) -> {:ok, methods}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  @doc """
+  One funding source by id — `GET /payment_methods/{payment_method_id}`.
+
+  **This is a read; `list_payment_methods/2` is a snapshot.** A method's verification state
+  changes without the account doing anything: a bank closes, a card expires, Coinbase
+  suspends a rail. Selecting the row out of an earlier listing answers with whatever was
+  true when that listing was taken, and moving fiat against it is what that produces.
+
+  A body without a `payment_method` key is `{:error, :unexpected_response_shape}` and never
+  an empty map — "the venue answered something else" and "there is no such method" are
+  different answers, and only the second is worth acting on.
+  """
+  @spec get_payment_method(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_payment_method(credentials, id, opts) when is_binary(id) do
+    case request(:get, "/payment_methods/#{id}", credentials, opts) do
+      {:ok, %{body: %{"payment_method" => method}}} when is_map(method) -> {:ok, method}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
+    end
+  end
+
+  @doc """
+  Moves funds between two of this account's portfolios — `POST /portfolios/move_funds`.
+
+  **Nothing leaves Coinbase.** No chain, no address, no network fee. This is
+  `transfer_internal/4`, not `withdraw/5`, and conflating them is wrong in both directions:
+  a caller reaching for a withdrawal to rebalance between its own portfolios pays a network
+  fee it did not need to, and one reaching for this expecting an external transfer sends
+  nothing anywhere.
+
+  **Both portfolio uuids are required and neither is defaulted.** `opts[:from]` and
+  `opts[:to]` name them. A move with one missing is not a move, and picking a default —
+  the default portfolio, the first one listed — would shift funds between portfolios the
+  caller never named. Missing either is `{:error, :missing_portfolio}` before a request is
+  made.
+
+  The amount is sent as Coinbase's `funds` object: a string value and a currency, which is
+  the shape the venue reads. `Decimal.to_string(:normal)` because scientific notation is
+  not a number this venue accepts.
+  """
+  @spec transfer_internal(map(), String.t(), Decimal.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def transfer_internal(credentials, asset, amount, opts) do
+    from = Keyword.get(opts, :from)
+    to = Keyword.get(opts, :to)
+
+    with :ok <- both_portfolios(from, to) do
+      body = %{
+        "funds" => %{"value" => Decimal.to_string(amount, :normal), "currency" => asset},
+        "source_portfolio_uuid" => from,
+        "target_portfolio_uuid" => to
+      }
+
+      case post_json("/portfolios/move_funds", body, credentials, opts) do
+        {:ok, %{body: %{} = result}} -> {:ok, result}
+        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
+    end
+  end
+
+  defp both_portfolios(from, to) when is_binary(from) and is_binary(to), do: :ok
+  defp both_portfolios(_from, _to), do: {:error, :missing_portfolio}
+
   defp to_balance(account, asked_at) do
     available = amount(account["available_balance"])
     hold = amount(account["hold"])

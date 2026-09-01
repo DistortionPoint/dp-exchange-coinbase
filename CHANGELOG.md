@@ -22,6 +22,43 @@ acceptable changelog line.
 
 ### Added
 
+- **Payment methods and the internal move**: `list_payment_methods/2`,
+  `get_payment_method/3` (`GET /payment_methods`, `GET /payment_methods/{id}`) and
+  `transfer_internal/4` (`POST /portfolios/move_funds`).
+
+  **A payment method's flags disagree with each other.** Each row carries `verified`,
+  `allow_deposit` and `allow_withdraw`, and a method verified for deposit is routinely not
+  verified for withdrawal. Rows stay the venue's own maps and no "usable" boolean is
+  synthesised from them — collapsing the flags is what makes a caller move fiat through a
+  method the venue refuses.
+
+  **`get_payment_method/3` is the read; the listing is a snapshot.** A method's state
+  changes without the account doing anything, and selecting the row out of an earlier
+  listing answers with whatever was true when that listing was taken.
+
+  **`transfer_internal/4` moves nothing off Coinbase** — no chain, no address, no network
+  fee. Both portfolio uuids are required and neither is defaulted: a move missing either is
+  `{:error, :missing_portfolio}` before a request is made, because the alternative is
+  shifting funds between portfolios the caller never named. The amount is sent in full
+  notation, since `Decimal.to_string/1`'s scientific form is not a number this venue reads.
+
+### Changed
+
+- **Core dependency moves to `~> 0.1.33`**, and with it twelve callbacks are now declared
+  rather than missing. Nine are declared **absent with the reason**, checked against the
+  venue's own reference on 2026-09-01: Advanced Trade publishes no allowlist
+  (`request_approved_address/4`, `remove_approved_address/3`), no networks list
+  (`list_networks/2`), no fiat registration (`add_payment_method/2`), no fee promotions
+  (`list_fee_promos/1`), no FX publication (`get_fx_rate/3`), no notional valuation
+  (`get_notional_balances/3`) and no custody product (`list_custody_fees/2`).
+
+  **`get_transactions/2` is absent for a different reason worth stating.**
+  `/transaction_summary` exists and is *not* it: that endpoint reports what the account
+  traded in a window and what it cost, not an enumeration of deposits, fees and
+  adjustments. Returning it here would have answered a different question while looking
+  like this one.
+
+
 - **`quantization/1` — what the venue will actually accept**, and `Rest.get_product/2` for
   the whole record. Both were `:unsupported`.
 

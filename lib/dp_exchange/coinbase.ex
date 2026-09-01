@@ -78,6 +78,25 @@ defmodule DpExchange.Coinbase do
     {:get_deposit_address, 3},
     {:list_approved_addresses, 1},
     {:estimate_withdrawal_fee, 4},
+    # **Advanced Trade publishes no allowlist, no networks list and no fiat registration.**
+    # Addresses are managed in Coinbase's own interface, not through this API, and there is
+    # no path that names a network. `add_payment_method/2` is the same: a bank is linked
+    # through the consumer product's flow, which needs a person.
+    {:request_approved_address, 4},
+    {:remove_approved_address, 3},
+    {:list_networks, 2},
+    {:add_payment_method, 2},
+    # **`/transaction_summary` is a fee-and-volume summary, not a transaction list.** It
+    # reports what the account traded in a window and what that cost; it does not enumerate
+    # deposits, fees and adjustments. Returning it here would answer a different question
+    # while looking like this one.
+    {:get_transactions, 2},
+    # No fee promotions, no FX publication, no notional valuation and no custody product on
+    # this surface — checked against the venue's own reference on 2026-09-01.
+    {:list_fee_promos, 1},
+    {:get_fx_rate, 3},
+    {:get_notional_balances, 3},
+    {:list_custody_fees, 2},
     {:withdraw, 5},
     {:get_option_chain, 2},
     {:get_option_expirations, 2},
@@ -451,6 +470,69 @@ defmodule DpExchange.Coinbase do
 
   @impl true
   def withdraw(_asset, _network, _amount, _address, _opts), do: Venue.not_supported()
+
+  @doc """
+  The funding sources this account can move fiat through.
+
+  See `DpExchange.Coinbase.Rest.list_payment_methods/2`. `verified`, `allow_deposit` and
+  `allow_withdraw` disagree with each other routinely; presence is not usability.
+  """
+  @impl true
+  def list_payment_methods(credentials, opts \\ []),
+    do: Rest.list_payment_methods(credentials, opts)
+
+  @doc """
+  One funding source by id.
+
+  See `DpExchange.Coinbase.Rest.get_payment_method/3`. This is the read;
+  `list_payment_methods/2` is a snapshot.
+  """
+  @impl true
+  def get_payment_method(credentials, id, opts \\ []),
+    do: Rest.get_payment_method(credentials, id, opts)
+
+  @doc """
+  Moves funds between two of this account's portfolios.
+
+  See `DpExchange.Coinbase.Rest.transfer_internal/4`. Nothing leaves Coinbase, and both
+  portfolio uuids are required — `opts[:from]` and `opts[:to]`, neither defaulted.
+  """
+  @impl true
+  def transfer_internal(asset, amount, opts, request_opts),
+    do:
+      Rest.transfer_internal(
+        Keyword.get(request_opts, :credentials, %{}),
+        asset,
+        amount,
+        Keyword.merge(request_opts, opts)
+      )
+
+  @impl true
+  def add_payment_method(_details, _opts), do: Venue.not_supported()
+
+  @impl true
+  def request_approved_address(_asset, _network, _address, _opts), do: Venue.not_supported()
+
+  @impl true
+  def remove_approved_address(_network, _address, _opts), do: Venue.not_supported()
+
+  @impl true
+  def list_networks(_asset, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_transactions(_credentials, _opts), do: Venue.not_supported()
+
+  @impl true
+  def list_fee_promos(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_fx_rate(_pair, _at, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_notional_balances(_credentials, _currency, _opts), do: Venue.not_supported()
+
+  @impl true
+  def list_custody_fees(_credentials, _opts), do: Venue.not_supported()
 
   @impl true
   def get_option_chain(_underlying, _opts), do: Venue.not_supported()

@@ -692,6 +692,78 @@ defmodule DpExchange.Coinbase.Fake do
      }}
   end
 
+  @impl true
+  def list_payment_methods(_credentials, _opts \\ []) do
+    # One method verified for deposit but not withdrawal, because the two flags disagree
+    # routinely and a fake that set them together would hide the case that bites.
+    {:ok,
+     [
+       %{
+         "id" => "pm-1",
+         "type" => "ACH",
+         "verified" => true,
+         "allow_deposit" => true,
+         "allow_withdraw" => false
+       },
+       %{
+         "id" => "pm-2",
+         "type" => "FIAT_ACCOUNT",
+         "verified" => true,
+         "allow_deposit" => true,
+         "allow_withdraw" => true
+       }
+     ]}
+  end
+
+  @impl true
+  def get_payment_method(_credentials, id, _opts \\ []),
+    do: {:ok, %{"id" => id, "type" => "ACH", "verified" => true, "allow_withdraw" => false}}
+
+  @impl true
+  def transfer_internal(asset, amount, opts, _request_opts) do
+    # Both uuids or nothing. A fake that defaulted one would let a consumer ship a move
+    # between portfolios it never named.
+    with from when is_binary(from) <- Keyword.get(opts, :from),
+         to when is_binary(to) <- Keyword.get(opts, :to) do
+      {:ok,
+       %{
+         "source_portfolio_uuid" => from,
+         "target_portfolio_uuid" => to,
+         "funds" => %{"value" => Decimal.to_string(amount, :normal), "currency" => asset}
+       }}
+    else
+      _missing -> {:error, :missing_portfolio}
+    end
+  end
+
+  @impl true
+  def add_payment_method(_details, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def request_approved_address(_asset, _network, _address, _opts \\ []),
+    do: Venue.not_supported()
+
+  @impl true
+  def remove_approved_address(_network, _address, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def list_networks(_asset, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_transactions(_credentials, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def list_fee_promos(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_fx_rate(_pair, _at, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_notional_balances(_credentials, _currency, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def list_custody_fees(_credentials, _opts \\ []), do: Venue.not_supported()
+
   defp fake_combination(request) do
     pair = {Map.get(request, :order_type, :limit), Map.get(request, :time_in_force, :gtc)}
 
