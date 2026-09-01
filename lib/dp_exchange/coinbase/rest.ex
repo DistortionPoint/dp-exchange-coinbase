@@ -249,6 +249,122 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp amount(%{"value" => value}), do: decimal(value)
   defp amount(_absent), do: nil
+
+  @doc """
+  Past fills for the credential — `GET /orders/historical/fills`.
+
+  Filters go to the venue rather than being applied here: `opts[:order_id]`,
+  `opts[:symbol]`, `opts[:start]`, `opts[:end]`, `opts[:limit]`. A client-side filter over
+  one page would silently drop matching fills that were on the next one.
+
+  ## `trade_type` is not decoration
+
+  Regular fills carry `FILL`; the venue also emits `REVERSAL`, `CORRECTION` and `SYNTHETIC`
+  for adjusted ones. **A reversal is not a trade that happened** — summing a list that mixes
+  them without looking produces a position and a cost basis that are both wrong, and both
+  plausible.
+
+  `Core.Types.Fill` has no field for it, so this **returns only `FILL` rows by default** and
+  `opts[:trade_types]` widens it, taking the venue's own strings. Silently returning all
+  four under a type that cannot distinguish them would be the substitution this family
+  refuses; refusing to return adjusted fills at all would hide corrections the venue made.
+
+  The response pages on `cursor`, and this follows it to `@max_fill_pages`.
+  """
+  @spec get_trade_history(map(), keyword()) ::
+          {:ok, [Types.Fill.t()]} | {:error, term()} | {:refused, term()}
+  def get_trade_history(credentials, opts) do
+    wanted = Keyword.get(opts, :trade_types, ["FILL"])
+
+    with {:ok, rows} <- all_fills(credentials, opts, nil, [], 0) do
+      rows
+      |> Enum.filter(&(&1["trade_type"] in wanted))
+      |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+        case to_fill(row) do
+          {:ok, fill} -> {:cont, {:ok, [fill | acc]}}
+          error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, fills} -> {:ok, Enum.reverse(fills)}
+        error -> error
+      end
+    end
+  end
+
+  @max_fill_pages 50
+
+  defp all_fills(_credentials, _opts, _cursor, _acc, page) when page >= @max_fill_pages,
+    do: {:error, :too_many_fill_pages}
+
+  defp all_fills(credentials, opts, cursor, acc, page) do
+    params =
+      %{}
+      |> put_unless_nil("order_ids", Keyword.get(opts, :order_id))
+      |> put_unless_nil("product_ids", exchange_symbol(Keyword.get(opts, :symbol)))
+      |> put_unless_nil("start_sequence_timestamp", timestamp_param(Keyword.get(opts, :start)))
+      |> put_unless_nil("end_sequence_timestamp", timestamp_param(Keyword.get(opts, :end)))
+      |> put_unless_nil("limit", Keyword.get(opts, :limit))
+      |> put_unless_nil("cursor", cursor)
+
+    case request(:get, "/orders/historical/fills", credentials, opts, params) do
+      {:ok, %{body: %{"fills" => fills} = body}} ->
+        collected = acc ++ fills
+        next = body["cursor"]
+
+        # An empty cursor is the venue saying "no more". Re-sending it would ask for the
+        # same page forever, which the page bound would eventually stop — but stopping here
+        # is the correct reading, not a fallback.
+        if is_binary(next) and next != "" and fills != [] do
+          all_fills(credentials, opts, next, collected, page + 1)
+        else
+          {:ok, collected}
+        end
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_response_shape}
+
+      {:error, reason} ->
+        classify(reason)
+    end
+  end
+
+  defp exchange_symbol(nil), do: nil
+  defp exchange_symbol(symbol), do: SymbolFormat.to_exchange_symbol(symbol)
+
+  defp timestamp_param(nil), do: nil
+  defp timestamp_param(%DateTime{} = at), do: DateTime.to_iso8601(at)
+  defp timestamp_param(other), do: other
+
+  # An undated fill is refused rather than stamped with the local clock. A fill is an event
+  # that happened at a moment; a client timestamp on one places it wrongly in a trade
+  # history while looking entirely reasonable.
+  defp to_fill(row) do
+    with {:ok, timestamp} <- parse_time(row["trade_time"]) do
+      {:ok,
+       %Types.Fill{
+         order_id: row["order_id"],
+         trade_id: row["trade_id"],
+         symbol: canonical_or_nil(row["product_id"]),
+         side: side_atom(row["side"]),
+         quantity: decimal(row["size"]),
+         price: decimal(row["price"]),
+         fee: decimal(row["commission"]),
+         # The venue names no fee currency on a fill. `nil`, not the quote currency guessed
+         # from the pair — a fee can be charged in a third asset and often is.
+         fee_currency: nil,
+         timestamp: timestamp,
+         liquidity: liquidity_atom(row["liquidity_indicator"]),
+         provider: :coinbase
+       }}
+    end
+  end
+
+  defp liquidity_atom("MAKER"), do: :maker
+  defp liquidity_atom("TAKER"), do: :taker
+  # Includes the venue's own `UNKNOWN_LIQUIDITY_INDICATOR`, which is the venue saying it
+  # does not know. Neither :maker nor :taker is the honest answer to that.
+  defp liquidity_atom(_other), do: nil
   # --- internal ----------------------------------------------------------
 
   defp granularity_enum(timeframe) do

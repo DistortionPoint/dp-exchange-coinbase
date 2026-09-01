@@ -152,6 +152,26 @@ defmodule DpExchange.Coinbase.FakeTest do
     end
   end
 
+  describe "fills" do
+    test "an adjusted fill is excluded by default" do
+      # A REVERSAL is not a trade that happened, and Fill has no field to say so. A fake
+      # that returned both under one type would teach a consumer to sum them.
+      assert {:ok, [only]} = Fake.get_trade_history(%{}, [])
+      assert only.trade_id == "t-1"
+    end
+
+    test "asking for them widens the answer" do
+      assert {:ok, both} = Fake.get_trade_history(%{}, trade_types: ["FILL", "REVERSAL"])
+      assert length(both) == 2
+    end
+
+    test "the fee currency is nil, as it is in production" do
+      assert {:ok, [fill]} = Fake.get_trade_history(%{}, [])
+      assert fill.fee_currency == nil
+      assert fill.liquidity == :taker
+    end
+  end
+
   describe "streaming" do
     test "subscribe pushes immediately, as a first tick would" do
       assert :ok = Fake.subscribe(~w(BTC-USD), to: self())

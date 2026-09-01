@@ -108,7 +108,6 @@ defmodule DpExchange.Coinbase do
     {:list_instruments, 1},
     {:get_fees, 2},
     {:get_order_book, 2},
-    {:get_trade_history, 2},
     {:test_connection, 2},
     {:get_rate_limit_status, 2}
   ]
@@ -300,7 +299,13 @@ defmodule DpExchange.Coinbase do
   def get_orders(credentials, opts \\ []), do: Rest.get_orders(credentials, opts)
 
   @impl true
-  def get_trade_history(_credentials, _opts), do: Venue.not_supported()
+  @doc """
+  Past fills for the credential.
+
+  See `DpExchange.Coinbase.Rest.get_trade_history/2` — in particular why only `FILL` rows
+  come back unless `opts[:trade_types]` says otherwise.
+  """
+  def get_trade_history(credentials, opts), do: Rest.get_trade_history(credentials, opts)
 
   # --- streaming ---------------------------------------------------------
 

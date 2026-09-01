@@ -223,7 +223,46 @@ defmodule DpExchange.Coinbase.Fake do
   # refuses lets a consumer's suite go green against behaviour that cannot happen.
 
   @impl true
-  def get_trade_history(_credentials, _opts), do: Venue.not_supported()
+  def get_trade_history(_credentials, opts) do
+    # A REVERSAL alongside the FILL, because that is the distinction a consumer must handle:
+    # summing a mixed list produces a position and a cost basis that are both wrong and both
+    # plausible. The fake filters the same way the real package does.
+    wanted = Keyword.get(opts, :trade_types, ["FILL"])
+
+    rows = [
+      {"FILL",
+       %Types.Fill{
+         order_id: "abc-123",
+         trade_id: "t-1",
+         symbol: "BTC-USD",
+         side: :buy,
+         quantity: Decimal.new("0.25"),
+         price: Decimal.new("40100.5"),
+         fee: Decimal.new("1.20"),
+         fee_currency: nil,
+         timestamp: @at,
+         liquidity: :taker,
+         provider: :coinbase
+       }},
+      {"REVERSAL",
+       %Types.Fill{
+         order_id: "abc-123",
+         trade_id: "t-2",
+         symbol: "BTC-USD",
+         side: :sell,
+         quantity: Decimal.new("0.25"),
+         price: Decimal.new("40100.5"),
+         fee: Decimal.new("0"),
+         fee_currency: nil,
+         timestamp: @at,
+         liquidity: nil,
+         provider: :coinbase
+       }}
+    ]
+
+    {:ok, for({type, fill} <- rows, type in wanted, do: fill)}
+  end
+
   # Streaming, in memory. The fake pushes immediately on subscribe, which is what the
   # real venue's first tick does from the caller's side — and the caller cannot tell the
   # difference, which is the property the facade exists to hold.

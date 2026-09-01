@@ -401,6 +401,76 @@ defmodule DpExchange.CoinbaseTest do
       assert order.id == "via-facade"
     end
 
+    test "get_balances reaches the venue through the facade" do
+      body = %{
+        "accounts" => [
+          %{
+            "currency" => "BTC",
+            "available_balance" => %{"value" => "1.25"},
+            "hold" => %{"value" => "0.25"}
+          }
+        ],
+        "has_next" => false
+      }
+
+      assert {:ok, [balance]} =
+               Coinbase.get_balances(@creds, plug: json_plug(body), retry_attempts: 0)
+
+      assert balance.currency == "BTC"
+    end
+
+    test "get_accounts reaches the venue through the facade" do
+      body = %{"accounts" => [%{"uuid" => "u-1", "currency" => "BTC"}], "has_next" => false}
+
+      assert {:ok, [account]} =
+               Coinbase.get_accounts(@creds, plug: json_plug(body), retry_attempts: 0)
+
+      assert account["uuid"] == "u-1"
+    end
+
+    test "get_trade_history reaches the venue through the facade" do
+      body = %{
+        "fills" => [
+          %{
+            "order_id" => "o-1",
+            "trade_id" => "t-1",
+            "trade_type" => "FILL",
+            "trade_time" => "2026-08-31T09:59:59Z",
+            "product_id" => "BTC-USD",
+            "side" => "BUY",
+            "size" => "0.25",
+            "price" => "40100.50"
+          }
+        ],
+        "cursor" => ""
+      }
+
+      assert {:ok, [fill]} =
+               Coinbase.get_trade_history(@creds, plug: json_plug(body), retry_attempts: 0)
+
+      assert fill.trade_id == "t-1"
+    end
+
+    test "preview_replace reaches the venue through the facade" do
+      assert {:ok, _preview} =
+               Coinbase.preview_replace(@creds, "abc", %{price: "41000"},
+                 plug: json_plug(%{"errors" => []}),
+                 retry_attempts: 0
+               )
+    end
+
+    test "close_position reaches the venue through the facade" do
+      body = %{"success" => true, "success_response" => %{"order_id" => "close-1"}}
+
+      assert {:ok, order} =
+               Coinbase.close_position(@creds, "BTC-USD",
+                 plug: json_plug(body),
+                 retry_attempts: 0
+               )
+
+      assert order.id == "close-1"
+    end
+
     test "cancel_order reaches the venue through the facade" do
       body = %{"results" => [%{"order_id" => "abc", "success" => true}]}
 

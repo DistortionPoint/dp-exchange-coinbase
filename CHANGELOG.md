@@ -22,6 +22,29 @@ acceptable changelog line.
 
 ### Added
 
+- **`get_trade_history/2` — past fills.**
+
+  **`trade_type` is not decoration.** Regular fills carry `FILL`; the venue also emits
+  `REVERSAL`, `CORRECTION` and `SYNTHETIC` for adjusted ones, and a reversal is not a trade
+  that happened. `Core.Types.Fill` has no field to say which is which, so summing a mixed
+  list produces a position and a cost basis that are both wrong and both plausible. This
+  returns **only `FILL` rows by default**, and `opts[:trade_types]` widens it — returning
+  all four under a type that cannot distinguish them would be a substitution, and refusing
+  them entirely would hide corrections the venue made.
+
+  A fill the venue did not date is **refused**, not stamped with the local clock: a fill is
+  an event at a moment, and a client timestamp places it wrongly in a history while looking
+  entirely reasonable.
+
+  `fee_currency` is `nil` rather than the pair's quote guessed from the symbol — a fee can
+  be charged in a third asset and often is. `UNKNOWN_LIQUIDITY_INDICATOR` maps to `nil`,
+  because neither `:maker` nor `:taker` is an honest answer to the venue saying it does not
+  know.
+
+  Filters go to the venue rather than being applied to the page it returned, and the walk
+  follows `cursor` to a page bound.
+
+
 - **`get_balances/2` and `get_accounts/2`.** The package could not say what the credential
   holds.
 
