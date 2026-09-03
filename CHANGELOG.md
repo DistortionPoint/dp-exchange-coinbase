@@ -20,6 +20,41 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`level2` is subscribed and decoded — `streamable` gains `:order_book`.** The channel
+  was recognised and had working auth machinery since an earlier release but was never
+  actually requested; `capabilities/0` said `[:quotes]` while the code that would have
+  served `:order_book` sat unused. `Socket` now maintains a real per-symbol book —
+  snapshot then patched by `update` deltas, `new_quantity: "0"` removing a level — and
+  delivers `Core.Types.OrderBook` sorted best-price-first on every change, matching this
+  family's existing convention (see Schwab's book services) of emitting on every venue
+  frame rather than throttling client-side.
+
+- **Sharded — this venue's whole subscription no longer runs on one socket.** Measured
+  2026-08-27 against a live ~400-symbol universe: a `level2` subscribe over the venue's
+  real per-session limit gets `"too many L2 streams requested in a single session"` and
+  the socket closes, a total data gap rather than degraded coverage — 355 of 405 pairs
+  went stale, 1,480 refusals in one log window. `Feed` now opens one socket per 100
+  symbols (the number from that incident, carried over rather than re-derived), spaced
+  to avoid a connect burst, `level2` subscribed before `ticker` on each and the two
+  spaced apart so a snapshot decode in progress does not turn a `ticker` subscribe into
+  a `send_timeout`.
+
+- **A reconnect now resubscribes.** WebSockex reconnects a dropped socket on its own and
+  leaves it subscribed to nothing — silently, since a connected socket receiving
+  nothing looks the same as a quiet market. `Feed` re-issues every shard's current
+  subscriptions on a 60-second timer, unconditionally; the reference implementation this
+  replaces lost a venue's entire coverage to exactly this gap for roughly forty minutes
+  before anyone noticed the chart had gone flat.
+
+- **`level2` is skipped for a credential-less subscriber rather than failing loudly for
+  no reason.** It requires a credential and `ticker` does not; a caller with no
+  credentials only ever wanted the public channel, and sending a doomed authenticated
+  subscribe would either surface `credentials_required` as this call's synchronous
+  result — masking that `ticker` works fine — or cost a wire round trip to learn what
+  the credential's absence already answers.
+
 ### Documentation
 
 - **The `:unsupported` list is now split.** `venue_does_not_serve/0` names the 38 endpoints

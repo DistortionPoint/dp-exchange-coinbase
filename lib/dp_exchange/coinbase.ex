@@ -207,7 +207,11 @@ defmodule DpExchange.Coinbase do
       # was creating by not implementing the endpoint that avoids it.
       supports_order_preview: true,
       supports_order_replace: true,
-      streamable: [:quotes],
+      # `level2` was recognised and decoded but never subscribed — `Socket` already had
+      # the auth machinery for it, and the only thing standing between that and a real
+      # declaration was `Feed` asking for it. Now sharded (100 pairs/socket, the number
+      # from the incident that made sharding necessary) and subscribed on every shard.
+      streamable: [:quotes, :order_book],
       historical_timeframes: Rest.granularities(),
       max_candles_per_request: Rest.max_candles(),
       reports_trade_volume: true,

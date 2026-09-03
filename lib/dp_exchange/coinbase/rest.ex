@@ -1286,11 +1286,12 @@ defmodule DpExchange.Coinbase.Rest do
   # response changed or the assumption was never right; the branch is gone either way,
   # because two formatters for one shape is a second place to be wrong about the venue.
   defp to_quote(%{"trades" => [trade | _rest]} = _body, symbol) do
-    with {:ok, at} <- parse_time(trade["time"]) do
+    with {:ok, at} <- parse_time(trade["time"]),
+         {:ok, price} <- required_decimal(trade["price"], :price) do
       {:ok,
        %Types.Quote{
          symbol: symbol,
-         price: decimal(trade["price"]),
+         price: price,
          volume: decimal(trade["size"]),
          timestamp: at,
          provider: :coinbase
@@ -1355,7 +1356,9 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp to_trade(trade, symbol) do
-    with {:ok, at} <- parse_time(trade["time"]) do
+    with {:ok, at} <- parse_time(trade["time"]),
+         {:ok, price} <- required_decimal(trade["price"], :price),
+         {:ok, quantity} <- required_decimal(trade["size"], :quantity) do
       {:ok,
        %Types.Trade{
          id: trade["trade_id"],
@@ -1363,8 +1366,8 @@ defmodule DpExchange.Coinbase.Rest do
          # The venue's `side` on a ticker trade is the taker's. `nil` for anything else
          # rather than the nearer of the two.
          side: side_atom(trade["side"]),
-         price: decimal(trade["price"]),
-         quantity: decimal(trade["size"]),
+         price: price,
+         quantity: quantity,
          timestamp: at,
          # No bust flag on this endpoint.
          broken: false,
@@ -1532,17 +1535,21 @@ defmodule DpExchange.Coinbase.Rest do
   defp to_candles(_body, _symbol, _timeframe), do: {:error, :unexpected_response_shape}
 
   defp to_candle(candle, symbol, timeframe) do
-    with {:ok, opened_at} <- candle_start(candle["start"]) do
+    with {:ok, opened_at} <- candle_start(candle["start"]),
+         {:ok, open} <- required_decimal(candle["open"], :open),
+         {:ok, high} <- required_decimal(candle["high"], :high),
+         {:ok, low} <- required_decimal(candle["low"], :low),
+         {:ok, close} <- required_decimal(candle["close"], :close) do
       {:ok,
        %Types.Candle{
          symbol: symbol,
          timeframe: timeframe,
          # The venue's own bucket start, used as-is. Not re-derived, not rounded.
          opened_at: opened_at,
-         open: decimal(candle["open"]),
-         high: decimal(candle["high"]),
-         low: decimal(candle["low"]),
-         close: decimal(candle["close"]),
+         open: open,
+         high: high,
+         low: low,
+         close: close,
          volume: decimal(candle["volume"]),
          provider: :coinbase
        }}
@@ -1564,14 +1571,36 @@ defmodule DpExchange.Coinbase.Rest do
   # `nil` rather than zero for an absent number. Zero is a price, and a venue that did
   # not report volume has not reported zero volume.
   defp decimal(nil), do: nil
-
-  # Coinbase sends `""` for a bid or ask it has no value for, and `Decimal.new/1` raises
-  # on it. Empty is absent, not zero — zero is a price, and a venue that did not quote a
-  # bid has not quoted a bid of nothing.
-  defp decimal(""), do: nil
-  defp decimal(value) when is_binary(value), do: Decimal.new(value)
+  defp decimal(%Decimal{} = value), do: value
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+
+  # `Decimal.new/1` raises on a string that is not a number. Coinbase sends `""` for a
+  # bid or ask it has no value for, which is the same case: absent, not zero — and
+  # `Decimal.parse/1`, requiring the whole string be consumed (`{d, ""}`), covers both
+  # `""` and any other unparsable string in one clause rather than special-casing empty.
+  defp decimal(value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {parsed, ""} -> parsed
+      _unparsable -> nil
+    end
+  end
+
+  defp decimal(_other), do: nil
+
+  # A garbage or missing value in a field this contract requires must not become a `nil`
+  # carried into `@enforce_keys` — a struct's field list does not check that a value is
+  # non-nil, only that the key was given. Refuse the record instead of leaking a `nil`
+  # price into a `Quote`/`Trade`/`Candle`, which is the same substitution a raise would
+  # have been, wearing a quieter shape.
+  defp required_decimal(nil, field), do: {:error, {:missing_required_field, field}}
+
+  defp required_decimal(value, field) do
+    case decimal(value) do
+      nil -> {:error, {:invalid_decimal, field, value}}
+      parsed -> {:ok, parsed}
+    end
+  end
 
   # FAILS CLOSED. A missing or unparseable venue timestamp is an error, never `now`.
   #

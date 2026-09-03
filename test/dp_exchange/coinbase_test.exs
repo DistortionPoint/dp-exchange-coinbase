@@ -264,8 +264,14 @@ defmodule DpExchange.CoinbaseTest do
       # Coverage is observed, so nothing arrived and nothing is covered.
       assert Coinbase.coverage(opts) == %{}
 
+      # BTC-USD's shard never opened, so there is nothing on the wire to unsubscribe —
+      # this reports success honestly rather than pretending a request went anywhere.
       assert :ok = Coinbase.unsubscribe(~w(BTC-USD), opts)
-      assert :ok = Coinbase.update_symbols(~w(ETH-USD), opts)
+
+      # A fresh symbol tries the connection again rather than giving up silently after
+      # one failure — and reports the same real failure again, not a stale `:ok`.
+      assert {:error, _reason} = Coinbase.update_symbols(~w(ETH-USD), opts)
+
       assert :ok = Coinbase.subscribe_notices(opts)
     end
   end

@@ -31,6 +31,22 @@ defmodule DpExchange.Coinbase.Socket do
 
   Never `WebSockex.send_frame/2` directly. See that module for why; the short version is
   that it exits rather than returning, and the exit kills this connection.
+
+  ## `level2` is a maintained book, not a series of standalone facts
+
+  Unlike `ticker`, one `l2_data` frame does not carry enough to answer "what does the
+  book look like right now" — a `snapshot` event seeds it and `update` events carry only
+  the price levels that changed, with `new_quantity: "0"` meaning the level is gone.
+  **This socket holds that state**, one map of price → quantity per side per symbol, and
+  every `Core.Types.OrderBook` delivered is built from the maintained state, never from a
+  single frame's rows alone — a caller reading one delta as the whole book would see a
+  handful of prices and nothing else, which is a book with everything but two levels
+  simply missing rather than a partial update.
+
+  A **reconnect loses this state**, because the venue's own session is gone with it —
+  `handle_disconnect/2` clears every symbol's book, and the next `snapshot` this socket
+  receives after resubscribing rebuilds it from what the venue sends fresh. There is no
+  way to reconcile a stale local book against a venue that has moved on.
   """
 
   use WebSockex
@@ -62,7 +78,11 @@ defmodule DpExchange.Coinbase.Socket do
       credentials: Keyword.get(opts, :credentials),
       # Observed delivery, not intended: a symbol enters this set when a payload for it
       # arrives, never when it is subscribed.
-      delivering: MapSet.new()
+      delivering: MapSet.new(),
+      # symbol => %{bids: %{price => quantity}, asks: %{price => quantity}}. Maintained
+      # across `update` frames; wiped on every reconnect, because the venue's session —
+      # and the guarantee that our deltas are contiguous with its book — is gone with it.
+      books: %{}
     }
 
     WebSockex.start_link(Keyword.get(opts, :url, @endpoint), __MODULE__, state, opts)
@@ -106,7 +126,11 @@ defmodule DpExchange.Coinbase.Socket do
   @impl true
   def handle_disconnect(%{reason: reason}, state) do
     notify(state, Notice.new(:link_down, :coinbase, details: %{reason: inspect(reason)}))
-    {:reconnect, state}
+    # The venue's session is gone, and every maintained book with it — see the moduledoc.
+    # `delivering` is left alone: a symbol that was streaming is reasonably still "was
+    # covered a moment ago" until the coordinator's resubscribe timer either revives it
+    # or its own staleness ages it out of whatever freshness a caller applies downstream.
+    {:reconnect, %{state | books: %{}}}
   end
 
   @impl true
@@ -154,6 +178,10 @@ defmodule DpExchange.Coinbase.Socket do
     end)
   end
 
+  defp dispatch(%{"channel" => "l2_data", "events" => events}, state) when is_list(events) do
+    Enum.reduce(events, state, &apply_book_event/2)
+  end
+
   defp dispatch(%{"channel" => "subscriptions"}, state) do
     # The venue acknowledging a subscribe. Not data, and deliberately NOT recorded as
     # coverage: a confirmation is intent, and coverage reports what arrived.
@@ -163,10 +191,11 @@ defmodule DpExchange.Coinbase.Socket do
   defp dispatch(%{"channel" => "heartbeats"}, state), do: state
 
   defp dispatch(%{"channel" => channel, "events" => _events}, state)
-       when channel in ["l2_data", "level2", "market_trades", "candles", "user"] do
-    # Recognised, and not delivered. This package declares `streamable: [:quotes]`, so
-    # these channels are never subscribed — arriving means the venue sent something this
-    # package did not ask for, which is worth noticing rather than silently dropping.
+       when channel in ["market_trades", "candles", "user"] do
+    # Recognised, and not delivered. This package declares `streamable: [:quotes,
+    # :order_book]`, so these channels are never subscribed — arriving means the venue
+    # sent something this package did not ask for, which is worth noticing rather than
+    # silently dropping.
     notify(
       state,
       Notice.new(:data_quality, :coinbase,
@@ -204,13 +233,17 @@ defmodule DpExchange.Coinbase.Socket do
 
   # FAILS CLOSED on the timestamp, exactly as the REST path does. A tick whose freshness
   # we cannot state is a tick we must not deliver, and substituting `now` would make a
-  # stale one indistinguishable from a live one.
+  # stale one indistinguishable from a live one. The price fails closed the same way:
+  # `Decimal.new/1` used to raise directly here, and a `Quote` with a nil price would be
+  # the same substitution wearing a quieter shape — refused instead, through the same
+  # {:error, _} path deliver_ticker/2 already reports as a data-quality notice.
   defp build_quote(%{"price" => price} = ticker, symbol) do
-    with {:ok, at} <- parse_time(ticker["time"]) do
+    with {:ok, at} <- parse_time(ticker["time"]),
+         {:ok, parsed_price} <- required_decimal(price, :price) do
       {:ok,
        %Types.Quote{
          symbol: symbol,
-         price: Decimal.new(price),
+         price: parsed_price,
          volume: decimal(ticker["volume_24_h"]),
          timestamp: at,
          provider: :coinbase
@@ -219,6 +252,90 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   defp build_quote(_ticker, _symbol), do: {:error, :unexpected_payload}
+
+  # --- level2 / order book -------------------------------------------------
+
+  # `type` is `"snapshot"` once per subscribe (or resubscribe) and `"update"` after —
+  # both carry rows in the same shape, and the ONLY difference in how they are applied
+  # is that a snapshot replaces the book outright while an update patches it. Folding
+  # them into one clause would let a delayed snapshot silently merge into stale state
+  # instead of replacing it.
+  defp apply_book_event(
+         %{"type" => "snapshot", "product_id" => product, "updates" => rows},
+         state
+       )
+       when is_list(rows) do
+    symbol = SymbolFormat.to_canonical_symbol(product)
+    book = rows |> Enum.reduce(%{bids: %{}, asks: %{}}, &apply_book_row/2)
+
+    state
+    |> put_in([Access.key(:books), symbol], book)
+    |> deliver_book(symbol)
+  end
+
+  defp apply_book_event(%{"type" => "update", "product_id" => product, "updates" => rows}, state)
+       when is_list(rows) do
+    symbol = SymbolFormat.to_canonical_symbol(product)
+    book = Map.get(state.books, symbol, %{bids: %{}, asks: %{}})
+    book = Enum.reduce(rows, book, &apply_book_row/2)
+
+    state
+    |> put_in([Access.key(:books), symbol], book)
+    |> deliver_book(symbol)
+  end
+
+  defp apply_book_event(_other, state), do: state
+
+  # A price level's quantity is the venue's CURRENT total at that price, not a delta to
+  # add — replacing the map entry is correct; summing it would double every level that
+  # appears in two update frames in a row. `new_quantity: "0"` removes the level: it is
+  # not a price of zero, it is the level no longer existing, and leaving a zero-quantity
+  # entry in the book would make it a phantom best price the moment nothing outranks it.
+  defp apply_book_row(%{"side" => side, "price_level" => price, "new_quantity" => quantity}, book) do
+    key = book_side(side)
+
+    case {decimal(price), decimal(quantity)} do
+      {nil, _ignored} -> book
+      {_ignored, nil} -> book
+      {price, quantity} -> update_level(book, key, price, quantity)
+    end
+  end
+
+  defp apply_book_row(_row, book), do: book
+
+  defp book_side("bid"), do: :bids
+  defp book_side(_offer_or_other), do: :asks
+
+  defp update_level(book, side, price, quantity) do
+    if Decimal.compare(quantity, 0) == :eq do
+      remove_level(book, side, price)
+    else
+      Map.update!(book, side, &Map.put(&1, price, quantity))
+    end
+  end
+
+  defp remove_level(book, side, price), do: Map.update!(book, side, &Map.delete(&1, price))
+
+  defp deliver_book(state, symbol) do
+    book = Map.fetch!(state.books, symbol)
+
+    order_book = %Types.OrderBook{
+      symbol: symbol,
+      bids: sorted_levels(book.bids, :desc),
+      asks: sorted_levels(book.asks, :asc),
+      timestamp: DateTime.utc_now(),
+      provider: :coinbase
+    }
+
+    send(state.subscriber, {:dp_exchange, :coinbase, order_book})
+    %{state | delivering: MapSet.put(state.delivering, symbol)}
+  end
+
+  defp sorted_levels(levels, :desc),
+    do: Enum.sort_by(levels, fn {price, _qty} -> price end, {:desc, Decimal})
+
+  defp sorted_levels(levels, :asc),
+    do: Enum.sort_by(levels, fn {price, _qty} -> price end, {:asc, Decimal})
 
   defp parse_time(nil), do: {:error, :missing_venue_timestamp}
 
@@ -232,7 +349,26 @@ defmodule DpExchange.Coinbase.Socket do
   defp parse_time(other), do: {:error, {:unparseable_venue_timestamp, other}}
 
   defp decimal(nil), do: nil
-  defp decimal(value) when is_binary(value), do: Decimal.new(value)
+
+  # `Decimal.new/1` raises on a string that is not a number. `Decimal.parse/1`, requiring
+  # the whole string be consumed, does not.
+  defp decimal(value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {parsed, ""} -> parsed
+      _unparsable -> nil
+    end
+  end
+
+  defp decimal(_other), do: nil
+
+  defp required_decimal(nil, field), do: {:error, {:missing_required_field, field}}
+
+  defp required_decimal(value, field) do
+    case decimal(value) do
+      nil -> {:error, {:invalid_decimal, field, value}}
+      parsed -> {:ok, parsed}
+    end
+  end
 
   defp report_quality(state, detail) do
     notify(

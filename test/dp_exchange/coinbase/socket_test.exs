@@ -10,7 +10,7 @@ defmodule DpExchange.Coinbase.SocketTest do
   # actual socket would make these tier-2; what matters here is the decode-and-dispatch
   # behaviour, which is where a venue quietly loses data.
   defp state(subscriber \\ nil) do
-    %{subscriber: subscriber || self(), credentials: nil, delivering: MapSet.new()}
+    %{subscriber: subscriber || self(), credentials: nil, delivering: MapSet.new(), books: %{}}
   end
 
   defp frame(payload), do: Socket.handle_frame({:text, Jason.encode!(payload)}, state())
@@ -66,6 +66,20 @@ defmodule DpExchange.Coinbase.SocketTest do
       ticker =
         update_in(@ticker["events"], fn [event] ->
           [update_in(event["tickers"], fn [t] -> [Map.delete(t, "time")] end)]
+        end)
+
+      assert {:ok, _state} = frame(ticker)
+
+      refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+    end
+
+    test "a non-numeric price does not crash the socket" do
+      # Decimal.new/1 used to raise directly here, which would have taken the whole
+      # connection down over one malformed field on one symbol.
+      ticker =
+        update_in(@ticker["events"], fn [event] ->
+          [update_in(event["tickers"], fn [t] -> [Map.put(t, "price", "null")] end)]
         end)
 
       assert {:ok, _state} = frame(ticker)
@@ -168,6 +182,135 @@ defmodule DpExchange.Coinbase.SocketTest do
       Process.sleep(5)
 
       assert {:error, {:send_exit, _reason}} = Socket.unsubscribe(dead, "ticker", ~w(BTC-USD))
+    end
+  end
+
+  describe "level2 — a maintained book, not a series of standalone facts" do
+    @snapshot %{
+      "channel" => "l2_data",
+      "events" => [
+        %{
+          "type" => "snapshot",
+          "product_id" => "BTC-USD",
+          "updates" => [
+            %{"side" => "bid", "price_level" => "100.00", "new_quantity" => "1.5"},
+            %{"side" => "bid", "price_level" => "99.00", "new_quantity" => "2.0"},
+            %{"side" => "offer", "price_level" => "101.00", "new_quantity" => "0.5"}
+          ]
+        }
+      ]
+    }
+
+    test "a snapshot delivers a sorted OrderBook — bids descending, asks ascending" do
+      assert {:ok, _state} = Socket.handle_frame({:text, Jason.encode!(@snapshot)}, state())
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
+      assert book.symbol == "BTC-USD"
+
+      assert book.bids == [
+               {Decimal.new("100.00"), Decimal.new("1.5")},
+               {Decimal.new("99.00"), Decimal.new("2.0")}
+             ]
+
+      assert book.asks == [{Decimal.new("101.00"), Decimal.new("0.5")}]
+      assert book.provider == :coinbase
+    end
+
+    test "an update PATCHES the maintained book, not the frame's own rows alone" do
+      {:ok, s} = Socket.handle_frame({:text, Jason.encode!(@snapshot)}, state())
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{}}
+
+      update = %{
+        "channel" => "l2_data",
+        "events" => [
+          %{
+            "type" => "update",
+            "product_id" => "BTC-USD",
+            "updates" => [%{"side" => "bid", "price_level" => "100.50", "new_quantity" => "3.0"}]
+          }
+        ]
+      }
+
+      assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(update)}, s)
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
+      # The new level joins what the snapshot already established — 100.00 and 99.00
+      # are still there, because a delta patches the book rather than replacing it.
+      assert book.bids == [
+               {Decimal.new("100.50"), Decimal.new("3.0")},
+               {Decimal.new("100.00"), Decimal.new("1.5")},
+               {Decimal.new("99.00"), Decimal.new("2.0")}
+             ]
+    end
+
+    test "new_quantity \"0\" removes the level rather than leaving a phantom price" do
+      {:ok, s} = Socket.handle_frame({:text, Jason.encode!(@snapshot)}, state())
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{}}
+
+      update = %{
+        "channel" => "l2_data",
+        "events" => [
+          %{
+            "type" => "update",
+            "product_id" => "BTC-USD",
+            "updates" => [%{"side" => "bid", "price_level" => "99.00", "new_quantity" => "0"}]
+          }
+        ]
+      }
+
+      assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(update)}, s)
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
+      assert book.bids == [{Decimal.new("100.00"), Decimal.new("1.5")}]
+
+      refute Enum.any?(book.bids, fn {price, _qty} ->
+               Decimal.equal?(price, Decimal.new("99.00"))
+             end)
+    end
+
+    test "a second symbol's book is independent of the first's" do
+      snapshot_two =
+        put_in(@snapshot["events"], [
+          %{
+            "type" => "snapshot",
+            "product_id" => "ETH-USD",
+            "updates" => [%{"side" => "bid", "price_level" => "10.00", "new_quantity" => "5.0"}]
+          }
+        ])
+
+      {:ok, s} = Socket.handle_frame({:text, Jason.encode!(@snapshot)}, state())
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{symbol: "BTC-USD"}}
+
+      assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(snapshot_two)}, s)
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{symbol: "ETH-USD"} = eth_book}
+      assert eth_book.bids == [{Decimal.new("10.00"), Decimal.new("5.0")}]
+    end
+
+    test "an unparseable price or quantity is dropped rather than crashing the book" do
+      bad_row = %{
+        "channel" => "l2_data",
+        "events" => [
+          %{
+            "type" => "snapshot",
+            "product_id" => "BTC-USD",
+            "updates" => [%{"side" => "bid", "price_level" => "null", "new_quantity" => "1.0"}]
+          }
+        ]
+      }
+
+      assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(bad_row)}, state())
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
+      assert book.bids == []
+    end
+
+    test "a reconnect clears the maintained book" do
+      {:ok, s} = Socket.handle_frame({:text, Jason.encode!(@snapshot)}, state())
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{}}
+      refute s.books == %{}
+
+      assert {:reconnect, s} = Socket.handle_disconnect(%{reason: :closed}, s)
+      assert s.books == %{}
     end
   end
 end

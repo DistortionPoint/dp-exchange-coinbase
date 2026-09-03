@@ -27,7 +27,7 @@ defmodule DpExchange.Coinbase.BaselineTest do
 
   @moduletag :capture_log
 
-  defp state, do: %{subscriber: self(), credentials: nil, delivering: MapSet.new()}
+  defp state, do: %{subscriber: self(), credentials: nil, delivering: MapSet.new(), books: %{}}
   defp frame(payload), do: Socket.handle_frame({:text, Jason.encode!(payload)}, state())
 
   describe "the v3 nesting is per channel, and getting it wrong drops everything" do
@@ -51,24 +51,32 @@ defmodule DpExchange.Coinbase.BaselineTest do
       assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "BTC-USD"}}
     end
 
-    test "l2_data is recognised — v3 renames level2 on the RESPONSE side only" do
+    test "l2_data is decoded — v3 renames level2 on the RESPONSE side only" do
       # The subscribe says `level2`; the venue answers on `l2_data`. A parser keyed on
       # the subscribe name drops every book update, and a venue delivering nothing on one
       # channel while another works reads as a quiet market rather than a parsing bug.
       assert {:ok, _state} =
                frame(%{
                  "channel" => "l2_data",
-                 "events" => [%{"product_id" => "BTC-USD", "updates" => []}]
+                 "events" => [
+                   %{
+                     "type" => "snapshot",
+                     "product_id" => "BTC-USD",
+                     "updates" => [
+                       %{"side" => "bid", "price_level" => "77791.77", "new_quantity" => "1.0"}
+                     ]
+                   }
+                 ]
                })
 
-      assert_received {:dp_exchange, :coinbase,
-                       %Notice{kind: :data_quality, details: %{channel: "l2_data"}}}
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{symbol: "BTC-USD"}}
     end
 
-    test "every channel the venue sends is recognised, none silently ignored" do
+    test "every OTHER channel the venue sends is recognised, none silently ignored" do
       # Silence is the failure mode: an unrecognised channel that falls through looks
-      # identical to a channel that stopped arriving.
-      for channel <- ~w(l2_data level2 market_trades candles user) do
+      # identical to a channel that stopped arriving. `l2_data` is excluded here — it is
+      # subscribed and decoded now, not merely recognised; its own test covers it above.
+      for channel <- ~w(market_trades candles user) do
         assert {:ok, _state} = frame(%{"channel" => channel, "events" => []})
 
         assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}},

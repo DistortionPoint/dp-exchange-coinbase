@@ -245,6 +245,10 @@ defmodule DpExchange.Coinbase.FeedTest do
     test "unsubscribe goes to the connection and still drops coverage" do
       {feed, _socket} = start_with_socket()
 
+      # Subscribing first is what creates the shard `unsubscribe/2` then has to reach —
+      # a symbol that only ever arrived via a raw `send` (simulating delivery without
+      # ever being asked for) has no shard to unsubscribe from, correctly.
+      Feed.subscribe(feed, ~w(BTC-USD), to: self())
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
       Process.sleep(20)
 
@@ -268,6 +272,167 @@ defmodule DpExchange.Coinbase.FeedTest do
       Process.sleep(20)
 
       assert {:error, _reason} = Feed.subscribe(feed, ~w(BTC-USD), to: self())
+      assert Process.alive?(feed)
+    end
+  end
+
+  describe "shards/1 — the whole reason this module exists again" do
+    test "100 symbols is one shard" do
+      symbols = for n <- 1..100, do: "SYM#{n}-USD"
+      assert [shard] = Feed.shards(symbols)
+      assert length(shard) == 100
+    end
+
+    test "101 symbols is two shards, the second carrying the overflow" do
+      symbols = for n <- 1..101, do: "SYM#{n}-USD"
+      assert [first, second] = Feed.shards(symbols)
+      assert length(first) == 100
+      assert length(second) == 1
+    end
+
+    test "an empty scope is zero shards, not one empty one" do
+      assert Feed.shards([]) == []
+    end
+
+    test "pairs_per_socket is the number the incident measured, not a guess" do
+      assert Feed.pairs_per_socket() == 100
+    end
+  end
+
+  describe "sharding across the whole subscribe lifecycle" do
+    test "subscribing 150 symbols opens two shards, the second staggered" do
+      symbols = for n <- 1..150, do: "SYM#{n}-USD"
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}", url: "ws://127.0.0.1:1/nowhere"}
+        )
+
+      # The first shard is synchronous (this call's own reply); the second is
+      # deliberately staggered by @shard_spacing_ms so as not to burst-connect. The
+      # endpoint is unreachable, so both attempts fail — what matters is that BOTH
+      # shards get attempted rather than only the first, and that the process survives
+      # both failures.
+      assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
+      Process.sleep(50)
+
+      assert Process.alive?(feed)
+    end
+  end
+
+  describe "internal messages — the staggered async paths" do
+    # These are the messages `reshard/1` schedules with `Process.send_after/3` for every
+    # shard beyond the first, and for the resubscribe timer. Driven directly rather than
+    # waited for, the same way `Socket`'s own tests drive `handle_frame/2` directly.
+    defp fake_socket do
+      pid = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      pid
+    end
+
+    test "an :open_shard message that succeeds opens the socket and subscribes" do
+      # `socket:` pre-supplies the connection the same way `start_with_socket/0` does
+      # for the top-level subscribe tests — a `feed_test.exs` running this against the
+      # real endpoint would be a tier-2 test wearing a tier-1 tag.
+      socket = fake_socket()
+
+      feed =
+        start_supervised!(
+          {Feed, name: :"feed_#{System.unique_integer([:positive])}", socket: socket}
+        )
+
+      send(feed, {:open_shard, 0, ["BTC-USD"]})
+      Process.sleep(20)
+
+      state = :sys.get_state(feed)
+      assert %{0 => %{socket: ^socket, symbols: ["BTC-USD"]}} = state.shards
+    end
+
+    test "an :open_shard message whose socket cannot open logs and leaves the shard absent" do
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}", url: "ws://127.0.0.1:1/nowhere"}
+        )
+
+      send(feed, {:open_shard, 0, ["BTC-USD"]})
+      Process.sleep(50)
+
+      state = :sys.get_state(feed)
+      assert state.shards == %{}
+      assert Process.alive?(feed)
+    end
+
+    test "a :channel_subscribe message against a dead socket is skipped rather than raising" do
+      feed = start_feed()
+      dead = spawn(fn -> :ok end)
+      Process.sleep(10)
+      refute Process.alive?(dead)
+
+      send(feed, {:channel_subscribe, dead, "ticker", ["BTC-USD"], nil})
+      Process.sleep(20)
+
+      assert Process.alive?(feed)
+    end
+
+    test "a :channel_subscribe failure is logged, not crashed on" do
+      feed = start_feed()
+      socket = fake_socket()
+
+      send(feed, {:channel_subscribe, socket, "ticker", ["BTC-USD"], nil})
+      Process.sleep(20)
+
+      assert Process.alive?(feed)
+    end
+
+    test "a :channel_unsubscribe message reaches the socket" do
+      feed = start_feed()
+      socket = fake_socket()
+
+      send(feed, {:channel_unsubscribe, socket, "ticker", ["BTC-USD"]})
+      Process.sleep(20)
+
+      assert Process.alive?(feed)
+    end
+
+    test "a :channel_unsubscribe against a dead socket is skipped" do
+      feed = start_feed()
+      dead = spawn(fn -> :ok end)
+      Process.sleep(10)
+
+      send(feed, {:channel_unsubscribe, dead, "ticker", ["BTC-USD"]})
+      Process.sleep(20)
+
+      assert Process.alive?(feed)
+    end
+
+    test "the resubscribe timer re-issues every open shard's subscriptions" do
+      {feed, socket} = start_with_socket()
+
+      Feed.subscribe(feed, ~w(BTC-USD), to: self())
+      Process.sleep(20)
+
+      send(feed, :resubscribe)
+      Process.sleep(20)
+
+      assert Process.alive?(feed)
+      assert Process.alive?(socket)
+    end
+
+    test "the resubscribe timer skips a shard whose socket has died" do
+      feed = start_feed()
+      state = :sys.get_state(feed)
+      dead = spawn(fn -> :ok end)
+      Process.sleep(10)
+
+      :sys.replace_state(feed, fn _s ->
+        %{state | shards: %{0 => %{socket: dead, symbols: ["BTC-USD"]}}}
+      end)
+
+      send(feed, :resubscribe)
+      Process.sleep(20)
+
       assert Process.alive?(feed)
     end
   end

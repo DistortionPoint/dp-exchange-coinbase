@@ -21,7 +21,7 @@ same facade every venue in the family exposes.
 
 87 callbacks, of which **46 are declared `:experimental`** and 41 `:unsupported`. None is `:proven` — that requires a consumer trading live, and this package has never run in production (D15).
 
-Asset classes: **crypto**. Streamed kinds: **quotes** — everything else pulls only.
+Asset classes: **crypto**. Streamed kinds: **quotes, order book** — everything else pulls only.
 
 Of the 41 unsupported endpoints, **38 are the venue's own absence**, not this package's backlog — see `venue_does_not_serve/0` and `docs/reference/coinbase/negative-claims.md`, which records the source and date behind every one.
 

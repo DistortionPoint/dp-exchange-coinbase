@@ -87,6 +87,17 @@ defmodule DpExchange.Coinbase.RestTest do
                Rest.get_price("BTC-USD", plug: responding(body), retry_attempts: 0)
     end
 
+    test "a non-numeric price refuses the quote rather than raising or delivering price: nil" do
+      # Decimal.new/1 used to raise here. The fix must not trade a crash for a Quote whose
+      # required :price is silently nil, which is the same substitution wearing a
+      # quieter shape.
+      trade = @ticker["trades"] |> hd() |> Map.put("price", "null")
+      body = %{@ticker | "trades" => [trade]}
+
+      assert {:error, {:invalid_decimal, :price, "null"}} =
+               Rest.get_price("BTC-USD", plug: responding(body), retry_attempts: 0)
+    end
+
     test "an unexpected shape is an error, not a partially-built quote" do
       assert {:error, :unexpected_response_shape} =
                Rest.get_price("BTC-USD",
