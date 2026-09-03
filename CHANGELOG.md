@@ -22,6 +22,22 @@ acceptable changelog line.
 
 ### Documentation
 
+- **The `:unsupported` list is now split.** `venue_does_not_serve/0` names the 38 endpoints
+  that are Coinbase's own absence — staking reads, the one-step convert, funding rails,
+  option chains, watchlists — each with the source and date behind it; three
+  (`get_funding/2`, `get_contract_stats/2`, `list_instruments/1`) stay under `@not_ported`
+  because they are the venue's surface and this package's backlog, not the venue's gap.
+  Robinhood found four callbacks mislabelled the other way; this pass checks Coinbase's own
+  list rather than assume it was filed correctly the first time.
+- **`README.md` states what the contract covers** — 46 of 87 callbacks `:experimental`, and
+  points at `negative-claims.md` for every absence's source.
+- **`docs/reference/coinbase/endpoint-inventory.md`'s counts refreshed.** It read "everything
+  authenticated is absent" until this release, which had been true at capture and stopped
+  being true as this package grew — the vendor-side numbers had not moved, this package's
+  coverage of them had, and the section conflated the two.
+
+### Documentation
+
 - **Every negative this package makes is audited** —
   `docs/reference/coinbase/negative-claims.md`, twelve claims with the source and date
   consulted for each. Nine hold; **three were wrong**, and all three for the same reason:

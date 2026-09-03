@@ -105,26 +105,36 @@ precondition is met — Gemini's six plus Coinbase's seven.
 
 ## Counts
 
+**Re-checked 2026-09-03. The table below is what this section read until this release, and
+it was wrong by then — not because the venue count moved, but because this package did.**
+It said "everything authenticated is absent" on a package that by 2026-09-01 implemented 46
+of the contract's 87 callbacks, most of them authenticated. The fix is not a fresh page
+capture — Advanced Trade's operation count has not moved — it is stating what changed on
+this side of the boundary, which a vendor capture cannot do for itself.
+
+**Current, from `capabilities/0`, checked 2026-09-03**: 46 `:experimental`, 41
+`:unsupported`, of which 38 are the venue's own absence — see `negative-claims.md` — and
+3 are genuinely not yet ported (`get_funding/2`, `get_contract_stats/2`, `list_instruments/1`).
+
+The vendor-side counts below are unchanged since the original capture and still describe
+Advanced Trade's own surface, not this package's coverage of it — read the two separately.
+
 | | endpoints | in this package |
 |---|---|---|
-| Advanced Trade REST (`/api/v3/brokerage`) | **51** | **4** |
+| Advanced Trade REST (`/api/v3/brokerage`) | **51** | **implements the callbacks that map onto it — see `capabilities/0` for the current count, not a number frozen at capture time** |
 
-Three of the six `public` market-data endpoints, plus the authenticated ticker variant
-under `products` — **four** distinct paths in all. **Everything authenticated is absent**, and
-`place_order/3` is declared `:unsupported` on a venue with nine order endpoints.
-
-| group | endpoints | implemented |
+| group | endpoints | in this package |
 |---|---|---|
-| orders | 9 | 0 |
-| futures (CFM) | 9 | 0 |
-| public | 6 | 3 |
-| products | 6 | 1 |
-| portfolios | 6 | 0 |
-| perpetuals (INTX) | 6 | 0 — **vendor-deprecated** |
-| convert | 3 | 0 |
-| payment methods | 2 | 0 |
-| accounts | 2 | 0 |
-| fees | 1 | 0 |
+| orders | 9 | most — place, get, cancel, list; no batch-place, batch has no atomic multi-cancel beyond the venue's own |
+| futures (CFM) | 9 | not ported — `list_instruments/1`-adjacent |
+| public | 6 | quotes, top of book, trades |
+| products | 6 | symbols, instrument metadata |
+| portfolios | 6 | not ported (`list_portfolios/1`) |
+| perpetuals (INTX) | 6 | 0 — **vendor-deprecated**, and `supported_instrument_types` deliberately excludes `:perp` for it |
+| convert | 3 | 0 — **the venue's absence**, not this package's; see Notes |
+| payment methods | 2 | 0 — **the venue's absence** |
+| accounts | 2 | balances |
+| fees | 1 | 0 — read separately from `get_trade_volume/2`, which is now implemented |
 | data API | 1 | 0 |
 
 ## Endpoints

@@ -47,11 +47,15 @@ defmodule DpExchange.Coinbase do
   alias DpExchange.Coinbase.{Feed, Prime, Rest, Supervisor}
   alias DpExchange.Core.{Capabilities, Venue}
 
-  @unsupported [
-    # Core 0.1.16's wider facade — declared, not yet implemented. Each is a Phase 3–13
-    # item. `:unsupported` is about this package unless the note says otherwise.
-    {:get_funding, 2},
-    {:get_contract_stats, 2},
+  # The venue serves none of these. **That is a claim about Coinbase, not about how far
+  # this package got** — and the two are worth telling apart, because both answer a caller
+  # identically and only the second can ever change.
+  #
+  # The mislabel goes both ways and both are defects. A venue's own absence filed as a
+  # backlog item invents work that cannot be done and quietly implies an endpoint the vendor
+  # does not publish; a backlog item filed as the venue's absence hides a capability a
+  # consumer could have had. Robinhood shipped four of the first kind and no test failed.
+  @venue_does_not_serve [
     # **Prime publishes staking; it does not publish these four.** `stake/3` and
     # `unstake/3` are live against Prime — see `DpExchange.Coinbase.Prime` — and these are
     # the reads that have no endpoint behind them:
@@ -70,24 +74,27 @@ defmodule DpExchange.Coinbase do
     # **Coinbase's convert is the two-step form, not the one-step one.** Advanced Trade
     # publishes `POST /convert/quote`, `POST /convert/trade/{id}` and
     # `GET /convert/trade/{id}` — quote, commit, read — which is `quote_conversion/4` and
-    # friends, still unimplemented and scheduled on their own. There is a one-step
-    # `POST /conversions`, but it belongs to the **Exchange** API, a different product this
-    # package does not reach. So `convert/4` has no endpoint on this package's surface.
-    # Advanced Trade places one order per request: POST /orders takes a single order, and
-    # /orders/batch_cancel is a batch *cancel*, which destroys rather than creates.
-    {:place_orders, 3},
+    # friends. There is a one-step `POST /conversions`, but it belongs to the **Exchange**
+    # API, a different product this package does not reach. So `convert/4` has no endpoint
+    # on this package's surface.
     {:convert, 4},
-    {:get_deposit_address, 3},
-    {:list_approved_addresses, 1},
-    {:estimate_withdrawal_fee, 4},
+    # Advanced Trade places one order per request: `POST /orders` takes a single order, and
+    # `/orders/batch_cancel` is a batch *cancel*, which destroys rather than creates.
+    {:place_orders, 3},
     # **Advanced Trade publishes no allowlist, no networks list and no fiat registration.**
     # Addresses are managed in Coinbase's own interface, not through this API, and there is
     # no path that names a network. `add_payment_method/2` is the same: a bank is linked
-    # through the consumer product's flow, which needs a person.
+    # through the consumer product's flow, which needs a person. Without a network there is
+    # nothing to give `get_deposit_address/3` or `withdraw/5`, and this is the group where
+    # guessing one sends funds to a chain the venue does not credit.
+    {:get_deposit_address, 3},
+    {:list_approved_addresses, 1},
+    {:estimate_withdrawal_fee, 4},
     {:request_approved_address, 4},
     {:remove_approved_address, 3},
     {:list_networks, 2},
     {:add_payment_method, 2},
+    {:withdraw, 5},
     # **`/transaction_summary` is a fee-and-volume summary, not a transaction list.** It
     # reports what the account traded in a window and what that cost; it does not enumerate
     # deposits, fees and adjustments. Returning it here would answer a different question
@@ -99,7 +106,8 @@ defmodule DpExchange.Coinbase do
     {:get_fx_rate, 3},
     {:get_notional_balances, 3},
     {:list_custody_fees, 2},
-    {:withdraw, 5},
+    # **A crypto exchange, not a broker.** Advanced Trade lists no options, no watchlists,
+    # no issuer data and no screener — checked against the venue's reference, 2026-09-01.
     {:get_option_chain, 2},
     {:get_option_expirations, 2},
     {:get_option_greeks, 2},
@@ -120,7 +128,6 @@ defmodule DpExchange.Coinbase do
     # outcomes with no way to reach an order that appeared between the listing and the
     # cancel — a bulk cancel that is not one.
     {:cancel_all_orders, 2},
-    {:get_transfers, 2},
     # **This venue runs no auctions and publishes no footprints.** A crypto book trades
     # continuously — there is no opening or closing auction to have an imbalance in — and
     # the venue publishes no volume-at-price split. Not "unimplemented": there is nothing
@@ -128,9 +135,24 @@ defmodule DpExchange.Coinbase do
     {:get_auction_imbalance, 2},
     {:get_volume_profile, 3},
     {:get_market_overview, 1},
-    {:list_instruments, 1},
+    # No transfer ledger on this surface; transfers happen in the consumer product.
+    {:get_transfers, 2},
+    # The venue meters by header rather than by endpoint: there is no call that reports
+    # what a credential has left.
     {:get_rate_limit_status, 2}
   ]
+
+  # Not ported yet. **The venue serves these**; this package does not implement them.
+  @not_ported [
+    # Perpetual funding and contract statistics live behind the INTX endpoints, which this
+    # package does not reach — see `supported_instrument_types`.
+    {:get_funding, 2},
+    {:get_contract_stats, 2},
+    # `/products` carries the instrument metadata; this package reads only the symbols.
+    {:list_instruments, 1}
+  ]
+
+  @unsupported @venue_does_not_serve ++ @not_ported
 
   # --- lifecycle ---------------------------------------------------------
 
@@ -152,6 +174,19 @@ defmodule DpExchange.Coinbase do
 
   @impl true
   def asset_classes, do: [:crypto]
+
+  @doc """
+  Endpoints the **venue** does not serve, as distinct from ones this package has not ported.
+
+  Both answer `{:error, :not_supported}`, and a caller acts the same way on either — but
+  they mean different things to anyone deciding what to build next, so they are told apart
+  here rather than flattened into one list.
+
+  Every entry is recorded with its source and the date consulted in
+  `docs/reference/coinbase/negative-claims.md`.
+  """
+  @spec venue_does_not_serve() :: [{atom(), arity()}]
+  def venue_does_not_serve, do: @venue_does_not_serve
 
   @impl true
   def capabilities do
