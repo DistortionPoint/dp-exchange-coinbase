@@ -208,13 +208,26 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   defp dispatch(%{"type" => "error", "message" => message}, state) do
-    # Coinbase reports an auth failure this way, and it is the shape the stub-token
-    # incident produced. Surfaced as a condition rather than counted as a metric.
-    notify(state, Notice.new(:credentials_rejected, :coinbase, message: message))
+    notify(state, Notice.new(error_kind(message), :coinbase, message: message))
     state
   end
 
   defp dispatch(_other, state), do: state
+
+  # Coinbase reports both an auth failure and a capacity refusal through the identical
+  # `{"type":"error","message":...}` shape, and they mean nothing alike: one says a
+  # credential is wrong, the other says this package opened more `level2` sessions than
+  # the venue allows under it. Collapsing both into `:credentials_rejected` (the auth
+  # failure's own shape, from the stub-token incident this clause was originally written
+  # for) reported a capacity condition as a credential problem — DpCryptoManagement's
+  # issue #22, where "too many L2 streams requested in a single session" surfaced only
+  # once the consumer wired `subscribe_notices/1` and still read as an auth error until
+  # traced. `:rate_limited` is Core's own kind for exactly this: pressure, not identity.
+  defp error_kind(message) do
+    if String.contains?(String.downcase(message), "too many"),
+      do: :rate_limited,
+      else: :credentials_rejected
+  end
 
   defp deliver_ticker(%{"product_id" => product} = ticker, state) do
     symbol = SymbolFormat.to_canonical_symbol(product)

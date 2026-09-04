@@ -51,6 +51,27 @@ acceptable changelog line.
 
 ### Fixed
 
+- **A `level2` capacity refusal from the venue was reported as `:credentials_rejected`
+  — DpCryptoManagement's issue #22, filed as a suspected regression of #20.** Coinbase
+  answers both a genuine auth failure and "too many L2 streams requested in a single
+  session" through the identical `{"type":"error","message":...}` frame shape.
+  `Socket.dispatch/2` collapsed both into `:credentials_rejected` — the shape the
+  original stub-token incident produced — which sent a consumer that finally wired
+  `subscribe_notices/1` looking for a broken credential that was never broken. Now
+  classified by message content: a capacity refusal reports `:rate_limited`, Core's own
+  kind for pressure rather than identity: everything else keeps the original
+  `:credentials_rejected` behavior.
+
+  **This does not, on its own, explain or fix why 4 of 5 shards deliver nothing.** #20's
+  fix addressed a genuine, confirmed bug (an unstaggered connect burst) but issue #22's
+  live evidence — the refusal persisting unchanged across 15+ minutes and two clean
+  restarts, with every socket healthy and connected — describes a *permanent* per-shard
+  rejection, not the *transient* reset #20 targeted. Whether Coinbase enforces `level2`
+  session capacity per account rather than per connection, which would make multi-socket
+  sharding for this channel fundamentally incompatible with this venue regardless of
+  spacing, is not something this repository can verify without live credentials. Left
+  open pending that evidence.
+
 - **A scope wide enough to need three or more shards opened them all in the same
   instant instead of staggered, and 60-second resubscribes re-issued the same burst
   every minute — DpCryptoManagement's issue #20, a real ~406-symbol/5-shard production

@@ -116,6 +116,25 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert_received {:dp_exchange, :coinbase,
                        %Notice{kind: :credentials_rejected, message: "authentication failure"}}
     end
+
+    test "a capacity refusal becomes a rate-limit notice, not a credentials one" do
+      # DpCryptoManagement's issue #22: the venue reports this through the identical
+      # `{"type":"error"}` shape as an auth failure, and it means something entirely
+      # different — a session already carrying too many `level2` streams, not a bad
+      # credential. Reporting it as `:credentials_rejected` sent a consumer looking for a
+      # broken key that was never broken.
+      assert {:ok, _state} =
+               frame(%{
+                 "type" => "error",
+                 "message" => "too many L2 streams requested in a single session"
+               })
+
+      assert_received {:dp_exchange, :coinbase,
+                       %Notice{
+                         kind: :rate_limited,
+                         message: "too many L2 streams requested in a single session"
+                       }}
+    end
   end
 
   describe "subscription messages" do
