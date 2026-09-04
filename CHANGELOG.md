@@ -51,6 +51,25 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`Feed.fan_out/2` crashed on a subscriber registered by name — DpCryptoManagement's
+  issue #15.** `subscribe/2`'s `to:` option accepts any value, and `fan_out/2` called
+  `Process.alive?/1` on it directly — which only accepts a pid and raises on anything
+  else. A consumer registering itself under a name (ordinary OTP practice) and handing
+  that name to `to:` crash-looped the whole `Feed` GenServer on every delivery. Fixed by
+  resolving a subscriber (pid or name) to a pid first, treating an unregistered name the
+  same as a dead pid: silently skipped, never a crash.
+
+- **`feed_test.exs`'s own fake sockets never answered `WebSockex.send_frame/2`'s
+  internal `:gen.call`, silently turning several tests into a real, load-dependent race
+  against two independent ~5-second timeouts** (WebSockex's own hardcoded one and
+  `:sys.get_state/1,2`'s default) rather than a fast, deterministic assertion — the
+  file's slowest tests ran 5–15 real seconds each and occasionally lost the race outright
+  under load from the rest of the suite. Not flakiness to route around: traced to a
+  root cause and fixed there. One fake now replies immediately per `:gen`'s own reply
+  protocol (removing the stall entirely); the other, which intentionally models a socket
+  whose frames fail, now fails **immediately** rather than by never replying. Full
+  `feed_test.exs` run time: ~45s → ~3s.
+
 - **`to_order/1` read both `Order.quantity` and `Order.filled_quantity` from the same
   venue field — DpCryptoManagement's issue #12.** `order["filled_size"]` populated both,
   so a fetched order's `remaining_quantity` (quantity minus filled) was always zero, even

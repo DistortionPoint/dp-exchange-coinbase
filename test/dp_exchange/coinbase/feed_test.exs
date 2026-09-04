@@ -103,6 +103,36 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       assert Process.alive?(feed)
     end
+
+    test "a subscriber registered by name (not a raw pid) is delivered to rather than crashing the feed" do
+      # Filed as a live bug: Process.alive?/1 only accepts a pid and raises on anything
+      # else, so a consumer that registers itself under a name and hands that name to
+      # `to:` — ordinary OTP practice — crashed this whole GenServer on the very first
+      # delivery.
+      name = :"coinbase_feed_test_subscriber_#{System.unique_integer([:positive])}"
+      Process.register(self(), name)
+      feed = start_feed()
+
+      Feed.subscribe_notices(feed, to: name)
+      send(feed, {:dp_exchange, :coinbase, Notice.new(:link_up, :coinbase)})
+
+      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_up}}
+      assert Process.alive?(feed)
+
+      Process.unregister(name)
+    end
+
+    test "a name that is not (or no longer) registered is silently skipped, not a crash" do
+      name = :"coinbase_feed_test_unregistered_#{System.unique_integer([:positive])}"
+      refute Process.whereis(name)
+      feed = start_feed()
+
+      Feed.subscribe_notices(feed, to: name)
+      send(feed, {:dp_exchange, :coinbase, Notice.new(:link_up, :coinbase)})
+      Process.sleep(20)
+
+      assert Process.alive?(feed)
+    end
   end
 
   describe "unknown messages" do
@@ -217,11 +247,20 @@ defmodule DpExchange.Coinbase.FeedTest do
   end
 
   describe "with a connection already established" do
-    # A live process standing in for a socket. Frames sent to it fail — it does not speak
-    # the protocol — which is exactly the path the feed has to handle, and it exercises
-    # the socket-bearing branches without reaching a venue.
+    # A live process standing in for a socket whose frames fail — it exercises the
+    # socket-bearing branches without reaching a venue.
+    #
+    # Replies immediately with an error, rather than never replying: `WebSockex.
+    # send_frame/2` calls `:gen.call(client, :"$websockex_send", frame, timeout)`, and a
+    # target that never replies makes that block for the real, hardcoded 5-second
+    # `:gen.call` timeout — during which the `Feed` process answers nothing at all,
+    # including `:sys.get_state/1,2` (its own default timeout is close enough to the
+    # same 5 seconds that the two raced). Every test below asserts only `{:error,
+    # _reason}`, never the specific reason, so an immediate simulated failure exercises
+    # the identical "the feed handles a socket send failing" path this was always meant
+    # to, without the multi-second, load-dependent stall.
     defp start_with_socket do
-      socket = spawn(fn -> Process.sleep(:infinity) end)
+      socket = spawn(&reject_frames_loop/0)
       on_exit(fn -> Process.exit(socket, :kill) end)
 
       feed =
@@ -230,6 +269,18 @@ defmodule DpExchange.Coinbase.FeedTest do
         )
 
       {feed, socket}
+    end
+
+    defp reject_frames_loop do
+      receive do
+        {:"$websockex_send", from, _frame} ->
+          :gen.reply(from, {:error, :simulated_socket_failure})
+
+        _other ->
+          :ok
+      end
+
+      reject_frames_loop()
     end
 
     test "subscribe reuses the connection rather than dialling a second one" do
@@ -325,10 +376,37 @@ defmodule DpExchange.Coinbase.FeedTest do
     # These are the messages `reshard/1` schedules with `Process.send_after/3` for every
     # shard beyond the first, and for the resubscribe timer. Driven directly rather than
     # waited for, the same way `Socket`'s own tests drive `handle_frame/2` directly.
+    #
+    # A socket that never answers `WebSockex.send_frame/2`'s internal `:gen.call` (a bare
+    # `Process.sleep(:infinity)`, as this was) does not merely leave a frame unacked — it
+    # blocks whichever `Feed` handler sent it for the full, real, hardcoded 5-second
+    # `:gen.call` timeout, during which the `Feed` process cannot answer anything at all,
+    # including `:sys.get_state/1,2` (which shares roughly the same default timeout).
+    # Every test using the old fake was therefore racing two independent ~5-second
+    # windows against each other — reliably slow, and under load from the rest of the
+    # suite running concurrently, sometimes losing outright. Not "flaky" in the sense of
+    # unexplainable: fully deterministic once traced, and fixed at the cause rather than
+    # by widening a timeout to outlast it.
+    #
+    # `WebSockex.send_frame/2` calls `:gen.call(client, :"$websockex_send", frame,
+    # timeout)`, which — per `:gen`'s own protocol — expects the receiver to reply via
+    # `:gen.reply(from, reply)`. Replying immediately, correctly, is what an actually
+    # "fake" socket does; sleeping forever was standing in for a socket that had already
+    # died, not one that was merely slow, and this file has a separate, dedicated fake
+    # (`dead/0` inline where used) for that case.
     defp fake_socket do
-      pid = spawn(fn -> Process.sleep(:infinity) end)
+      pid = spawn(&fake_socket_loop/0)
       on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
       pid
+    end
+
+    defp fake_socket_loop do
+      receive do
+        {:"$websockex_send", from, _frame} -> :gen.reply(from, :ok)
+        _other -> :ok
+      end
+
+      fake_socket_loop()
     end
 
     test "an :open_shard message that succeeds opens the socket and subscribes" do
