@@ -288,6 +288,96 @@ defmodule DpExchange.Coinbase.RestTest do
     end
   end
 
+  describe "get_market_overview/1" do
+    test "reads the fields get_symbols/1 discards from the same bulk endpoint" do
+      body = %{
+        "products" => [
+          %{
+            "product_id" => "BTC-USD",
+            "price" => "79355.5",
+            "price_percentage_change_24h" => "1.13",
+            "volume_24h" => "12191.98",
+            "high_24h" => "82283",
+            "low_24h" => "78431.32",
+            "status" => "online"
+          }
+        ]
+      }
+
+      assert {:ok, overview} =
+               Rest.get_market_overview(plug: responding(body), retry_attempts: 0)
+
+      assert %{
+               price: price,
+               price_change_24h_pct: change,
+               volume_24h: volume,
+               high_24h: high,
+               low_24h: low,
+               status: "online"
+             } = overview["BTC-USD"]
+
+      assert Decimal.equal?(price, Decimal.new("79355.5"))
+      assert Decimal.equal?(change, Decimal.new("1.13"))
+      assert Decimal.equal?(volume, Decimal.new("12191.98"))
+      assert Decimal.equal?(high, Decimal.new("82283"))
+      assert Decimal.equal?(low, Decimal.new("78431.32"))
+    end
+
+    test "an unexpected shape is an error" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_market_overview(plug: responding(%{"nope" => 1}), retry_attempts: 0)
+    end
+  end
+
+  describe "list_instruments/1" do
+    test "carries base, quote, instrument type and status per product" do
+      body = %{
+        "products" => [
+          %{
+            "product_id" => "BTC-USD",
+            "base_currency_id" => "BTC",
+            "quote_currency_id" => "USD",
+            "product_type" => "SPOT",
+            "status" => "online"
+          }
+        ]
+      }
+
+      assert {:ok, [instrument]} =
+               Rest.list_instruments(plug: responding(body), retry_attempts: 0)
+
+      assert instrument.symbol == "BTC-USD"
+      assert instrument.base == "BTC"
+      assert instrument.quote == "USD"
+      assert instrument.instrument == :spot
+      assert instrument.status == :tradable
+    end
+
+    test "an unrecognised product type is :unknown, never a guess" do
+      body = %{
+        "products" => [
+          %{
+            "product_id" => "BTC-USD",
+            "base_currency_id" => "BTC",
+            "quote_currency_id" => "USD",
+            "product_type" => "SOMETHING_NEW",
+            "status" => "online"
+          }
+        ]
+      }
+
+      assert {:ok, [instrument]} =
+               Rest.list_instruments(plug: responding(body), retry_attempts: 0)
+
+      assert instrument.instrument == :unknown
+    end
+
+    test "an unexpected shape is an error" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.list_instruments(plug: responding(%{"nope" => 1}), retry_attempts: 0)
+    end
+  end
+
   describe "the declaration and the code agree" do
     test "granularities/0 matches what capabilities/0 declares" do
       assert Rest.granularities() == DpExchange.Coinbase.capabilities().historical_timeframes

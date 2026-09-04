@@ -134,7 +134,6 @@ defmodule DpExchange.Coinbase do
     # to implement.
     {:get_auction_imbalance, 2},
     {:get_volume_profile, 3},
-    {:get_market_overview, 1},
     # No transfer ledger on this surface; transfers happen in the consumer product.
     {:get_transfers, 2},
     # The venue meters by header rather than by endpoint: there is no call that reports
@@ -147,9 +146,7 @@ defmodule DpExchange.Coinbase do
     # Perpetual funding and contract statistics live behind the INTX endpoints, which this
     # package does not reach — see `supported_instrument_types`.
     {:get_funding, 2},
-    {:get_contract_stats, 2},
-    # `/products` carries the instrument metadata; this package reads only the symbols.
-    {:list_instruments, 1}
+    {:get_contract_stats, 2}
   ]
 
   @unsupported @venue_does_not_serve ++ @not_ported
@@ -284,7 +281,7 @@ defmodule DpExchange.Coinbase do
   def get_trades(symbol, opts \\ []), do: Rest.get_trades(symbol, opts)
 
   @impl true
-  def get_market_overview(_opts), do: Venue.not_supported()
+  def get_market_overview(opts \\ []), do: Rest.get_market_overview(opts)
 
   @impl true
   def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()
@@ -293,7 +290,7 @@ defmodule DpExchange.Coinbase do
   def get_volume_profile(_symbol, _timeframe, _opts \\ []), do: Venue.not_supported()
 
   @impl true
-  def list_instruments(_opts), do: Venue.not_supported()
+  def list_instruments(opts \\ []), do: Rest.list_instruments(opts)
 
   # --- account and trading -----------------------------------------------
 

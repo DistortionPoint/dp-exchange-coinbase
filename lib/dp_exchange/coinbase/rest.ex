@@ -35,7 +35,7 @@ defmodule DpExchange.Coinbase.Rest do
   """
 
   alias DpExchange.Coinbase.{Auth, SymbolFormat}
-  alias DpExchange.Core.{HttpClient, Timeframe, Types}
+  alias DpExchange.Core.{HttpClient, Instrument, Timeframe, Types}
 
   require Logger
 
@@ -135,21 +135,75 @@ defmodule DpExchange.Coinbase.Rest do
   @doc "Every product Coinbase lists, as canonical symbols."
   @spec get_symbols(keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def get_symbols(opts) do
-    # Public and private again: the venue publishes the catalogue at both paths, and a
-    # caller holding a credential should see the authenticated view.
+    with {:ok, products} <- fetch_products(opts) do
+      {:ok, Enum.map(products, &SymbolFormat.to_canonical_symbol(&1["product_id"]))}
+    end
+  end
+
+  @doc """
+  A bulk snapshot across every product Coinbase lists: price, 24h change, 24h volume, 24h
+  high/low and status, one entry per canonical symbol.
+
+  Reads the same bulk endpoint `get_symbols/1` does — the venue's per-product row already
+  carries all of this, so there is no second request behind it.
+  """
+  @spec get_market_overview(keyword()) :: {:ok, map()} | {:error, term()}
+  def get_market_overview(opts) do
+    with {:ok, products} <- fetch_products(opts) do
+      {:ok, Map.new(products, &market_overview_row/1)}
+    end
+  end
+
+  @doc """
+  Every product Coinbase lists, with the fields `get_symbols/1` discards: base, quote,
+  instrument type and trading status.
+
+  Reads the same bulk endpoint `get_symbols/1` does.
+  """
+  @spec list_instruments(keyword()) :: {:ok, [Instrument.t()]} | {:error, term()}
+  def list_instruments(opts) do
+    with {:ok, products} <- fetch_products(opts) do
+      {:ok, Enum.map(products, &to_instrument/1)}
+    end
+  end
+
+  # Public and private again: the venue publishes the catalogue at both paths, and a
+  # caller holding a credential should see the authenticated view. Shared by
+  # get_symbols/1, get_market_overview/1 and list_instruments/1 — one venue response,
+  # three views of it, rather than one call per view of the same row.
+  defp fetch_products(opts) do
     credentials = Keyword.get(opts, :credentials)
     path = if credentials, do: "/products", else: "/market/products"
 
     case request(:get, path, credentials, opts) do
-      {:ok, %{body: %{"products" => products}}} ->
-        {:ok, Enum.map(products, &SymbolFormat.to_canonical_symbol(&1["product_id"]))}
-
-      {:ok, _unexpected} ->
-        {:error, :unexpected_response_shape}
-
-      {:error, reason} ->
-        classify(reason)
+      {:ok, %{body: %{"products" => products}}} -> {:ok, products}
+      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+      {:error, reason} -> classify(reason)
     end
+  end
+
+  defp market_overview_row(product) do
+    symbol = SymbolFormat.to_canonical_symbol(product["product_id"])
+
+    {symbol,
+     %{
+       price: decimal(product["price"]),
+       price_change_24h_pct: decimal(product["price_percentage_change_24h"]),
+       volume_24h: decimal(product["volume_24h"]),
+       high_24h: decimal(product["high_24h"]),
+       low_24h: decimal(product["low_24h"]),
+       status: product["status"]
+     }}
+  end
+
+  defp to_instrument(product) do
+    Instrument.new(
+      symbol: SymbolFormat.to_canonical_symbol(product["product_id"]),
+      base: product["base_currency_id"],
+      quote: product["quote_currency_id"],
+      instrument: Instrument.instrument_from(product["product_type"]),
+      status: Instrument.status_from(product["status"])
+    )
   end
 
   @doc """
@@ -1950,7 +2004,11 @@ defmodule DpExchange.Coinbase.Rest do
       side: order |> Map.get("side") |> side_atom(),
       order_type: order |> Map.get("order_type") |> type_atom(),
       time_in_force: order |> Map.get("time_in_force") |> tif_atom(),
-      quantity: decimal(order["filled_size"]),
+      # `filled_size` is what has filled, not what was asked for — reusing it here made a
+      # partially-filled order's remaining size read as zero on every read after placement.
+      # The venue echoes what was actually requested in `order_configuration`, the same
+      # place `closing_configuration/1` below already reads it from for a closing order.
+      quantity: quantity_from_configuration(order["order_configuration"]),
       filled_quantity: decimal(order["filled_size"]),
       average_price: decimal(order["average_filled_price"]),
       fee: decimal(order["total_fees"]),
@@ -1962,6 +2020,16 @@ defmodule DpExchange.Coinbase.Rest do
       provider: :coinbase
     }
   end
+
+  # A quote-sized market order's leaf carries `quote_size`, not `base_size`, and there is
+  # no rate here to convert one to the other — `nil`, not a guess, same as
+  # `closing_configuration/1` below for the same shape.
+  defp quantity_from_configuration(%{} = configuration) when map_size(configuration) == 1 do
+    [{_name, leaf}] = Map.to_list(configuration)
+    decimal(is_map(leaf) && leaf["base_size"])
+  end
+
+  defp quantity_from_configuration(_absent), do: nil
 
   defp canonical_or_nil(nil), do: nil
   defp canonical_or_nil(native), do: SymbolFormat.to_canonical_symbol(native)

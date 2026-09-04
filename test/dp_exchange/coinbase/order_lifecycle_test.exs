@@ -53,6 +53,12 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
         "order_type" => "LIMIT",
         "time_in_force" => "GOOD_UNTIL_CANCELLED",
         "status" => "OPEN",
+        # Deliberately different from filled_size below: this is the field the fix reads
+        # :quantity from, and a fixture where the two agree would not catch a regression
+        # back to reading both from filled_size.
+        "order_configuration" => %{
+          "limit_limit_gtc" => %{"base_size" => "1.0", "limit_price" => "40000"}
+        },
         "filled_size" => "0.25",
         "average_filled_price" => "40100.5",
         "total_fees" => "1.20",
@@ -128,10 +134,48 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
       assert order.order_type == :limit
       assert order.time_in_force == :gtc
       assert order.status == :open
+      assert Decimal.equal?(order.quantity, Decimal.new("1.0"))
       assert Decimal.equal?(order.filled_quantity, Decimal.new("0.25"))
       assert Decimal.equal?(order.average_price, Decimal.new("40100.5"))
       assert order.fee_currency == "USD"
       assert order.provider == :coinbase
+    end
+
+    test "quantity is the originally-requested size, not the filled amount — a partial fill has quantity > filled_quantity" do
+      # Filed as a live bug: to_order/1 read both :quantity and :filled_quantity from the
+      # venue's filled_size, so remaining_quantity == quantity - filled_quantity was always
+      # zero for a fetched order, even one genuinely still open and partially filled.
+      body = %{"order" => order_json(%{"status" => "OPEN", "filled_size" => "0.25"})}
+
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc-123", plug: responding(body), retry_attempts: 0)
+
+      assert Decimal.equal?(order.quantity, Decimal.new("1.0"))
+      assert Decimal.equal?(order.filled_quantity, Decimal.new("0.25"))
+      refute Decimal.equal?(order.quantity, order.filled_quantity)
+    end
+
+    test "a quote-sized market order leaf has no base_size, so quantity is nil rather than a guess" do
+      body = %{
+        "order" =>
+          order_json(%{
+            "order_configuration" => %{"market_market_ioc" => %{"quote_size" => "500"}}
+          })
+      }
+
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc-123", plug: responding(body), retry_attempts: 0)
+
+      assert order.quantity == nil
+    end
+
+    test "a missing order_configuration leaves quantity nil rather than crashing" do
+      body = %{"order" => order_json() |> Map.delete("order_configuration")}
+
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc-123", plug: responding(body), retry_attempts: 0)
+
+      assert order.quantity == nil
     end
 
     test "a body with no order key is unreadable, not a missing order" do

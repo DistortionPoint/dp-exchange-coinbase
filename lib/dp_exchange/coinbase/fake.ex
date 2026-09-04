@@ -38,7 +38,7 @@ defmodule DpExchange.Coinbase.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Coinbase.Rest
-  alias DpExchange.Core.{Notice, Types, Venue}
+  alias DpExchange.Core.{Instrument, Notice, Types, Venue}
 
   @symbols ~w(BTC-USD BTC-USDC ETH-USD ETH-EUR)
 
@@ -227,15 +227,45 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_market_overview(_opts), do: Venue.not_supported()
+  def get_market_overview(_opts) do
+    {:ok,
+     Map.new(@symbols, fn symbol ->
+       price = Decimal.new(@price[symbol])
+
+       {symbol,
+        %{
+          price: price,
+          price_change_24h_pct: Decimal.new("1.25"),
+          volume_24h: Decimal.new("1200.5"),
+          high_24h: Decimal.add(price, Decimal.new("500")),
+          low_24h: Decimal.sub(price, Decimal.new("500")),
+          status: "online"
+        }}
+     end)}
+  end
 
   @impl true
   def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()
 
   @impl true
   def get_volume_profile(_symbol, _timeframe, _opts \\ []), do: Venue.not_supported()
+
   @impl true
-  def list_instruments(_opts), do: Venue.not_supported()
+  def list_instruments(_opts) do
+    {:ok,
+     Enum.map(@symbols, fn symbol ->
+       [base, quote_asset] = String.split(symbol, "-")
+
+       Instrument.new(
+         symbol: symbol,
+         base: base,
+         quote: quote_asset,
+         instrument: :spot,
+         status: :tradable
+       )
+     end)}
+  end
+
   @impl true
   def get_balances(_credentials, _opts) do
     # A held amount that is not zero, so a consumer reading `available_balance` as the

@@ -22,6 +22,30 @@ acceptable changelog line.
 
 ### Added
 
+- **`get_market_overview/1` and `list_instruments/1` are implemented —
+  DpCryptoManagement's issue #10.** Both sat behind `Venue.not_supported()`, one filed as
+  a genuine venue absence (`@venue_does_not_serve`) with no per-item comment explaining
+  why, against `get_symbols/1` already calling the exact bulk endpoint
+  (`/products`/`/market/products`) that carries all of it. Live-verified: the response
+  Coinbase actually returns names `price`, `price_percentage_change_24h`, `volume_24h`,
+  `high_24h`, `low_24h`, `status` and `product_type` per product, and `get_symbols/1` kept
+  only `product_id`. Both new functions read the same response `get_symbols/1` already
+  fetches — via a shared `fetch_products/1` — rather than a second request.
+
+### Fixed
+
+- **`to_order/1` read both `Order.quantity` and `Order.filled_quantity` from the same
+  venue field — DpCryptoManagement's issue #12.** `order["filled_size"]` populated both,
+  so a fetched order's `remaining_quantity` (quantity minus filled) was always zero, even
+  for a genuinely open, partially-filled order — a correctness bug for anything
+  reconciling open-order state. `quantity` now reads the venue's own record of what was
+  requested, from `order_configuration`'s leaf `base_size` — the same field
+  `closing_configuration/1` already reads for a closing order's size, on the same
+  response envelope. A quote-sized market order's leaf carries `quote_size` instead, with
+  no rate here to convert it, so `quantity` is `nil` rather than a guess in that case.
+
+### Added
+
 - **`level2` is subscribed and decoded — `streamable` gains `:order_book`.** The channel
   was recognised and had working auth machinery since an earlier release but was never
   actually requested; `capabilities/0` said `[:quotes]` while the code that would have
