@@ -60,6 +60,19 @@ defmodule DpExchange.Coinbase.Feed do
   Re-subscribing a channel the socket already carries costs one frame the venue ignores;
   not re-subscribing one it silently dropped costs the shard's whole coverage until
   someone notices a quiet chart.
+
+  ## Every shard beyond the first must open on its own tick, not the same one
+
+  `@shard_spacing_ms` staggers shard opens **relative to each other**, not relative to a
+  fixed instant. A scope wide enough to need three or more shards — DpCryptoManagement's
+  issue #20, 406 symbols / 5 shards, filed against real production traffic — used to
+  schedule every shard past the first (the synchronous one) with the *same* fixed delay,
+  so all of them opened in the same instant: exactly the connect burst this module's own
+  design note above warns the venue answers with resets. Only the shard whose burst-mate
+  connections lost that race ever delivered a tick; coverage sat at whatever fraction of
+  one shard survived, indistinguishable from the outside from a quiet market. The
+  60-second unconditional resubscribe re-issued the same burst every minute. Both paths
+  now schedule each shard's turn `position * @shard_spacing_ms` after the one before it.
   """
 
   use GenServer
@@ -256,11 +269,27 @@ defmodule DpExchange.Coinbase.Feed do
   def handle_info(:resubscribe, state) do
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
-    Enum.each(state.shards, fn {_index, %{socket: socket, symbols: symbols}} ->
-      if Process.alive?(socket),
-        do: schedule_channel_subscribes(socket, symbols, state.credentials)
+    # Staggered the same way `reshard/1` staggers opening several new shards: re-issuing
+    # every shard's `level2` subscribe in the same instant is the identical connect/subscribe
+    # burst the moduledoc warns about, just recurring every minute instead of once at boot.
+    state.shards
+    |> Enum.sort_by(fn {index, _shard} -> index end)
+    |> Enum.with_index()
+    |> Enum.each(fn {{_index, %{socket: socket, symbols: symbols}}, position} ->
+      if Process.alive?(socket) do
+        Process.send_after(
+          self(),
+          {:resubscribe_shard, socket, symbols, state.credentials},
+          position * @shard_spacing_ms
+        )
+      end
     end)
 
+    {:noreply, state}
+  end
+
+  def handle_info({:resubscribe_shard, socket, symbols, credentials}, state) do
+    if Process.alive?(socket), do: schedule_channel_subscribes(socket, symbols, credentials)
     {:noreply, state}
   end
 
@@ -323,11 +352,18 @@ defmodule DpExchange.Coinbase.Feed do
         {:ok, state}
 
       [primary | rest] ->
-        {result, state} = touch_shard(state, primary, new_shards, sync: true)
+        {result, state} = touch_shard(state, primary, new_shards, sync: true, delay: 0)
 
         state =
-          Enum.reduce(rest, state, fn index, acc ->
-            {_result, acc} = touch_shard(acc, index, new_shards, sync: false)
+          rest
+          |> Enum.with_index(1)
+          |> Enum.reduce(state, fn {index, position}, acc ->
+            {_result, acc} =
+              touch_shard(acc, index, new_shards,
+                sync: false,
+                delay: position * @shard_spacing_ms
+              )
+
             acc
           end)
 
@@ -347,19 +383,19 @@ defmodule DpExchange.Coinbase.Feed do
     %{state | shards: Map.drop(state.shards, existing_indices -- wanted_indices)}
   end
 
-  defp touch_shard(state, index, new_shards, sync: sync?) do
+  defp touch_shard(state, index, new_shards, sync: sync?, delay: delay) do
     wanted_symbols = Map.fetch!(new_shards, index)
 
     case get_in(state.shards[index]) do
       nil ->
-        open_shard(state, index, wanted_symbols, sync?)
+        open_shard(state, index, wanted_symbols, sync?, delay)
 
       %{symbols: current, socket: socket} ->
         reconcile_shard(state, index, socket, current, wanted_symbols, sync?)
     end
   end
 
-  defp open_shard(state, index, symbols, true) do
+  defp open_shard(state, index, symbols, true, _delay) do
     case get_socket(state) do
       {:ok, socket, state} ->
         state = put_in(state.shards[index], %{socket: socket, symbols: symbols})
@@ -372,8 +408,8 @@ defmodule DpExchange.Coinbase.Feed do
     end
   end
 
-  defp open_shard(state, index, symbols, false) do
-    Process.send_after(self(), {:open_shard, index, symbols}, @shard_spacing_ms)
+  defp open_shard(state, index, symbols, false, delay) do
+    Process.send_after(self(), {:open_shard, index, symbols}, delay)
     {:ok, state}
   end
 

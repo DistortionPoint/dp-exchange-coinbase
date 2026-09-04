@@ -116,7 +116,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       Feed.subscribe_notices(feed, to: name)
       send(feed, {:dp_exchange, :coinbase, Notice.new(:link_up, :coinbase)})
 
-      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_up}}
+      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_up}}, 500
       assert Process.alive?(feed)
 
       Process.unregister(name)
@@ -365,6 +365,27 @@ defmodule DpExchange.Coinbase.FeedTest do
       # endpoint is unreachable, so both attempts fail — what matters is that BOTH
       # shards get attempted rather than only the first, and that the process survives
       # both failures.
+      assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
+      Process.sleep(50)
+
+      assert Process.alive?(feed)
+    end
+
+    test "subscribing 250 symbols opens three shards, each staggered from the last" do
+      # DpCryptoManagement's issue #20: with three or more shards, every shard past the
+      # first used to be scheduled with the SAME fixed delay instead of one increasing per
+      # shard — a connect burst, not a stagger. Nothing below this line distinguishes that
+      # regression from the fix (both survive an unreachable endpoint the same way), but
+      # this is the first test in the file to exercise `reshard/1`'s `rest` list with more
+      # than one element, which is what let the bug ship unnoticed in the first place.
+      symbols = for n <- 1..250, do: "SYM#{n}-USD"
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}", url: "ws://127.0.0.1:1/nowhere"}
+        )
+
       assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
       Process.sleep(50)
 

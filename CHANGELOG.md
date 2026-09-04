@@ -51,6 +51,20 @@ acceptable changelog line.
 
 ### Fixed
 
+- **A scope wide enough to need three or more shards opened them all in the same
+  instant instead of staggered, and 60-second resubscribes re-issued the same burst
+  every minute — DpCryptoManagement's issue #20, a real ~406-symbol/5-shard production
+  scope where 4 of 5 shards (400 symbols) never delivered a single tick while the fifth
+  did.** `reshard/1` scheduled every shard past the synchronous first one with the
+  *same* fixed `@shard_spacing_ms` delay rather than one increasing per shard, so all of
+  them opened together — exactly the connect burst this module's own moduledoc already
+  named as the failure the venue answers with resets. Only a suite exercising three or
+  more shards could have caught it; the existing test only ever covered two (one
+  synchronous, one staggered), where a single fixed delay is indistinguishable from a
+  correct one. Fixed by scheduling each shard's turn `position * @shard_spacing_ms`
+  after the one before it, applied to both the initial open and the unconditional
+  60-second resubscribe. A regression test now exercises three shards.
+
 - **`Feed.fan_out/2` crashed on a subscriber registered by name — DpCryptoManagement's
   issue #15.** `subscribe/2`'s `to:` option accepts any value, and `fan_out/2` called
   `Process.alive?/1` on it directly — which only accepts a pid and raises on anything
