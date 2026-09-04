@@ -22,6 +22,23 @@ acceptable changelog line.
 
 ### Added
 
+- **`Fake` wired to `Core.FakeInjection` — DpCryptoManagement's issue #14.** Every
+  function with a real success path (not an unconditional `Venue.not_supported()`) now
+  checks a queued or always-set outcome first: `get_price/2`, `get_top_of_book/2`,
+  `get_historical_prices/4`, `get_order_book/2`, `get_trades/2`, `quantization/1` and
+  `close_position/3` support per-symbol targeting; every other real function (bulk
+  reads, account/portfolio/conversion calls, order placement, cancel/get/list, previews
+  and edits) supports whole-call injection. `subscribe/2`, `unsubscribe/2` and
+  `update_symbols/2` are deliberately not wired — each takes a symbol list in one call,
+  which whole-call injection cannot express partial failure for; neither is `coverage/1`
+  or `subscribe_notices/1`, both local bookkeeping that always succeeds by construction.
+
+  **No credential-bypass mode here.** Unlike `DpExchange.Robinhood.Fake` (the reference
+  implementation), this fake has no central credential check to bypass — most functions
+  never inspect `credentials` at all, an existing gap this wiring does not change.
+  See `docs/design/2026-09-04_webull-sharding-and-fake-injection.md` §3.6/§3.7 in
+  `dp-exchange-core`.
+
 - **`get_market_overview/1` and `list_instruments/1` are implemented —
   DpCryptoManagement's issue #10.** Both sat behind `Venue.not_supported()`, one filed as
   a genuine venue absence (`@venue_does_not_serve`) with no per-item comment explaining
