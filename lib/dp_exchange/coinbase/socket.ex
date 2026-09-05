@@ -172,14 +172,28 @@ defmodule DpExchange.Coinbase.Socket do
   # subscribe still says `level2`. A parser keyed on the subscribe name silently drops
   # every book update — and a venue delivering nothing on one channel while another works
   # reads as a quiet market.
-  defp dispatch(%{"channel" => "ticker", "events" => events}, state) when is_list(events) do
+  #
+  # **The timestamp lives on the envelope, not the row.** Every v3 channel message
+  # carries its own top-level `timestamp` (server time the message was sent); neither a
+  # `tickers` row nor a `level2` `updates` row repeats it. An earlier version of this
+  # module read a `ticker["time"]` field that does not exist in the venue's own
+  # documented schema — every single `ticker` decode failed against the real venue as a
+  # result, silently, because the fake and hand-written tests both encoded the same wrong
+  # assumption and agreed with each other. Confirmed against Coinbase's own CDP API
+  # reference for both channels before fixing, not assumed a second time.
+  defp dispatch(%{"channel" => "ticker", "events" => events} = payload, state)
+       when is_list(events) do
+    timestamp = Map.get(payload, "timestamp")
+
     Enum.reduce(events, state, fn event, acc ->
-      Enum.reduce(Map.get(event, "tickers", []), acc, &deliver_ticker/2)
+      Enum.reduce(Map.get(event, "tickers", []), acc, &deliver_ticker(&1, &2, timestamp))
     end)
   end
 
-  defp dispatch(%{"channel" => "l2_data", "events" => events}, state) when is_list(events) do
-    Enum.reduce(events, state, &apply_book_event/2)
+  defp dispatch(%{"channel" => "l2_data", "events" => events} = payload, state)
+       when is_list(events) do
+    timestamp = Map.get(payload, "timestamp")
+    Enum.reduce(events, state, &apply_book_event(&1, &2, timestamp))
   end
 
   defp dispatch(%{"channel" => "subscriptions"}, state) do
@@ -229,10 +243,10 @@ defmodule DpExchange.Coinbase.Socket do
       else: :credentials_rejected
   end
 
-  defp deliver_ticker(%{"product_id" => product} = ticker, state) do
+  defp deliver_ticker(%{"product_id" => product} = ticker, state, timestamp) do
     symbol = SymbolFormat.to_canonical_symbol(product)
 
-    case build_quote(ticker, symbol) do
+    case build_quote(ticker, symbol, timestamp) do
       {:ok, quote_struct} ->
         send(state.subscriber, {:dp_exchange, :coinbase, quote_struct})
         %{state | delivering: MapSet.put(state.delivering, symbol)}
@@ -242,16 +256,16 @@ defmodule DpExchange.Coinbase.Socket do
     end
   end
 
-  defp deliver_ticker(_ticker, state), do: state
+  defp deliver_ticker(_ticker, state, _timestamp), do: state
 
   # FAILS CLOSED on the timestamp, exactly as the REST path does. A tick whose freshness
   # we cannot state is a tick we must not deliver, and substituting `now` would make a
   # stale one indistinguishable from a live one. The price fails closed the same way:
   # `Decimal.new/1` used to raise directly here, and a `Quote` with a nil price would be
   # the same substitution wearing a quieter shape — refused instead, through the same
-  # {:error, _} path deliver_ticker/2 already reports as a data-quality notice.
-  defp build_quote(%{"price" => price} = ticker, symbol) do
-    with {:ok, at} <- parse_time(ticker["time"]),
+  # {:error, _} path deliver_ticker/3 already reports as a data-quality notice.
+  defp build_quote(%{"price" => price} = ticker, symbol, timestamp) do
+    with {:ok, at} <- parse_time(timestamp),
          {:ok, parsed_price} <- required_decimal(price, :price) do
       {:ok,
        %Types.Quote{
@@ -264,7 +278,7 @@ defmodule DpExchange.Coinbase.Socket do
     end
   end
 
-  defp build_quote(_ticker, _symbol), do: {:error, :unexpected_payload}
+  defp build_quote(_ticker, _symbol, _timestamp), do: {:error, :unexpected_payload}
 
   # --- level2 / order book -------------------------------------------------
 
@@ -275,7 +289,8 @@ defmodule DpExchange.Coinbase.Socket do
   # instead of replacing it.
   defp apply_book_event(
          %{"type" => "snapshot", "product_id" => product, "updates" => rows},
-         state
+         state,
+         timestamp
        )
        when is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(product)
@@ -283,10 +298,14 @@ defmodule DpExchange.Coinbase.Socket do
 
     state
     |> put_in([Access.key(:books), symbol], book)
-    |> deliver_book(symbol)
+    |> deliver_book(symbol, timestamp)
   end
 
-  defp apply_book_event(%{"type" => "update", "product_id" => product, "updates" => rows}, state)
+  defp apply_book_event(
+         %{"type" => "update", "product_id" => product, "updates" => rows},
+         state,
+         timestamp
+       )
        when is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(product)
     book = Map.get(state.books, symbol, %{bids: %{}, asks: %{}})
@@ -294,10 +313,10 @@ defmodule DpExchange.Coinbase.Socket do
 
     state
     |> put_in([Access.key(:books), symbol], book)
-    |> deliver_book(symbol)
+    |> deliver_book(symbol, timestamp)
   end
 
-  defp apply_book_event(_other, state), do: state
+  defp apply_book_event(_other, state, _timestamp), do: state
 
   # A price level's quantity is the venue's CURRENT total at that price, not a delta to
   # add — replacing the map entry is correct; summing it would double every level that
@@ -329,19 +348,31 @@ defmodule DpExchange.Coinbase.Socket do
 
   defp remove_level(book, side, price), do: Map.update!(book, side, &Map.delete(&1, price))
 
-  defp deliver_book(state, symbol) do
+  # FAILS CLOSED on the timestamp, same as `build_quote/3` — this used to substitute
+  # `DateTime.utc_now/0` unconditionally, which is the exact substitution the moduledoc
+  # already warned against for the ticker path while doing it anyway here. The venue's
+  # own `timestamp` is real and available on every `l2_data` message; a book whose
+  # freshness cannot be stated is refused rather than stamped with whenever this process
+  # happened to process the frame.
+  defp deliver_book(state, symbol, timestamp) do
     book = Map.fetch!(state.books, symbol)
 
-    order_book = %Types.OrderBook{
-      symbol: symbol,
-      bids: sorted_levels(book.bids, :desc),
-      asks: sorted_levels(book.asks, :asc),
-      timestamp: DateTime.utc_now(),
-      provider: :coinbase
-    }
+    case parse_time(timestamp) do
+      {:ok, at} ->
+        order_book = %Types.OrderBook{
+          symbol: symbol,
+          bids: sorted_levels(book.bids, :desc),
+          asks: sorted_levels(book.asks, :asc),
+          timestamp: at,
+          provider: :coinbase
+        }
 
-    send(state.subscriber, {:dp_exchange, :coinbase, order_book})
-    %{state | delivering: MapSet.put(state.delivering, symbol)}
+        send(state.subscriber, {:dp_exchange, :coinbase, order_book})
+        %{state | delivering: MapSet.put(state.delivering, symbol)}
+
+      {:error, _reason} ->
+        report_quality(state, symbol)
+    end
   end
 
   defp sorted_levels(levels, :desc),

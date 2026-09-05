@@ -35,13 +35,13 @@ defmodule DpExchange.Coinbase.BaselineTest do
       assert {:ok, _state} =
                frame(%{
                  "channel" => "ticker",
+                 "timestamp" => "2026-08-28T14:53:45.649112Z",
                  "events" => [
                    %{
                      "tickers" => [
                        %{
                          "product_id" => "BTC-USD",
-                         "price" => "79478.7",
-                         "time" => "2026-08-28T14:53:45.649112Z"
+                         "price" => "79478.7"
                        }
                      ]
                    }
@@ -58,6 +58,7 @@ defmodule DpExchange.Coinbase.BaselineTest do
       assert {:ok, _state} =
                frame(%{
                  "channel" => "l2_data",
+                 "timestamp" => "2026-08-28T14:53:45.649112Z",
                  "events" => [
                    %{
                      "type" => "snapshot",
@@ -108,13 +109,13 @@ defmodule DpExchange.Coinbase.BaselineTest do
       assert {:ok, _state} =
                frame(%{
                  "channel" => "ticker",
+                 "timestamp" => "2026-08-28T14:53:45Z",
                  "events" => [
                    %{
                      "tickers" => [
                        %{
                          "product_id" => "ETH-USD",
-                         "price" => "2951.40",
-                         "time" => "2026-08-28T14:53:45Z"
+                         "price" => "2951.40"
                        }
                      ]
                    }
@@ -132,13 +133,13 @@ defmodule DpExchange.Coinbase.BaselineTest do
       assert {:ok, _state} =
                frame(%{
                  "channel" => "ticker",
+                 "timestamp" => "2026-08-28T14:53:45.649112Z",
                  "events" => [
                    %{
                      "tickers" => [
                        %{
                          "product_id" => "BTC-USD",
-                         "price" => "1",
-                         "time" => "2026-08-28T14:53:45.649112Z"
+                         "price" => "1"
                        }
                      ]
                    }

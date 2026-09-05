@@ -51,6 +51,33 @@ acceptable changelog line.
 
 ### Fixed
 
+- **Every `ticker` frame from the real venue failed to decode — 0 `Quote`s delivered,
+  ever, against live Coinbase, for the entire life of this package.** Surfaced while
+  chasing DpCryptoManagement's issue #22: a live test against 60 non-aliased, canonical
+  `-USD` symbols captured 500+ consecutive `data_quality` notices and zero `Quote`s in a
+  20-second window. `build_quote/2` read `ticker["time"]` — a field that does not exist
+  on the row. Confirmed against Coinbase's own CDP API reference for the `ticker`
+  channel, independently, twice: the timestamp lives on the *message envelope*
+  (`"timestamp"`, one per frame), never on the individual `tickers` row. Every hand-built
+  test fixture in this package — including the ones ported from the host adapter's own
+  test suite (`baseline_test.exs`, "Phase 5.7") — encoded the identical wrong assumption,
+  which is why this passed every test ever written against it and only ever failed
+  against a genuine live socket. `dispatch/2` now reads the envelope's own `timestamp`
+  and threads it down to `build_quote/3`; the per-row field is gone.
+
+  Applied the same fix to `l2_data`/`OrderBook`, which had a related but different
+  defect: `deliver_book/2` didn't read *any* venue timestamp — it substituted
+  `DateTime.utc_now/0` unconditionally, which is the exact substitution this file's own
+  moduledoc already named as wrong for the ticker path (`Core.Types.Quote`'s "never
+  substitute now" principle) while doing it anyway one function down. `deliver_book/3`
+  now reads the same envelope `timestamp` and fails closed if it's absent, same as
+  `build_quote/3` — the maintained book state still updates either way, only the
+  outgoing delivery is withheld.
+
+  **Does not, on its own, explain why `level2`/`OrderBook` delivered zero data in any of
+  the three live tests run while chasing #22** — the old `DateTime.utc_now/0` fallback
+  always succeeded, so this was never why level2 was silent there. That remains open.
+
 - **A `level2` capacity refusal from the venue was reported as `:credentials_rejected`
   — DpCryptoManagement's issue #22, filed as a suspected regression of #20.** Coinbase
   answers both a genuine auth failure and "too many L2 streams requested in a single

@@ -15,16 +15,19 @@ defmodule DpExchange.Coinbase.SocketTest do
 
   defp frame(payload), do: Socket.handle_frame({:text, Jason.encode!(payload)}, state())
 
+  # No per-row "time" field — the venue's own documented schema puts the timestamp on
+  # the message envelope, not on each ticker row. See `Socket.dispatch/2`'s moduledoc
+  # comment on this exact point.
   @ticker %{
     "channel" => "ticker",
+    "timestamp" => "2026-08-28T14:53:45.649112Z",
     "events" => [
       %{
         "tickers" => [
           %{
             "product_id" => "BTC-USD",
             "price" => "79478.7",
-            "volume_24_h" => "1234.5",
-            "time" => "2026-08-28T14:53:45.649112Z"
+            "volume_24_h" => "1234.5"
           }
         ]
       }
@@ -63,10 +66,7 @@ defmodule DpExchange.Coinbase.SocketTest do
     test "a tick with NO venue timestamp is not delivered" do
       # Fails closed, exactly as the REST path does. Substituting `now` would make a
       # stale tick indistinguishable from a live one.
-      ticker =
-        update_in(@ticker["events"], fn [event] ->
-          [update_in(event["tickers"], fn [t] -> [Map.delete(t, "time")] end)]
-        end)
+      ticker = Map.delete(@ticker, "timestamp")
 
       assert {:ok, _state} = frame(ticker)
 
@@ -207,6 +207,7 @@ defmodule DpExchange.Coinbase.SocketTest do
   describe "level2 — a maintained book, not a series of standalone facts" do
     @snapshot %{
       "channel" => "l2_data",
+      "timestamp" => "2026-08-28T14:53:45.649112Z",
       "events" => [
         %{
           "type" => "snapshot",
@@ -241,6 +242,7 @@ defmodule DpExchange.Coinbase.SocketTest do
 
       update = %{
         "channel" => "l2_data",
+        "timestamp" => "2026-08-28T14:53:46.000000Z",
         "events" => [
           %{
             "type" => "update",
@@ -268,6 +270,7 @@ defmodule DpExchange.Coinbase.SocketTest do
 
       update = %{
         "channel" => "l2_data",
+        "timestamp" => "2026-08-28T14:53:46.000000Z",
         "events" => [
           %{
             "type" => "update",
@@ -308,6 +311,7 @@ defmodule DpExchange.Coinbase.SocketTest do
     test "an unparseable price or quantity is dropped rather than crashing the book" do
       bad_row = %{
         "channel" => "l2_data",
+        "timestamp" => "2026-08-28T14:53:45.649112Z",
         "events" => [
           %{
             "type" => "snapshot",
@@ -321,6 +325,20 @@ defmodule DpExchange.Coinbase.SocketTest do
 
       assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
       assert book.bids == []
+    end
+
+    test "a snapshot with NO venue timestamp is not delivered, but still updates the maintained book" do
+      # Fails closed exactly as the ticker path does — this used to substitute
+      # DateTime.utc_now/0 unconditionally instead. The internal book state still
+      # updates: `coverage/1`'s guarantee is about what is DELIVERED, and a later,
+      # well-timed update must patch real state, not a book this refusal left empty.
+      untimed = Map.delete(@snapshot, "timestamp")
+
+      assert {:ok, s} = Socket.handle_frame({:text, Jason.encode!(untimed)}, state())
+
+      refute_received {:dp_exchange, :coinbase, %Types.OrderBook{}}
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+      assert map_size(s.books["BTC-USD"].bids) > 0
     end
 
     test "a reconnect clears the maintained book" do
