@@ -8,8 +8,8 @@ defmodule DpExchange.Coinbase.FrameSender do
 
       {:ok, res} = :gen.call(client, :"$websockex_send", frame)
 
-  with `:gen.call`'s **default 5000 ms timeout and no way to override it**, and on timeout
-  it does not return an error — it `exit`s:
+  with `:gen.call`'s **default 5000 ms timeout**, and on timeout it does not return an
+  error — it `exit`s:
 
       exit({reason, {WebSockex, :call, [client, frame]}})
 
@@ -45,6 +45,14 @@ defmodule DpExchange.Coinbase.FrameSender do
   waiting for the acknowledgement; the socket may deliver it a moment later. Subscribes
   are idempotent on every venue in this family, so a duplicate is harmless — whereas a
   lost connection is not.
+
+  ## The five seconds is not actually fixed — this module chooses not to change it
+
+  The vendored websockex 0.5.1 exposes `WebSockex.send_frame/3`, a timeout argument and
+  all (`deps/websockex/lib/websockex.ex`). An override exists upstream; `send/3` below
+  still calls the 2-arg form deliberately, so nothing here changes behaviour on the
+  strength of that alone. If a longer timeout turns out to help with the incident above,
+  that is a decision for the design doc, with reasoning, not a drive-by here.
 
   ## Why this module is here and not in the contract
 

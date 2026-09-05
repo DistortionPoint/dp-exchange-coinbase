@@ -47,6 +47,36 @@ defmodule DpExchange.Coinbase.Socket do
   `handle_disconnect/2` clears every symbol's book, and the next `snapshot` this socket
   receives after resubscribing rebuilds it from what the venue sends fresh. There is no
   way to reconcile a stale local book against a venue that has moved on.
+
+  ## The connect timeouts are chosen against `Feed`'s call budget, not inherited by accident
+
+  `WebSockex.start_link/4` opens a raw TCP connection and then waits for the HTTP
+  upgrade response, and each half has its own timeout — `:socket_connect_timeout` and
+  `:socket_recv_timeout`. Leave them unset and WebSockex supplies its own defaults:
+  measured in the vendored dependency, `deps/websockex/lib/websockex/conn.ex:10-11`,
+  `@socket_connect_timeout_default 6000` and `@socket_recv_timeout_default 5000`. Nobody
+  chose those two numbers for this package; they are whatever the dependency happened to
+  ship.
+
+  That matters here specifically because of where `start_link/1` gets called from.
+  `Feed`'s `open_shard/5` synchronous branch calls it from **inside** a `handle_call/3`,
+  and `Feed`'s own `@call_timeout` is `@frame_window_ms * 3` = `15_000` ms. The inherited
+  defaults alone — `6_000 + 5_000 = 11_000` ms — would burn roughly three-quarters of
+  that budget on the TCP connect and the handshake recv **alone**, before a single
+  subscribe frame is sent. `Feed` is a named, shared process, so every other consumer's
+  `subscribe/2`, `unsubscribe/2`, `update_symbols/2` and `coverage/1` call queues behind
+  that one `handle_call/3` for the whole window whenever the venue is unreachable or
+  black-holing the connection.
+
+  `@socket_connect_timeout_ms` and `@socket_recv_timeout_ms` below total `6_000` ms
+  instead — deliberately, against that same `15_000` ms budget, leaving roughly `9_000`
+  ms of the same call for the socket to actually send at least one subscribe frame
+  (itself capped at `Feed`'s `@frame_window_ms`, `5_000` ms) plus ordinary `GenServer`
+  overhead, rather than have the connect attempt alone threaten to exhaust the caller's
+  patience. This changes no failure semantics: `start_link/1` still returns
+  `{:error, reason}` synchronously either way, exactly as the dependency's own defaults
+  did — only the margin the caller gets to work with after a slow or absent venue
+  changes. A caller passing either key explicitly overrides it.
   """
 
   use WebSockex
@@ -62,6 +92,11 @@ defmodule DpExchange.Coinbase.Socket do
   # attaching one where it is not required is the incident above.
   @authenticated_channels ~w(level2 user)
 
+  # See the moduledoc: chosen against `Feed`'s 15_000 ms `@call_timeout`, not inherited
+  # from WebSockex's own defaults (6_000 ms connect + 5_000 ms recv).
+  @socket_connect_timeout_ms 3_000
+  @socket_recv_timeout_ms 3_000
+
   @doc """
   Starts a connection.
 
@@ -70,6 +105,11 @@ defmodule DpExchange.Coinbase.Socket do
     * `:subscriber` — the process events are delivered to. Required.
     * `:credentials` — only needed for authenticated channels.
     * `:url` — override the endpoint, for tests that stand up a local socket.
+    * `:socket_connect_timeout` — ms to wait for the TCP connect. Defaults to
+      `#{@socket_connect_timeout_ms}` — see the moduledoc for why that is not
+      WebSockex's own default.
+    * `:socket_recv_timeout` — ms to wait for the HTTP upgrade response. Defaults to
+      `#{@socket_recv_timeout_ms}`, same reasoning.
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
@@ -85,7 +125,21 @@ defmodule DpExchange.Coinbase.Socket do
       books: %{}
     }
 
+    opts = connection_opts(opts)
     WebSockex.start_link(Keyword.get(opts, :url, @endpoint), __MODULE__, state, opts)
+  end
+
+  # Explicit rather than inherited — see the moduledoc's budget arithmetic.
+  # `Keyword.put_new/3` so a caller supplying either key wins. Exposed (not `defp`) and
+  # `@doc false` purely so a test can pin this exact keyword list — what `start_link/1`
+  # hands to `WebSockex.start_link/4` unchanged — without opening a real socket to
+  # observe it.
+  @doc false
+  @spec connection_opts(keyword()) :: keyword()
+  def connection_opts(opts) do
+    opts
+    |> Keyword.put_new(:socket_connect_timeout, @socket_connect_timeout_ms)
+    |> Keyword.put_new(:socket_recv_timeout, @socket_recv_timeout_ms)
   end
 
   @doc """
@@ -294,7 +348,7 @@ defmodule DpExchange.Coinbase.Socket do
        )
        when is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(product)
-    book = rows |> Enum.reduce(%{bids: %{}, asks: %{}}, &apply_book_row/2)
+    book = rows |> Enum.reduce(%{bids: %{}, asks: %{}}, &apply_book_row(&1, &2, state))
 
     state
     |> put_in([Access.key(:books), symbol], book)
@@ -309,7 +363,7 @@ defmodule DpExchange.Coinbase.Socket do
        when is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(product)
     book = Map.get(state.books, symbol, %{bids: %{}, asks: %{}})
-    book = Enum.reduce(rows, book, &apply_book_row/2)
+    book = Enum.reduce(rows, book, &apply_book_row(&1, &2, state))
 
     state
     |> put_in([Access.key(:books), symbol], book)
@@ -323,17 +377,33 @@ defmodule DpExchange.Coinbase.Socket do
   # appears in two update frames in a row. `new_quantity: "0"` removes the level: it is
   # not a price of zero, it is the level no longer existing, and leaving a zero-quantity
   # entry in the book would make it a phantom best price the moment nothing outranks it.
-  defp apply_book_row(%{"side" => side, "price_level" => price, "new_quantity" => quantity}, book) do
+  #
+  # An unparseable `price_level` or `new_quantity` used to return the book unchanged with
+  # no signal — silent among siblings that all report through `report_quality/2`. That
+  # matters concretely for `new_quantity: "0"`: it is how the venue signals removal, so an
+  # unparseable quantity silently ignored can leave a stale price level in the maintained
+  # book indefinitely with nothing indicating why. Reported, not swallowed, same as
+  # `deliver_ticker/3` and `deliver_book/3` — and still never fatal to the connection.
+  defp apply_book_row(
+         %{"side" => side, "price_level" => price, "new_quantity" => quantity} = row,
+         book,
+         state
+       ) do
     key = book_side(side)
 
     case {decimal(price), decimal(quantity)} do
-      {nil, _ignored} -> book
-      {_ignored, nil} -> book
+      {nil, _ignored} -> malformed_row(state, book, row)
+      {_ignored, nil} -> malformed_row(state, book, row)
       {price, quantity} -> update_level(book, key, price, quantity)
     end
   end
 
-  defp apply_book_row(_row, book), do: book
+  defp apply_book_row(row, book, state), do: malformed_row(state, book, row)
+
+  defp malformed_row(state, book, row) do
+    report_quality(state, inspect(row))
+    book
+  end
 
   defp book_side("bid"), do: :bids
   defp book_side(_offer_or_other), do: :asks

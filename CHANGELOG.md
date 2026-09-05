@@ -51,6 +51,77 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`get_top_of_book/2` could never work without credentials, and the facade said
+  otherwise — family-wide defect sweep, Coinbase B1.** Unlike every sibling market-data
+  reader in `Rest`, this one call is hardcoded to `/best_bid_ask` with no
+  `/market/best_bid_ask` branch. Re-verified live 2026-09-05: authenticated is `401`, and
+  the public path a caller would expect by analogy is `404` — there is no public form to
+  fall back to, so inventing one would have been exactly the "nearby substitute" this
+  family refuses. Fixed by checking for credentials up front and returning
+  `{:refused, :missing_credentials}` before sending anything, rather than surfacing the
+  venue's `401` as an opaque error. `DpExchange.Coinbase`'s moduledoc and
+  `capabilities/0`'s `credential_benefit` comment both claimed "the same market data is
+  served publicly" without qualification — true of every other endpoint, false of this
+  one — and both now name the exception. `usage-rules.md` carried the identical claim and
+  is corrected the same way, since it ships inside the Hex tarball and is what a
+  consuming agent reads.
+
+- **`apply_book_row/2` silently dropped a `level2` row it could not parse — family-wide
+  defect sweep, Coinbase B2.** Every other decode-failure path in `Socket`
+  (`deliver_ticker/3`, `deliver_book/3`) reports a `:data_quality` notice through
+  `report_quality/2`; this one returned the maintained book unchanged with no signal,
+  against the module's own stated discipline ("a payload that did not parse is reported,
+  not swallowed and not fatal"). Concrete cost: `new_quantity: "0"` is how the venue
+  signals level *removal*, so an unparseable quantity silently ignored could leave a
+  stale price level in the maintained book indefinitely with nothing indicating why.
+  `apply_book_row/3` now threads `state` through and reports a `:data_quality` notice for
+  an unparseable `price_level`/`new_quantity` and for a row missing those keys entirely —
+  the connection is still never torn down over one bad row.
+
+- **`Socket.start_link/1` inherited WebSockex's own connect/recv timeouts by accident —
+  family-wide defect sweep, Coinbase B4.** No `:socket_connect_timeout` or
+  `:socket_recv_timeout` was set, so WebSockex supplied its own defaults — measured in
+  the vendored dependency, `deps/websockex/lib/websockex/conn.ex:10-11`: `6_000` ms
+  connect, `5_000` ms recv. That matters specifically because `Feed`'s `open_shard/5`
+  synchronous branch calls `Socket.start_link/1` from **inside** a `handle_call/3`, and
+  `Feed`'s own `@call_timeout` is `@frame_window_ms * 3` = `15_000` ms — a named, shared
+  process, so every other consumer's `subscribe/2`, `unsubscribe/2`, `update_symbols/2`
+  and `coverage/1` call queues behind that one call. The inherited defaults alone
+  (`6_000 + 5_000 = 11_000` ms) would burn roughly three-quarters of that budget on the
+  TCP connect and the handshake recv **alone**, against an unreachable or black-holing
+  venue, before a single subscribe frame is sent. The margin was never chosen; it was
+  whatever the dependency happened to default to.
+
+  Fixed by setting both explicitly at `3_000` ms each (`6_000` ms total), chosen
+  deliberately against `Feed`'s `15_000` ms budget — leaving roughly `9_000` ms of the
+  same call for the socket to send at least one subscribe frame (capped at `Feed`'s own
+  `5_000` ms `@frame_window_ms`) plus ordinary `GenServer` overhead. No failure
+  semantics changed: `start_link/1` still returns `{:error, reason}` synchronously
+  exactly as before, so the synchronous-primary-shard design is unchanged bit for bit —
+  only the margin after a slow or absent venue does. A caller passing either key in
+  `opts` still overrides it. The merge is factored into a small `@doc false`
+  `connection_opts/1` so a regression test can pin both the defaults and the override
+  precedence without opening a real socket.
+
+### Documentation
+
+- **`docs/reference/coinbase/endpoint-inventory.md` still listed `/best_bid_ask` and
+  `/product_book` as not implemented — family-wide defect sweep, Coinbase B3.** Both were
+  implemented and declared `:experimental` in `capabilities/0` well before this release;
+  the note was never updated when they shipped, which is part of why B1's missing
+  public/private branch on `/best_bid_ask` went unnoticed. Both endpoints are now marked
+  `✓` in the endpoint list, the stale "absent" note is corrected, and the newly measured
+  fact from B1 is recorded where this file's other live measurements live: `/best_bid_ask`
+  has no public form, verified live 2026-09-05, unlike `/product_book`, whose
+  `market/product_book` twin is real and public.
+
+- **`frame_sender.ex`'s moduledoc claimed `WebSockex.send_frame/2` has "no way to
+  override" its 5-second timeout.** The vendored websockex 0.5.1 exposes `send_frame/3`
+  with a timeout argument, so the claim was wrong. `FrameSender.send/3` still calls the
+  2-arg form, so nothing about the actual timeout behaviour changes here — see the design
+  doc's deferred section for why a longer timeout is a decision for later, not a
+  drive-by alongside this correction.
+
 - **Every `ticker` frame from the real venue failed to decode — 0 `Quote`s delivered,
   ever, against live Coinbase, for the entire life of this package.** Surfaced while
   chasing DpCryptoManagement's issue #22: a live test against 60 non-aliased, canonical

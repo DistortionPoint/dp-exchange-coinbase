@@ -146,7 +146,7 @@ Advanced Trade's own surface, not this package's coverage of it — read the two
   DELETE /api/v3/brokerage/portfolios/{portfolio_uuid}
   GET /api/v3/brokerage/accounts
   GET /api/v3/brokerage/accounts/{account_uuid}
-  GET /api/v3/brokerage/best_bid_ask
+✓ GET /api/v3/brokerage/best_bid_ask
   GET /api/v3/brokerage/cfm/balance_summary
   GET /api/v3/brokerage/cfm/intraday/current_margin_window
   GET /api/v3/brokerage/cfm/intraday/margin_setting
@@ -159,7 +159,7 @@ Advanced Trade's own surface, not this package's coverage of it — read the two
   GET /api/v3/brokerage/intx/positions/{portfolio_uuid}
   GET /api/v3/brokerage/intx/positions/{portfolio_uuid}/{symbol}
   GET /api/v3/brokerage/key_permissions
-  GET /api/v3/brokerage/market/product_book
+✓ GET /api/v3/brokerage/market/product_book
 ✓ GET /api/v3/brokerage/market/products
   GET /api/v3/brokerage/market/products/{product_id}
 ✓ GET /api/v3/brokerage/market/products/{product_id}/candles
@@ -171,7 +171,7 @@ Advanced Trade's own surface, not this package's coverage of it — read the two
   GET /api/v3/brokerage/payment_methods/{payment_method_id}
   GET /api/v3/brokerage/portfolios
   GET /api/v3/brokerage/portfolios/{portfolio_uuid}
-  GET /api/v3/brokerage/product_book
+✓ GET /api/v3/brokerage/product_book
   GET /api/v3/brokerage/products
   GET /api/v3/brokerage/products/{product_id}
   GET /api/v3/brokerage/products/{product_id}/candles
@@ -201,8 +201,23 @@ Advanced Trade's own surface, not this package's coverage of it — read the two
 credential; `/products/{id}/ticker` is the account-scoped equivalent and 401s without one.
 This package implements both forms of ticker and the public forms of products and candles.
 
-**`/best_bid_ask` and `/product_book` are absent**, which is why `get_order_book/2` is
-`:unsupported` on a venue that serves depth.
+**`/best_bid_ask` and `/product_book` are both implemented, and this note was stale.** It
+previously said both were absent from this package, which was true when written and had
+not been re-checked since; `get_top_of_book/2` and `get_order_book/2` are both
+`:experimental` in `capabilities/0` today, not `:unsupported`.
+
+**`/best_bid_ask` has no public form — measured live 2026-09-05, and this is the
+exception in this table.** Every other endpoint above with a `market/` twin genuinely
+serves both; this one does not:
+
+    GET /api/v3/brokerage/best_bid_ask?product_ids=BTC-USD         -> 401
+    GET /api/v3/brokerage/market/best_bid_ask?product_ids=BTC-USD  -> 404 Route Not Found
+
+`get_top_of_book/2` therefore requires credentials and fails closed
+(`{:refused, :missing_credentials}`) rather than sending an unauthenticated request that
+would come back as an opaque 401. `/product_book` is not the same case: `market/product_book`
+is real and public, and `get_order_book/2` reads it exactly like every other
+public/private pair in this table.
 
 **INTX perpetuals are marked deprecated by the vendor.** Implementing a surface being
 removed is a question for the architect, not a decision to take here.

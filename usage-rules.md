@@ -25,14 +25,20 @@ Running two — two credentials, two scopes — needs distinct names:
  {DpExchange.Coinbase, name: :cb_b, feed: :cb_b_feed, limiter: :cb_b_limiter}]
 ```
 
-## Credentials choose the endpoint; they do not gate it
+## Credentials choose the endpoint; they do not gate it — except one call
 
-Coinbase serves the same market data publicly and authenticated. Pass credentials and
+Coinbase serves almost all market data publicly and authenticated. Pass credentials and
 this package uses the authenticated path, which has the higher ceiling. Pass none and it
 uses the public one. The return is identical either way.
 
 Declared as `credential_benefit: :higher_ceiling` — a boolean could only have said
-"required" or "not", and neither is true here.
+"required" or "not", and neither is true for the package as a whole.
+
+**`get_top_of_book/2` is the one exception.** The venue publishes no public form of
+`/best_bid_ask` — confirmed live, `401` authenticated and `404` at the `/market/...` path
+every other reader here has. Call it without credentials and it returns
+`{:refused, :missing_credentials}` before sending anything, rather than surfacing the
+venue's 401 as an opaque error.
 
 ## Nine candle widths, and `12h` is not one of them
 

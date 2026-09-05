@@ -1445,28 +1445,46 @@ defmodule DpExchange.Coinbase.Rest do
 
   `/best_bid_ask` takes `product_ids` and returns one pricebook per product; this asks for
   one and reads the first level of each side.
+
+  ## Unlike every sibling reader in this module, this one has no public form
+
+  Every other market-data function here branches between an authenticated path and a
+  `/market/...` public one. This does not, because there is no public
+  `/market/best_bid_ask` to branch to — verified live 2026-09-05:
+
+      GET /api/v3/brokerage/best_bid_ask?product_ids=BTC-USD         -> 401
+      GET /api/v3/brokerage/market/best_bid_ask?product_ids=BTC-USD  -> 404
+
+  Without credentials this returns `{:refused, :missing_credentials}` before sending
+  anything. Sending the request anyway would come back as an opaque 401 that reads like a
+  venue outage rather than what it is — a call that needed a credential it was not given.
   """
   @spec get_top_of_book(String.t(), keyword()) ::
           {:ok, Types.TopOfBook.t()} | {:error, term()} | {:refused, term()}
   def get_top_of_book(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
     credentials = Keyword.get(opts, :credentials)
-    observed_at = DateTime.utc_now()
 
-    case request(:get, "/best_bid_ask", credentials, opts, %{"product_ids" => native}) do
-      {:ok, %{body: %{"pricebooks" => [pricebook | _rest]}}} ->
-        build_top_of_book(native, pricebook, observed_at)
+    if is_nil(credentials) do
+      {:refused, :missing_credentials}
+    else
+      observed_at = DateTime.utc_now()
 
-      # The venue answered and named no book for this product. Not an error, and not an
-      # empty book either — there is nothing to quote.
-      {:ok, %{body: %{"pricebooks" => []}}} ->
-        {:refused, :not_listed}
+      case request(:get, "/best_bid_ask", credentials, opts, %{"product_ids" => native}) do
+        {:ok, %{body: %{"pricebooks" => [pricebook | _rest]}}} ->
+          build_top_of_book(native, pricebook, observed_at)
 
-      {:ok, _unexpected} ->
-        {:error, :unexpected_response_shape}
+        # The venue answered and named no book for this product. Not an error, and not an
+        # empty book either — there is nothing to quote.
+        {:ok, %{body: %{"pricebooks" => []}}} ->
+          {:refused, :not_listed}
 
-      {:error, reason} ->
-        classify(reason)
+        {:ok, _unexpected} ->
+          {:error, :unexpected_response_shape}
+
+        {:error, reason} ->
+          classify(reason)
+      end
     end
   end
 

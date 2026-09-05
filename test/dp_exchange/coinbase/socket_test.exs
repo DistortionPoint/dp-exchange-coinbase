@@ -34,6 +34,68 @@ defmodule DpExchange.Coinbase.SocketTest do
     ]
   }
 
+  describe "connection_opts/1 — the connect timeouts are chosen, not inherited" do
+    # `start_link/1` hands this exact keyword list to `WebSockex.start_link/4` with
+    # nothing added or removed afterward — see `start_link/1`'s own body — so pinning
+    # this function's return value pins what actually reaches the socket, without
+    # opening one. WebSockex's own inherited defaults (measured in
+    # `deps/websockex/lib/websockex/conn.ex:10-11`): 6_000 ms connect, 5_000 ms recv.
+
+    test "supplies deliberate defaults when the caller passes none, not WebSockex's own" do
+      opts = Socket.connection_opts([])
+
+      assert Keyword.fetch!(opts, :socket_connect_timeout) == 3_000
+      assert Keyword.fetch!(opts, :socket_recv_timeout) == 3_000
+
+      refute Keyword.fetch!(opts, :socket_connect_timeout) == 6_000
+      refute Keyword.fetch!(opts, :socket_recv_timeout) == 5_000
+    end
+
+    test "the defaults leave real room under Feed's 15_000 ms call budget" do
+      # This is the arithmetic the moduledoc states: connect + recv must leave enough
+      # of Feed's `@call_timeout` (15_000 ms) for at least one subscribe frame
+      # (`@frame_window_ms`, 5_000 ms) plus ordinary GenServer overhead. WebSockex's own
+      # inherited total (6_000 + 5_000 = 11_000 ms) would not.
+      opts = Socket.connection_opts([])
+
+      total =
+        Keyword.fetch!(opts, :socket_connect_timeout) + Keyword.fetch!(opts, :socket_recv_timeout)
+
+      assert total == 6_000
+      assert total < 15_000 - 5_000
+    end
+
+    test "a caller-supplied connect timeout overrides the default" do
+      opts = Socket.connection_opts(socket_connect_timeout: 42)
+
+      assert Keyword.fetch!(opts, :socket_connect_timeout) == 42
+      # The other key is untouched by an override of just one.
+      assert Keyword.fetch!(opts, :socket_recv_timeout) == 3_000
+    end
+
+    test "a caller-supplied recv timeout overrides the default" do
+      opts = Socket.connection_opts(socket_recv_timeout: 99)
+
+      assert Keyword.fetch!(opts, :socket_recv_timeout) == 99
+      assert Keyword.fetch!(opts, :socket_connect_timeout) == 3_000
+    end
+
+    test "both overrides win at once, and every other opt passes through untouched" do
+      opts =
+        Socket.connection_opts(
+          subscriber: self(),
+          url: "ws://example.invalid",
+          socket_connect_timeout: 10,
+          socket_recv_timeout: 20
+        )
+
+      assert Keyword.fetch!(opts, :socket_connect_timeout) == 10
+      assert Keyword.fetch!(opts, :socket_recv_timeout) == 20
+      assert Keyword.fetch!(opts, :subscriber) == self()
+      assert Keyword.fetch!(opts, :url) == "ws://example.invalid"
+    end
+  end
+
   describe "connection state becomes a notice, not a log line" do
     test "connecting reports link_up" do
       assert {:ok, _state} = Socket.handle_connect(%{}, state())
@@ -308,7 +370,13 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert eth_book.bids == [{Decimal.new("10.00"), Decimal.new("5.0")}]
     end
 
-    test "an unparseable price or quantity is dropped rather than crashing the book" do
+    test "an unparseable price or quantity is dropped from the book AND reported, not swallowed" do
+      # Every other decode failure in this module reports through `report_quality/2` —
+      # `deliver_ticker/3` and `deliver_book/3` both do. This row used to be the one
+      # exception: the book came back unchanged with no signal at all. That matters
+      # concretely because `new_quantity: "0"` is how the venue signals level REMOVAL —
+      # an unparseable quantity silently ignored can leave a stale price level in the
+      # maintained book indefinitely with nothing indicating why.
       bad_row = %{
         "channel" => "l2_data",
         "timestamp" => "2026-08-28T14:53:45.649112Z",
@@ -325,6 +393,27 @@ defmodule DpExchange.Coinbase.SocketTest do
 
       assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
       assert book.bids == []
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+    end
+
+    test "a row missing side/price_level/new_quantity entirely is also reported, not swallowed" do
+      malformed_shape = %{
+        "channel" => "l2_data",
+        "timestamp" => "2026-08-28T14:53:45.649112Z",
+        "events" => [
+          %{
+            "type" => "snapshot",
+            "product_id" => "BTC-USD",
+            "updates" => [%{"side" => "bid", "price_level" => "100.00"}]
+          }
+        ]
+      }
+
+      assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(malformed_shape)}, state())
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
+      assert book.bids == []
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
     end
 
     test "a snapshot with NO venue timestamp is not delivered, but still updates the maintained book" do

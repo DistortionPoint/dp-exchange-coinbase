@@ -30,6 +30,12 @@ defmodule DpExchange.Coinbase.RestTest do
     fn conn -> Req.Test.json(%{conn | status: status}, body) end
   end
 
+  # `/best_bid_ask` has no public form — unlike every other market-data endpoint this
+  # module reads, it genuinely requires a credential. See `get_top_of_book/2`'s own doc.
+  defp credentials do
+    %{api_key: "organizations/x/apiKeys/y", api_secret: "-----BEGIN EC PRIVATE KEY-----"}
+  end
+
   @ticker %{
     "trades" => [
       %{
@@ -61,12 +67,56 @@ defmodule DpExchange.Coinbase.RestTest do
       body = %{"pricebooks" => [%{"product_id" => "BTC-USD", "bids" => [], "asks" => []}]}
 
       assert {:ok, top} =
-               Rest.get_top_of_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+               Rest.get_top_of_book("BTC-USD",
+                 credentials: credentials(),
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
 
       assert top.bid == nil
       assert top.ask == nil
       assert top.bid_size == nil
       assert top.ask_size == nil
+    end
+
+    test "get_top_of_book/2 without credentials fails closed and never sends a request" do
+      # Unlike every sibling market-data reader, `/best_bid_ask` has no public form —
+      # verified live 2026-09-05: authenticated is 401, `/market/best_bid_ask` is 404.
+      # Sending the request anyway with no credential would come back as an opaque 401
+      # that reads like a venue problem. The plug below would happily answer with a
+      # canned 200 regardless of path or headers, exactly like the stub this test
+      # replaces — the point is that it must never be reached.
+      me = self()
+
+      plug = fn conn ->
+        send(me, :request_sent)
+        Req.Test.json(conn, %{"pricebooks" => []})
+      end
+
+      assert {:refused, :missing_credentials} =
+               Rest.get_top_of_book("BTC-USD", plug: plug, retry_attempts: 0)
+
+      refute_received :request_sent
+    end
+
+    test "get_top_of_book/2 with credentials requests /best_bid_ask directly, no /market/ branch" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+        Req.Test.json(conn, %{"pricebooks" => []})
+      end
+
+      assert {:refused, :not_listed} =
+               Rest.get_top_of_book("BTC-USD",
+                 credentials: credentials(),
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, path}
+      assert path =~ "best_bid_ask"
+      refute path =~ "/market/"
     end
 
     test "a response with no venue timestamp FAILS rather than substituting now" do

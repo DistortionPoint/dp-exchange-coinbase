@@ -13,11 +13,14 @@ defmodule DpExchange.Coinbase do
 
   ## What is specific to Coinbase, and what a caller can therefore rely on
 
-  **Credentials choose the endpoint; they do not gate it.** Coinbase serves the same
-  market data publicly and authenticated. Pass credentials and this package uses the
-  authenticated path, which has the higher ceiling; pass none and it uses the public one.
-  Either way you get the same `Core.Types.*` back, and `capabilities/0` tells you what the
-  difference bought.
+  **Credentials choose the endpoint; they do not gate it — with one exception.** Coinbase
+  serves almost all market data publicly and authenticated. Pass credentials and this
+  package uses the authenticated path, which has the higher ceiling; pass none and it uses
+  the public one. Either way you get the same `Core.Types.*` back, and `capabilities/0`
+  tells you what the difference bought. **`get_top_of_book/2` is the one exception**: the
+  venue publishes no public form of `/best_bid_ask` — confirmed live, `401` authenticated
+  and `404` at the `/market/...` path a caller would expect — so this one call is
+  `{:refused, :missing_credentials}` without them rather than a nearer substitute.
 
   **Nine candle widths, and `12h` is not one of them.** The shared vocabulary models it;
   Coinbase does not serve it. Asking for a width Coinbase does not serve is an **error**,
@@ -214,9 +217,12 @@ defmodule DpExchange.Coinbase do
       reports_trade_volume: true,
       catalog_size: :small,
 
-      # Credentials buy a higher ceiling here, not access: the same market data is
+      # Credentials buy a higher ceiling here, not access: almost all market data is
       # served publicly. The three-way answer is the point — a boolean could only say
-      # "required" or "not", and neither is true.
+      # "required" or "not", and neither is true for the package as a whole. The one
+      # exception is `get_top_of_book/2`, which genuinely has no public form — see its
+      # own doc and `docs/reference/coinbase/endpoint-inventory.md` — but one endpoint's
+      # exception does not make `:required` the honest word for the other forty-five.
       credential_benefit: :higher_ceiling,
       public_ceiling: %{limit: 3, per_ms: 1_000},
       authenticated_ceiling: %{limit: 10, per_ms: 1_000},

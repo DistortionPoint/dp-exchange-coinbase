@@ -40,6 +40,12 @@ defmodule DpExchange.Coinbase.OrderBookTest do
     end
   end
 
+  # `/best_bid_ask` has no public form — unlike every other market-data endpoint this
+  # module reads, `get_top_of_book/2` genuinely requires a credential. See its own doc.
+  defp credentials do
+    %{api_key: "organizations/x/apiKeys/y", api_secret: "-----BEGIN EC PRIVATE KEY-----"}
+  end
+
   defp pricebook(overrides \\ %{}) do
     Map.merge(
       %{
@@ -63,7 +69,11 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       body = %{"pricebooks" => [pricebook()]}
 
       assert {:ok, %Types.TopOfBook{} = top} =
-               Rest.get_top_of_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+               Rest.get_top_of_book("BTC-USD",
+                 credentials: credentials(),
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
 
       assert Decimal.equal?(top.bid, Decimal.new("79478.00"))
       assert Decimal.equal?(top.ask, Decimal.new("79479.00"))
@@ -76,7 +86,11 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       body = %{"pricebooks" => [pricebook()]}
 
       assert {:ok, top} =
-               Rest.get_top_of_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+               Rest.get_top_of_book("BTC-USD",
+                 credentials: credentials(),
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
 
       refute Decimal.equal?(top.bid, Decimal.new("79477.50"))
     end
@@ -85,7 +99,11 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       body = %{"pricebooks" => [pricebook()]}
 
       assert {:ok, top} =
-               Rest.get_top_of_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+               Rest.get_top_of_book("BTC-USD",
+                 credentials: credentials(),
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
 
       assert top.venue_time == ~U[2026-08-31 14:53:45.649112Z]
       assert top.observed_at
@@ -96,7 +114,11 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       body = %{"pricebooks" => [pricebook() |> Map.delete("time")]}
 
       assert {:ok, top} =
-               Rest.get_top_of_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+               Rest.get_top_of_book("BTC-USD",
+                 credentials: credentials(),
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
 
       assert top.venue_time == nil
       # observed_at still says when we looked, which is the honest freshness.
@@ -106,6 +128,7 @@ defmodule DpExchange.Coinbase.OrderBookTest do
     test "no pricebook for the product is a refusal, not an empty book" do
       assert {:refused, :not_listed} =
                Rest.get_top_of_book("NOPE-USD",
+                 credentials: credentials(),
                  plug: responding(%{"pricebooks" => []}),
                  retry_attempts: 0
                )
@@ -113,7 +136,11 @@ defmodule DpExchange.Coinbase.OrderBookTest do
 
     test "a body with no pricebooks key is unreadable" do
       assert {:error, :unexpected_response_shape} =
-               Rest.get_top_of_book("BTC-USD", plug: responding(%{}), retry_attempts: 0)
+               Rest.get_top_of_book("BTC-USD",
+                 credentials: credentials(),
+                 plug: responding(%{}),
+                 retry_attempts: 0
+               )
     end
 
     test "it asks the venue for the one product" do
@@ -127,10 +154,55 @@ defmodule DpExchange.Coinbase.OrderBookTest do
         |> Plug.Conn.resp(200, Jason.encode!(%{"pricebooks" => [pricebook()]}))
       end
 
-      assert {:ok, _top} = Rest.get_top_of_book("BTC-USD", plug: plug, retry_attempts: 0)
+      assert {:ok, _top} =
+               Rest.get_top_of_book("BTC-USD",
+                 credentials: credentials(),
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
       assert_receive {:query, query, path}
       assert path =~ "best_bid_ask"
       assert query =~ "product_ids=BTC-USD"
+    end
+
+    test "without credentials it is refused before any request is sent — unlike every sibling reader" do
+      # Re-verified live 2026-09-05: authenticated `/best_bid_ask` is 401, and the
+      # `/market/best_bid_ask` a caller might expect by analogy with get_price/2,
+      # get_order_book/2 and every other reader in this module is 404 — there is no
+      # public form to fall back to. This must fail before a request goes out, naming
+      # the missing credential, rather than surfacing the venue's 401 as an opaque error.
+      me = self()
+
+      plug = fn conn ->
+        send(me, :request_sent)
+        Req.Test.json(conn, %{"pricebooks" => [pricebook()]})
+      end
+
+      assert {:refused, :missing_credentials} =
+               Rest.get_top_of_book("BTC-USD", plug: plug, retry_attempts: 0)
+
+      refute_received :request_sent
+    end
+
+    test "with credentials it goes straight to /best_bid_ask, never a /market/ path" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+        Req.Test.json(conn, %{"pricebooks" => [pricebook()]})
+      end
+
+      assert {:ok, _top} =
+               Rest.get_top_of_book("BTC-USD",
+                 credentials: credentials(),
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, path}
+      assert path =~ "best_bid_ask"
+      refute path =~ "/market/"
     end
   end
 
