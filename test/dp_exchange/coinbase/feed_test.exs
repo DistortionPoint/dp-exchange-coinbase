@@ -11,7 +11,7 @@ defmodule DpExchange.Coinbase.FeedTest do
   # interesting behaviour is and where a venue gets it wrong.
   defp start_feed do
     name = :"feed_#{System.unique_integer([:positive])}"
-    pid = start_supervised!({Feed, name: name})
+    pid = start_supervised!({Feed, name: name, alias_map_source: fn -> {:ok, %{}} end})
     pid
   end
 
@@ -168,7 +168,9 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed =
         start_supervised!(
           {Feed,
-           name: :"feed_#{System.unique_integer([:positive])}", url: "ws://127.0.0.1:1/nowhere"}
+           name: :"feed_#{System.unique_integer([:positive])}",
+           url: "ws://127.0.0.1:1/nowhere",
+           alias_map_source: fn -> {:ok, %{}} end}
         )
 
       assert {:error, _reason} = Feed.subscribe(feed, ~w(BTC-USD), to: self())
@@ -179,7 +181,9 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed =
         start_supervised!(
           {Feed,
-           name: :"feed_#{System.unique_integer([:positive])}", url: "ws://127.0.0.1:1/nowhere"}
+           name: :"feed_#{System.unique_integer([:positive])}",
+           url: "ws://127.0.0.1:1/nowhere",
+           alias_map_source: fn -> {:ok, %{}} end}
         )
 
       Feed.subscribe(feed, ~w(BTC-USD), to: self())
@@ -201,7 +205,9 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed =
         start_supervised!(
           {Feed,
-           name: :"feed_#{System.unique_integer([:positive])}", url: "ws://127.0.0.1:1/nowhere"}
+           name: :"feed_#{System.unique_integer([:positive])}",
+           url: "ws://127.0.0.1:1/nowhere",
+           alias_map_source: fn -> {:ok, %{}} end}
         )
 
       # Registering happens through `subscribe/3` even when the socket cannot connect —
@@ -246,6 +252,136 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
   end
 
+  describe "attribution — the venue rewrites an aliased product id on delivery" do
+    # Measured live 2026-09-05 against wss://advanced-trade-ws.coinbase.com: subscribing
+    # `ticker` to `["XLM-USDC", "AVAX-USDC"]` — the alias form, and only that — delivers
+    # every frame tagged `XLM-USD`/`AVAX-USD`, the canonical form, and the venue's own
+    # subscription ack echoes the rewritten names back rather than what was sent. These
+    # tests drive that exact mechanism without reaching the venue: `alias_map_source`
+    # stands in for `Rest.get_alias_map/1`, answering with the venue's own declared
+    # relationship the way the real fetch would.
+    @alias_map %{"XLM-USDC" => "XLM-USD", "XLM-USD" => "XLM-USDC"}
+
+    defp start_aliased_feed(alias_map_source) do
+      start_supervised!(
+        {Feed,
+         name: :"feed_#{System.unique_integer([:positive])}",
+         url: "ws://127.0.0.1:1/nowhere",
+         alias_map_source: alias_map_source}
+      )
+    end
+
+    test "a subscribe to the alias form receiving frames tagged with the canonical form delivers under the alias form" do
+      feed = start_aliased_feed(fn -> {:ok, @alias_map} end)
+
+      # The socket cannot connect (unreachable url), but `wanted` records the caller's
+      # own requested name regardless — exactly as the pre-existing "subscribe with a
+      # socket that will not connect" tests already establish.
+      Feed.subscribe(feed, ~w(XLM-USDC), to: self())
+      Process.sleep(20)
+
+      # Simulates `Socket` delivering a frame the venue tagged with the canonical id —
+      # the live-measured behaviour above — without opening a real connection.
+      send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
+      Process.sleep(20)
+
+      assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USDC"}}
+      refute_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USD"}}
+    end
+
+    test "coverage/1 lists what the caller requested, never what the venue delivered under" do
+      feed = start_aliased_feed(fn -> {:ok, @alias_map} end)
+
+      Feed.subscribe(feed, ~w(XLM-USDC), to: self())
+      Process.sleep(20)
+
+      send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
+      Process.sleep(20)
+
+      assert Feed.coverage(feed) == %{"XLM-USDC" => :stream}
+    end
+
+    test "subscribing to both the alias and the canonical name delivers both, from one frame" do
+      # The venue treats the two as one market. A caller that asked for both is entitled
+      # to both, from whichever single id the venue actually tags the frame with.
+      feed = start_aliased_feed(fn -> {:ok, @alias_map} end)
+
+      Feed.subscribe(feed, ~w(XLM-USDC XLM-USD), to: self())
+      Process.sleep(20)
+
+      send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
+      Process.sleep(20)
+
+      assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USDC"}}
+      assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USD"}}
+
+      coverage = Feed.coverage(feed)
+      assert coverage["XLM-USDC"] == :stream
+      assert coverage["XLM-USD"] == :stream
+    end
+
+    test "unsubscribe still works by the name the caller used" do
+      feed = start_aliased_feed(fn -> {:ok, @alias_map} end)
+
+      Feed.subscribe(feed, ~w(XLM-USDC), to: self())
+      Process.sleep(20)
+      send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
+      Process.sleep(20)
+      assert Feed.coverage(feed) == %{"XLM-USDC" => :stream}
+
+      assert :ok = Feed.unsubscribe(feed, ~w(XLM-USDC))
+      assert Feed.coverage(feed) == %{}
+    end
+
+    test "a catalogue fetch failure delivers under the venue's own id and reports degraded attribution, never a guessed mapping" do
+      feed = start_aliased_feed(fn -> {:error, :simulated_catalog_failure} end)
+
+      Feed.subscribe_notices(feed, to: self())
+      Feed.subscribe(feed, ~w(XLM-USDC), to: self())
+
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :data_quality, details: %{reason: reason}} = notice},
+                     500
+
+      assert reason =~ "simulated_catalog_failure"
+      assert notice.message =~ "alias catalogue unavailable"
+
+      send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
+      Process.sleep(20)
+
+      # Delivered under the venue's own id — never the caller's requested XLM-USDC —
+      # because there is no honest way to know they name the same market without the
+      # catalogue that says so. Guessing from the shared "-USD"/"-USDC" suffix is exactly
+      # the nearby substitute this family forbids.
+      assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USD"}}
+      refute_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USDC"}}
+
+      coverage = Feed.coverage(feed)
+      assert coverage["XLM-USD"] == :stream
+      refute Map.has_key?(coverage, "XLM-USDC")
+    end
+
+    test "the catalogue is fetched once, never per subscribe and never per delivered frame" do
+      counter = :counters.new(1, [])
+
+      feed =
+        start_aliased_feed(fn ->
+          :counters.add(counter, 1, 1)
+          {:ok, @alias_map}
+        end)
+
+      Feed.subscribe(feed, ~w(XLM-USDC), to: self())
+      Feed.subscribe(feed, ~w(AVAX-USDC), to: self())
+      Feed.update_symbols(feed, ~w(XLM-USDC AVAX-USDC))
+      Process.sleep(20)
+
+      for _i <- 1..5, do: send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
+      Process.sleep(20)
+
+      assert :counters.get(counter, 1) == 1
+    end
+  end
+
   describe "with a connection already established" do
     # A live process standing in for a socket whose frames fail — it exercises the
     # socket-bearing branches without reaching a venue.
@@ -265,7 +401,10 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       feed =
         start_supervised!(
-          {Feed, name: :"feed_#{System.unique_integer([:positive])}", socket: socket}
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           socket: socket,
+           alias_map_source: fn -> {:ok, %{}} end}
         )
 
       {feed, socket}
@@ -357,7 +496,9 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed =
         start_supervised!(
           {Feed,
-           name: :"feed_#{System.unique_integer([:positive])}", url: "ws://127.0.0.1:1/nowhere"}
+           name: :"feed_#{System.unique_integer([:positive])}",
+           url: "ws://127.0.0.1:1/nowhere",
+           alias_map_source: fn -> {:ok, %{}} end}
         )
 
       # The first shard is synchronous (this call's own reply); the second is
@@ -383,7 +524,9 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed =
         start_supervised!(
           {Feed,
-           name: :"feed_#{System.unique_integer([:positive])}", url: "ws://127.0.0.1:1/nowhere"}
+           name: :"feed_#{System.unique_integer([:positive])}",
+           url: "ws://127.0.0.1:1/nowhere",
+           alias_map_source: fn -> {:ok, %{}} end}
         )
 
       assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
@@ -438,7 +581,10 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       feed =
         start_supervised!(
-          {Feed, name: :"feed_#{System.unique_integer([:positive])}", socket: socket}
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           socket: socket,
+           alias_map_source: fn -> {:ok, %{}} end}
         )
 
       send(feed, {:open_shard, 0, ["BTC-USD"]})
@@ -452,7 +598,9 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed =
         start_supervised!(
           {Feed,
-           name: :"feed_#{System.unique_integer([:positive])}", url: "ws://127.0.0.1:1/nowhere"}
+           name: :"feed_#{System.unique_integer([:positive])}",
+           url: "ws://127.0.0.1:1/nowhere",
+           alias_map_source: fn -> {:ok, %{}} end}
         )
 
       send(feed, {:open_shard, 0, ["BTC-USD"]})

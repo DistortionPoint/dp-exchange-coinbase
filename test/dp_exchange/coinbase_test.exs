@@ -252,7 +252,11 @@ defmodule DpExchange.CoinbaseTest do
         name: :"venue_#{id}",
         limiter: :"limiter_#{id}",
         feed: :"feed_#{id}",
-        url: "ws://127.0.0.1:1/nowhere"
+        url: "ws://127.0.0.1:1/nowhere",
+        # Same reasoning as `url:` above, for the alias-map fetch `subscribe/2` now
+        # triggers the first time it runs — see `Feed`'s moduledoc. Without this, the
+        # first subscribe below would reach the real venue's public catalogue.
+        alias_map_source: fn -> {:ok, %{}} end
       ]
 
       start_supervised!(%{id: opts[:name], start: {Coinbase, :start_link, [opts]}})

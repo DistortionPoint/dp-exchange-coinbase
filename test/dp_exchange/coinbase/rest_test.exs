@@ -428,6 +428,58 @@ defmodule DpExchange.Coinbase.RestTest do
     end
   end
 
+  describe "get_alias_map/1" do
+    # Shaped like the live response, captured 2026-09-05 from
+    # GET /api/v3/brokerage/market/products?product_type=SPOT&quote_currency_id=USDC —
+    # both sides of an aliased pair appear in the same catalogue read, each stating the
+    # relationship from its own side: the alias row's `alias` names its target, the
+    # target's own row carries `alias: ""` and states the reverse via `alias_to` instead.
+    @aliased_products %{
+      "products" => [
+        %{"product_id" => "XLM-USD", "alias" => "", "alias_to" => ["XLM-USDC"]},
+        %{"product_id" => "XLM-USDC", "alias" => "XLM-USD", "alias_to" => []},
+        # A product the venue does not alias at all — most of the catalogue, and the
+        # majority case this map must leave untouched.
+        %{"product_id" => "SOL-USD", "alias" => "", "alias_to" => []}
+      ]
+    }
+
+    test "builds a bidirectional map from the venue's own declared alias, both directions" do
+      assert {:ok, map} =
+               Rest.get_alias_map(plug: responding(@aliased_products), retry_attempts: 0)
+
+      assert map["XLM-USDC"] == "XLM-USD"
+      assert map["XLM-USD"] == "XLM-USDC"
+    end
+
+    test "an unaliased product contributes no entry — not an identity mapping to itself" do
+      assert {:ok, map} =
+               Rest.get_alias_map(plug: responding(@aliased_products), retry_attempts: 0)
+
+      refute Map.has_key?(map, "SOL-USD")
+    end
+
+    test "built from `alias` alone — a row with only `alias_to` still gets its edge, from the other side" do
+      # XLM-USD's own row carries an empty `alias` and states the relationship only via
+      # `alias_to`; its entry above comes entirely from XLM-USDC's row instead, proving
+      # `alias_to` need not be read at all.
+      assert {:ok, map} =
+               Rest.get_alias_map(plug: responding(@aliased_products), retry_attempts: 0)
+
+      assert map_size(map) == 2
+    end
+
+    test "an unexpected shape is an error" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_alias_map(plug: responding(%{"nope" => 1}), retry_attempts: 0)
+    end
+
+    test "reads the same public path get_symbols/1 does, with no credential" do
+      assert {:ok, %{}} =
+               Rest.get_alias_map(plug: responding(%{"products" => []}), retry_attempts: 0)
+    end
+  end
+
   describe "the declaration and the code agree" do
     test "granularities/0 matches what capabilities/0 declares" do
       assert Rest.granularities() == DpExchange.Coinbase.capabilities().historical_timeframes

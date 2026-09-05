@@ -167,6 +167,61 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  @doc """
+  The venue's own declared alias relationships between listed products, as a
+  **bidirectional** map of canonical symbol to canonical symbol.
+
+  ## Why this exists — measured live, 2026-09-05
+
+  Subscribing the streaming `ticker` channel to `XLM-USDC` and `AVAX-USDC` against
+  `wss://advanced-trade-ws.coinbase.com` delivers every frame tagged `XLM-USD` and
+  `AVAX-USD` — the venue's own subscription acknowledgement even echoes the rewritten
+  names back (`"ticker" => ["XLM-USD", "AVAX-USD"]`), not the ones actually sent. This is
+  not an accident of one pair: this same catalogue call, read on the same date, shows 112
+  of the first 114 USDC products carrying a non-empty `alias` naming their `-USD`
+  counterpart —
+
+      {"product_id":"XLM-USDC", ..., "alias":"XLM-USD"}
+      {"product_id":"XLM-USD",  ..., "alias":"", "alias_to":["XLM-USDC"]}
+
+  — so a caller subscribed under the alias form receives nothing under the name it asked
+  for while a name it never asked for floods in. `DpExchange.Coinbase.Feed` is what uses
+  this map to attribute a delivered frame back to whatever the caller actually
+  subscribed; see its moduledoc for the mechanism and the measured consumer impact.
+
+  ## Built from `alias` alone, not `alias_to`
+
+  Every aliased pair appears in the same catalogue response from **both** sides — the
+  aliased row states `alias`, its target states the reverse via `alias_to`. Reading only
+  `alias` and inserting both directions here is complete: nothing `alias_to` would add is
+  missing, and reading only one field is one fewer place for the two to disagree.
+
+  ## `{:error, _}` is a real possibility, and callers must not guess through it
+
+  This is a bulk catalogue read like `get_symbols/1`, subject to the same failures — see
+  `Feed`'s moduledoc for what it does when this call fails: deliver under the venue's own
+  id, same as before this map existed, plus a notice that attribution is degraded and
+  why. Never a fabricated mapping.
+  """
+  @spec get_alias_map(keyword()) :: {:ok, %{String.t() => String.t()}} | {:error, term()}
+  def get_alias_map(opts) do
+    with {:ok, products} <- fetch_products(opts) do
+      {:ok, Enum.reduce(products, %{}, &add_alias_pair/2)}
+    end
+  end
+
+  defp add_alias_pair(%{"product_id" => product_id, "alias" => alias_id}, acc)
+       when is_binary(alias_id) and alias_id != "" do
+    canonical = SymbolFormat.to_canonical_symbol(product_id)
+    aliased = SymbolFormat.to_canonical_symbol(alias_id)
+
+    acc
+    |> Map.put(canonical, aliased)
+    |> Map.put(aliased, canonical)
+  end
+
+  defp add_alias_pair(_product, acc), do: acc
+
   # Public and private again: the venue publishes the catalogue at both paths, and a
   # caller holding a credential should see the authenticated view. Shared by
   # get_symbols/1, get_market_overview/1 and list_instruments/1 — one venue response,

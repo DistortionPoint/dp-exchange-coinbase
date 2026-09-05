@@ -103,6 +103,50 @@ acceptable changelog line.
   `connection_opts/1` so a regression test can pin both the defaults and the override
   precedence without opening a real socket.
 
+- **The venue rewrites an aliased product id on delivery, and streaming passed the
+  rewritten id straight through — DpCryptoManagement's issue #22.** Measured live
+  2026-09-05 against `wss://advanced-trade-ws.coinbase.com`: subscribing `ticker` to
+  `["XLM-USDC", "AVAX-USDC"]` — sent exactly as asked, both real, listed products —
+  delivers every frame tagged `XLM-USD` and `AVAX-USD` instead; the venue's own
+  subscription acknowledgement even echoes the rewritten names back
+  (`"ticker" => ["XLM-USD", "AVAX-USD"]`), not the ones actually sent. This is the
+  venue's own declared behaviour, not a guess: the same public, unauthenticated
+  `/market/products` catalogue this package already reads for `get_symbols/1` and
+  `list_instruments/1` names it directly — on this date, 112 of the first 114 USDC
+  products carried a non-empty `alias` naming their `-USD` counterpart. On a settled
+  DpCryptoManagement node running 0.1.17 with 406 pairs requested, this was the same
+  defect wearing two faces: 174 of the 406 *requested* pairs delivered nothing under the
+  name asked for, while 401 pairs *never requested* were decoded and stored under a name
+  nobody subscribed.
+
+  Fixed in `Feed`, not `Socket`: `Socket` still decodes and delivers under whatever
+  `product_id` the venue actually sent, unchanged. `Feed.handle_info({:dp_exchange,
+  :coinbase, payload}, state)` now resolves a delivered id against `Rest.get_alias_map/1`
+  — the venue's own declared relationship, fetched **once**, asynchronously, the first
+  time `subscribe/3` or `update_symbols/2` runs (never per frame, never per subscribe;
+  see `Feed`'s moduledoc for why it is not read from `init/1` or inline in the
+  triggering call) — and delivers under every name in `wanted` that names the same
+  market: the caller's own requested name, and its alias where the caller subscribed to
+  that instead. A caller subscribed to both receives both, from one delivered frame.
+  `coverage/1` needed no code change to become honest, since it already reports
+  whatever key delivery is recorded under.
+
+  **A catalogue that cannot be fetched degrades rather than guesses.** A failed fetch
+  delivers under the venue's own id — today's pre-fix behaviour — and reports exactly
+  once, as a `:data_quality` notice naming the failure, that attribution is degraded and
+  why. Munging `-USDC` into `-USD` was considered and rejected: it would be exactly the
+  "nearby substitute" this family forbids, and wrong for any pair the venue does not
+  alias — nothing here assumes the suffix relationship holds in general, and the fix
+  reads only the venue's own `alias` field.
+
+  Regression tests in `feed_test.exs` drive the proven mechanism directly — a subscribe
+  to the alias form receiving frames tagged with the canonical form delivers under the
+  alias form; `coverage/1` lists what was requested; both names subscribed both receive
+  one delivered frame; a catalogue fetch failure delivers under the venue's id plus the
+  degraded notice, never a guessed mapping; the fetch happens once regardless of how many
+  subscribes or delivered frames follow — and `rest_test.exs` covers `get_alias_map/1`
+  itself against a catalogue shaped like the live response captured while proving this.
+
 ### Documentation
 
 - **`docs/reference/coinbase/endpoint-inventory.md` still listed `/best_bid_ask` and

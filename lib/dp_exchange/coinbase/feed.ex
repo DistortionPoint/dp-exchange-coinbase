@@ -73,11 +73,90 @@ defmodule DpExchange.Coinbase.Feed do
   one shard survived, indistinguishable from the outside from a quiet market. The
   60-second unconditional resubscribe re-issued the same burst every minute. Both paths
   now schedule each shard's turn `position * @shard_spacing_ms` after the one before it.
+
+  ## The venue rewrites an aliased product id on delivery, and that has to be undone HERE
+
+  **Measured live, 2026-09-05**, against `wss://advanced-trade-ws.coinbase.com`:
+  subscribing `ticker` to `["XLM-USDC", "AVAX-USDC"]` — sent exactly as asked, both real,
+  listed products — delivers every frame tagged `XLM-USD` and `AVAX-USD`. The venue's own
+  subscription acknowledgement even echoes the rewritten names back
+  (`"ticker" => ["XLM-USD", "AVAX-USD"]`), not the ones actually sent. This is the venue's
+  own declared behaviour, not a guess: `Rest.get_alias_map/1` reads the same public
+  `/market/products` catalogue this module already reaches through `Rest.get_symbols/1`
+  and `Rest.list_instruments/1`, and on this date 112 of the first 114 USDC products
+  carried a non-empty `alias` naming their `-USD` counterpart. A caller subscribed under
+  the alias form received nothing under the name it asked for while a name it never asked
+  for arrived instead — measured against a real 406-symbol consumer scope
+  (DpCryptoManagement's issue #22): 174 of 406 *requested* pairs delivered nothing, while
+  401 pairs *never requested* were decoded and stored.
+
+  ### Attribution lives here, not in `Socket`
+
+  `Socket` stays venue-mechanics-only: it decodes a frame and delivers a struct tagged
+  with whatever `product_id` the venue actually sent, exactly as it did before this fix.
+  Every consumer-facing rewrite happens in this module's `handle_info({:dp_exchange,
+  :coinbase, payload}, state)`, immediately before a delivered payload is recorded as
+  coverage and fanned out — because this is the one place that already holds `wanted`
+  (what the caller actually asked for) beside the delivered payload. Duplicating `wanted`
+  into `Socket` just to make the same decision twice would be a second place for the two
+  to disagree; `Socket.books` for `level2` stays keyed by whatever id the venue delivers
+  under, which is correct and unobservable — one maintained book per real market, whether
+  one or two caller-facing names point at it, matching whichever channel delivered it
+  (`ticker` via `deliver_ticker/3` or `level2` via `apply_book_event/3`/`deliver_book/3`
+  in `Socket`) since both arrive here as the same `{:dp_exchange, :coinbase, payload}`
+  shape and both structs carry `:symbol`.
+
+  ### Built once, from the venue's own catalogue, never from string-munging
+
+  `Rest.get_alias_map/1` is the only source for this map — reusing the same
+  `/market/products` fetch `get_symbols/1` and `list_instruments/1` already make, per the
+  standing rule against a second way to ask. Munging `-USDC` into `-USD` would be exactly
+  the "nearby substitute" this family forbids, and would be wrong for any pair the venue
+  does not alias — nothing here assumes the suffix relationship holds in general.
+
+  It is fetched **once**, asynchronously, the first time `subscribe/3` or
+  `update_symbols/2` is called (`maybe_schedule_alias_map_fetch/1`, gated on
+  `alias_map_status: :unfetched` so a second call never re-schedules it) — not from
+  `init/1`, so a `Feed` that is merely supervised and never asked to stream anything never
+  makes a network call, and not synchronously inside the triggering `handle_call/3`, so it
+  never competes with `@call_timeout`'s socket-connect budget. Until it resolves, and
+  forever if it fails, `state.alias_map` is simply `%{}` — indistinguishable, by design,
+  from "the venue aliases nothing here", which resolves to the same safe fallback below.
+  A failed fetch is never retried: this mirrors the file's other "decide once, unconditionally"
+  choices (the resubscribe timer, the shard stagger) rather than adding a second kind of
+  recovery logic, and a `Feed` that needs to try again is restarted, same as any other
+  stuck state a supervisor exists to clear.
+
+  A failed fetch also reports itself exactly once, as a `:data_quality` notice to
+  `notice_subscribers` — "attribution is degraded and here is why" — never a silently
+  guessed mapping. `attribution_targets/2` is the single fallback for every case where no
+  wanted name resolves — unfetched, failed, legitimately alias-free, or a frame arriving
+  for a symbol outside `wanted` altogether (in-flight just after an unsubscribe, or a raw
+  test `send/2`): deliver under whatever the venue actually sent, exactly the pre-fix
+  behaviour, rather than inventing a name.
+
+  ### Both caller-facing names, when both are wanted
+
+  The venue treats `XLM-USDC` and `XLM-USD` as one market. If a caller subscribes to
+  both, both are entitled to every update — `attribution_targets/2` resolves a delivered
+  id to *every* name in `wanted` that names the same market (its own id and, where the
+  catalogue says so, its alias), and the delivery loop sends one copy per resolved name.
+  This holds regardless of whether the venue itself echoes one frame or two per update for
+  a dual subscription — resolution runs per delivered frame against the full candidate
+  set, so two frames naming the same pair of wanted symbols do not double-deliver into a
+  name twice per market update; they each resolve to the same one-or-both names again.
+
+  ### `coverage/1` needed no code change to become honest
+
+  Coverage was already *whatever key `delivering` holds* — see the moduledoc up top. Once
+  delivery is recorded under the caller's own requested name instead of the venue's
+  rewritten one, `coverage/1` reports exactly what was asked for, by construction, with
+  nothing endpoint-specific added at the `coverage/1` call site itself.
   """
 
   use GenServer
 
-  alias DpExchange.Coinbase.Socket
+  alias DpExchange.Coinbase.{Rest, Socket}
   alias DpExchange.Core.Notice
 
   require Logger
@@ -155,9 +234,17 @@ defmodule DpExchange.Coinbase.Feed do
   def init(opts) do
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
+    credentials = Keyword.get(opts, :credentials)
+
+    # A test injects a fast, hermetic stand-in here — see the moduledoc's alias-map
+    # section. Production supplies none, so this default runs: the venue's own public
+    # catalogue, reusing `Rest`'s existing products fetch rather than a second way to ask.
+    alias_map_source =
+      Keyword.get(opts, :alias_map_source, fn -> Rest.get_alias_map(credentials: credentials) end)
+
     {:ok,
      %{
-       credentials: Keyword.get(opts, :credentials),
+       credentials: credentials,
        socket_opts: Keyword.take(opts, [:url]),
        # A pre-established connection, consumed the first time any shard opens. Ordinary
        # use leaves this `nil` and the feed dials its own; it is set by tests that need
@@ -171,14 +258,26 @@ defmodule DpExchange.Coinbase.Feed do
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
-       delivering: %{}
+       delivering: %{},
+       # The venue's own declared alias relationships — see the moduledoc's "the venue
+       # rewrites an aliased product id on delivery" section. `%{}` until fetched (or
+       # forever, if the fetch fails), which is deliberately indistinguishable from "the
+       # venue aliases nothing here": both resolve through the same safe fallback in
+       # `attribution_targets/2`.
+       alias_map: %{},
+       alias_map_status: :unfetched,
+       alias_map_source: alias_map_source
      }}
   end
 
   @impl true
   def handle_call({:subscribe, symbols, subscriber}, _from, state) do
     wanted = MapSet.union(state.wanted, MapSet.new(symbols))
-    state = %{state | subscribers: MapSet.put(state.subscribers, subscriber), wanted: wanted}
+
+    state =
+      %{state | subscribers: MapSet.put(state.subscribers, subscriber), wanted: wanted}
+      |> maybe_schedule_alias_map_fetch()
+
     {result, state} = reshard(state)
     {:reply, result, state}
   end
@@ -192,7 +291,11 @@ defmodule DpExchange.Coinbase.Feed do
 
   def handle_call({:update_symbols, symbols}, _from, state) do
     wanted = MapSet.new(symbols)
-    state = %{state | wanted: wanted, delivering: Map.take(state.delivering, symbols)}
+
+    state =
+      %{state | wanted: wanted, delivering: Map.take(state.delivering, symbols)}
+      |> maybe_schedule_alias_map_fetch()
+
     {result, state} = reshard(state)
     {:reply, result, state}
   end
@@ -215,13 +318,34 @@ defmodule DpExchange.Coinbase.Feed do
     {:noreply, state}
   end
 
-  def handle_info({:dp_exchange, :coinbase, payload} = message, state) do
-    fan_out(state.subscribers, message)
+  def handle_info({:dp_exchange, :coinbase, payload}, state) do
+    # See the moduledoc's alias-map section: `targets` is every name in `wanted` that
+    # names the same market as the venue's delivered id — its own name and, where the
+    # catalogue says so, its alias — falling back to the delivered id itself when nothing
+    # in `wanted` resolves.
+    targets = attribution_targets(payload, state)
+
+    Enum.each(targets, fn symbol ->
+      fan_out(state.subscribers, {:dp_exchange, :coinbase, %{payload | symbol: symbol}})
+    end)
 
     delivering =
-      Map.put(state.delivering, delivered_symbol(payload), :os.system_time(:millisecond))
+      Enum.reduce(targets, state.delivering, fn symbol, acc ->
+        Map.put(acc, symbol, :os.system_time(:millisecond))
+      end)
 
     {:noreply, %{state | delivering: delivering}}
+  end
+
+  def handle_info(:fetch_alias_map, state) do
+    case state.alias_map_source.() do
+      {:ok, map} when is_map(map) ->
+        {:noreply, %{state | alias_map: map, alias_map_status: :ok}}
+
+      {:error, reason} ->
+        notify_degraded_attribution(state, reason)
+        {:noreply, %{state | alias_map: %{}, alias_map_status: :unavailable}}
+    end
   end
 
   def handle_info({:open_shard, index, symbols}, state) do
@@ -517,6 +641,57 @@ defmodule DpExchange.Coinbase.Feed do
   # `Types.Quote` and `Types.OrderBook` both carry `:symbol`; this is the one place
   # coverage tracking needs to be generic over which kind arrived.
   defp delivered_symbol(%{symbol: symbol}), do: symbol
+
+  # Schedules the alias-map fetch exactly once, the first time it is needed — see the
+  # moduledoc. `:unfetched` is the only status this fires from, and it flips to
+  # `:pending` in the same breath, so a second `subscribe/3` or `update_symbols/2` before
+  # the async fetch resolves schedules nothing further.
+  defp maybe_schedule_alias_map_fetch(%{alias_map_status: :unfetched} = state) do
+    Process.send_after(self(), :fetch_alias_map, 0)
+    %{state | alias_map_status: :pending}
+  end
+
+  defp maybe_schedule_alias_map_fetch(state), do: state
+
+  # See the moduledoc's "the venue rewrites an aliased product id on delivery" section.
+  # `delivered` is whatever the venue actually tagged this frame with; `equivalent` is its
+  # alias under the venue's own declared relationship, if the catalogue named one. A
+  # delivered id resolves to every name in `wanted` that names the same market — which is
+  # `[delivered, equivalent]` filtered down to what the caller actually asked for, and
+  # covers the "both names subscribed" case by construction: if both are wanted, both
+  # survive the filter and both receive a copy below.
+  defp attribution_targets(payload, state) do
+    delivered = delivered_symbol(payload)
+    equivalent = Map.get(state.alias_map, delivered)
+
+    targets =
+      [delivered, equivalent]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+      |> Enum.filter(&MapSet.member?(state.wanted, &1))
+
+    # Nothing in `wanted` resolved — the map is empty (unfetched, permanently failed, or
+    # the venue genuinely aliases nothing here, which look identical by design) or this
+    # frame is for a symbol outside `wanted` altogether (in-flight just after an
+    # unsubscribe, or a raw `send/2` in a test). Either way: deliver under whatever the
+    # venue actually sent, the exact pre-fix behaviour, never a fabricated name.
+    if targets == [], do: [delivered], else: targets
+  end
+
+  # Fired once, only on a failed fetch — see `handle_info(:fetch_alias_map, _)`. Never
+  # retried and never on every delivered frame: a notice is a condition to act on, not
+  # per-message noise, and this condition does not change once the fetch has failed.
+  defp notify_degraded_attribution(state, reason) do
+    notice =
+      Notice.new(:data_quality, :coinbase,
+        message:
+          "alias catalogue unavailable — delivering under the venue's own product id " <>
+            "rather than the caller's requested symbol",
+        details: %{reason: inspect(reason)}
+      )
+
+    fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})
+  end
 
   # A dead subscriber stops delivery. The venue must not accumulate events for a process
   # that no longer exists.
