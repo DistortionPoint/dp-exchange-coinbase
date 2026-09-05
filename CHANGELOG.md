@@ -182,6 +182,28 @@ acceptable changelog line.
   has no public form, verified live 2026-09-05, unlike `/product_book`, whose
   `market/product_book` twin is real and public.
 
+- **`usage-rules.md`'s "Streaming" section never said which symbol a delivered frame
+  carries, and never mentioned `resubscribe_interval_ms` at all — family-wide defect
+  sweep, Coinbase B5.** Both are consumer-facing behaviour a subscribing agent needs to
+  act on correctly, and this file — the one that ships inside the Hex tarball and is not
+  the README — was silent on both. The alias-attribution fix above changes what symbol
+  arrives on every streamed frame; `resubscribe_interval_ms` has been a real `Feed`
+  option, forwarded straight through from `{DpExchange.Coinbase, resubscribe_interval_ms:
+  ms}`, since the resubscribe-wedge fix above added it, and neither fact was checkable
+  from the shipped docs. Added two sections: one stating a delivered frame is tagged
+  with the symbol the caller subscribed to, never the venue's rewritten alias, including
+  the degraded-attribution fallback and its `:data_quality` notice; one documenting
+  `resubscribe_interval_ms`'s 60,000 ms default, how to set it, and that a value below
+  one full re-issue cycle for the current shard count is silently clamped to the
+  computed floor and logged rather than honoured.
+
+- **README's endpoint counts were stale.** It read "46 are declared `:experimental` and
+  41 `:unsupported`" with "38" of those the venue's own absence. Run against the real
+  `capabilities/0` (`mix run -e`, 2026-09-05): **48 `:experimental`, 39 `:unsupported`**,
+  of which **37** are `venue_does_not_serve/0` (the other 2 are `@not_ported`,
+  `get_funding/2` and `get_contract_stats/2`). Corrected to the measured numbers rather
+  than re-guessed.
+
 - **`frame_sender.ex`'s moduledoc claimed `WebSockex.send_frame/2` has "no way to
   override" its 5-second timeout.** The vendored websockex 0.5.1 exposes `send_frame/3`
   with a timeout argument, so the claim was wrong. `FrameSender.send/3` still calls the

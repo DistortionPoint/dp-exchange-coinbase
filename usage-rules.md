@@ -94,6 +94,49 @@ bogus token with an authentication failure, which is how a book channel once pro
 nothing while the public ticker worked fine — a venue half-delivering looks like a quiet
 market rather than a broken credential.
 
+### Frames are tagged with the symbol you subscribed, not whatever the venue renamed it to
+
+Coinbase silently rewrites some product ids on delivery. Subscribing `ticker` to an
+aliased `-USDC` pair (e.g. `XLM-USDC`) delivers every frame tagged with its `-USD`
+counterpart instead — and the venue's own subscription acknowledgement echoes the
+rewritten name back, not the one you sent. Measured live 2026-09-05 against
+`wss://advanced-trade-ws.coinbase.com`; confirmed against the venue's own
+`/market/products` catalogue, where 112 of the first 114 USDC products carried a
+non-empty `alias` naming their `-USD` counterpart.
+
+This package undoes that before a frame reaches you: every `Types.Quote` and
+`Types.OrderBook` you receive is tagged with the symbol **you subscribed**, resolved
+against the venue's own declared alias relationship — never the venue's rewritten name.
+Subscribe to both names for a market the venue aliases and you get both, from the one
+frame the venue actually delivers. `coverage/1` follows the same rule: it reports under
+what you subscribed, never under what the venue renamed it to.
+
+If the venue's product catalogue can't be fetched, attribution degrades rather than
+guesses: frames deliver under whichever id the venue actually sent, and
+`subscribe_notices/1` receives one `:data_quality` notice saying attribution is
+degraded and why. There is no `-USDC`/`-USD` string-munging fallback — it would be wrong
+for any pair the venue does not actually alias.
+
+### `resubscribe_interval_ms` — re-issuing subscriptions is unconditional, and the cadence is diagnostic, not a knob to tune coverage with
+
+A WebSockex reconnect resubscribes nothing on its own, so a dropped-and-restored socket
+can come back up connected and silently subscribed to **nothing**. This package re-issues
+every shard's current subscriptions on a timer to cover that, unconditionally.
+
+```elixir
+children = [{DpExchange.Coinbase, credentials: my_credentials(), resubscribe_interval_ms: 30_000}]
+```
+
+Default is **60,000 ms**, and it is a diagnostic knob, not a way to make coverage catch
+up faster. A value shorter than one full re-issue cycle across your current shard count
+is not honoured: this package derives the floor from the shard count that actually
+exists — `(shards - 1) * 5_000ms + 8_000ms + 5_000ms` — and uses that instead, logging
+the substitution, rather than wedging the feed with overlapping re-issue cycles queued
+behind each other. That is a real, measured incident (DpCryptoManagement's issue #22):
+it happened both from an explicit `resubscribe_interval_ms: 5_000` and from the 60s
+*default* past twelve shards (1,101 symbols at 100/socket). There is no way to make this
+package re-issue faster than that floor — only a log line explaining why it didn't.
+
 ## Testing against this package
 
 Use `DpExchange.Coinbase.Fake`, selected per process through `DpExchange.Core.Config`. It
