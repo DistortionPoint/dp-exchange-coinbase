@@ -51,6 +51,24 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`:rate_limit_blocking` was unreachable on every REST call this package makes —
+  family-wide gap, DpCryptoManagement's issue #23.** `Core.HttpClient.check_rate_limits/1`
+  reads this option to choose `acquire/3` (wait for capacity) over fail-fast `check/3`,
+  and its own error message on a self-inflicted throttle tells a caller to set it — but no
+  caller could, on this venue: `Rest.request/5`, `Rest.json_request/5` and
+  `Prime.request_opts/1` all stripped it from their forwarded-options allowlist before it
+  ever reached `Core.HttpClient`. The same defect (`dp_exchange_webull`'s issue #23,
+  `dp_exchange_robinhood`'s issue #16) audited across the rest of the family; this venue
+  was one of four still carrying it.
+
+  All three allowlists now forward `:rate_limit_blocking`, proven with a recording rate
+  limiter that records which of `acquire/3` / `check/3` was actually called — not merely
+  that the keyword survives the allowlist. **Not defaulted anywhere in this package**,
+  unlike `dp_exchange_webull`'s `Feed` and `dp_exchange_robinhood`'s `Feed`: this venue's
+  own periodic resubscribe (`DpExchange.Coinbase.Feed`'s unconditional 60s re-issue) sends
+  WebSocket frames, not HTTP, so there is no rate-limited background replay here to justify
+  choosing a default on a caller's behalf. A caller that wants blocking opts in explicitly.
+
 - **A resubscribe interval shorter than one re-issue cycle wedged the feed — including
   the 60s DEFAULT, past twelve shards.** A cycle is not instantaneous: shards are
   staggered `@shard_spacing_ms` apart and each shard's channels `@channel_spacing_ms`

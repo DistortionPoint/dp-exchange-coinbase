@@ -1355,9 +1355,23 @@ defmodule DpExchange.Coinbase.Rest do
 
     url = @base_url <> @api_path <> path
 
+    # `:rate_limit_blocking` reaches `Core.HttpClient` from here now — a family-wide gap
+    # (DpCryptoManagement's issue #23's investigation, alongside Robinhood's issue #16):
+    # `Core.HttpClient.check_rate_limits/1` reads it to choose `acquire/3` over fail-fast
+    # `check/3`, but no caller of this module could ever set it. Not defaulted — this
+    # venue's own resubscribe path (`DpExchange.Coinbase.Feed`) re-issues subscriptions
+    # as WebSocket frames, not HTTP, so there is no rate-limited replay here that would
+    # justify choosing a default for a caller.
     request_opts =
       opts
-      |> Keyword.take([:timeout, :retry_attempts, :retry_delay, :plug, :weight])
+      |> Keyword.take([
+        :timeout,
+        :retry_attempts,
+        :retry_delay,
+        :plug,
+        :weight,
+        :rate_limit_blocking
+      ])
       |> Keyword.put(:provider, :coinbase)
       # This venue's own limiter, configured from its own declared ceiling.
       |> Keyword.put_new(:limiter, Keyword.get(opts, :limiter, DpExchange.Coinbase.RateLimiter))
@@ -1927,7 +1941,14 @@ defmodule DpExchange.Coinbase.Rest do
 
     request_opts =
       opts
-      |> Keyword.take([:timeout, :retry_attempts, :retry_delay, :plug, :weight])
+      |> Keyword.take([
+        :timeout,
+        :retry_attempts,
+        :retry_delay,
+        :plug,
+        :weight,
+        :rate_limit_blocking
+      ])
       |> Keyword.put(:provider, :coinbase)
       |> Keyword.put_new(:limiter, Keyword.get(opts, :limiter, DpExchange.Coinbase.RateLimiter))
 
