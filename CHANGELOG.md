@@ -51,6 +51,29 @@ acceptable changelog line.
 
 ### Fixed
 
+- **A resubscribe interval shorter than one re-issue cycle wedged the feed — including
+  the 60s DEFAULT, past twelve shards.** A cycle is not instantaneous: shards are
+  staggered `@shard_spacing_ms` apart and each shard's channels `@channel_spacing_ms`
+  apart, so the last frame goes out about `(shards - 1) * 5_000 + 8_000` ms after the
+  tick. If the timer re-fired before that, cycles overlapped, frames queued behind each
+  other, `WebSockex.send_frame/2` blew its window, and the `Feed` stopped answering calls
+  entirely — `:sys.get_state/1` timing out. A wedged feed is strictly worse than a late
+  resubscribe.
+
+  Found by DpCryptoManagement while running the diagnostic added in the previous release
+  (issue #22): they set `resubscribe_interval_ms: 5_000`, below the 8s channel spacing,
+  and lost the run to it. They reported it against themselves rather than against the
+  option, which is how it got looked at properly — because checking it showed **the same
+  failure was reachable with no option set at all.** The 60s default is shorter than the
+  cycle span from twelve shards (1,101 symbols at `@pairs_per_socket`) upward, so a large
+  enough consumer would have walked into it on defaults alone. The knob exposed a limit
+  the default already had.
+
+  The next delay is now derived from the shard count that actually exists at each tick,
+  never from the configured value alone, and an extension is **logged** rather than
+  applied silently — a diagnostic knob whose value is quietly ignored is its own trap.
+  Nothing changes for any interval that was already comfortable.
+
 - **`get_top_of_book/2` could never work without credentials, and the facade said
   otherwise — family-wide defect sweep, Coinbase B1.** Unlike every sibling market-data
   reader in `Rest`, this one call is hardcoded to `/best_bid_ask` with no

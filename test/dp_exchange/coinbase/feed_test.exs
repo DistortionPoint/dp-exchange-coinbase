@@ -1,6 +1,8 @@
 defmodule DpExchange.Coinbase.FeedTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias DpExchange.Coinbase.Feed
   alias DpExchange.Core.{Notice, Types}
 
@@ -53,6 +55,75 @@ defmodule DpExchange.Coinbase.FeedTest do
 
     test "the default is 60s when the caller supplies nothing" do
       assert :sys.get_state(start_feed()).resubscribe_interval_ms == 60_000
+    end
+
+    test "an interval shorter than one re-issue cycle is extended, and says so" do
+      # DpCryptoManagement set 5_000 — below the 8s `@channel_spacing_ms` — and each cycle
+      # re-fired before the previous one's `ticker` subscribe had gone out. Frames queued,
+      # `send_frame` blew its window six times, and the Feed stopped answering
+      # `:sys.get_state/1` entirely. A wedged feed is strictly worse than a late
+      # resubscribe, so the delay is derived from the shards that actually exist.
+
+      name = :"feed_#{System.unique_integer([:positive])}"
+
+      pid =
+        start_supervised!(
+          {Feed,
+           name: name, alias_map_source: fn -> {:ok, %{}} end, resubscribe_interval_ms: 5_000}
+        )
+
+      # `send/2` is async — `:sys.get_state/1` is a call, so it queues behind the
+      # `:resubscribe` info message and guarantees it has been handled before the capture
+      # block returns. Without it this test reads an empty log and fails on timing alone.
+      log =
+        capture_log(fn ->
+          send(pid, :resubscribe)
+          :sys.get_state(pid)
+        end)
+
+      # With no shards open the cycle is one channel spacing plus the send window.
+      assert log =~ "resubscribe interval 5000ms is shorter than one re-issue cycle"
+      assert log =~ "13000ms instead"
+      assert Process.alive?(pid)
+    end
+
+    test "the 60s DEFAULT is itself too short past 12 shards, and is extended too" do
+      # Reachable with no option set at all: a cycle spans
+      # (shards - 1) * 5_000 + 8_000, which passes 60s at 12 shards — 1,101 symbols at
+      # `@pairs_per_socket`. The consumer's diagnostic knob merely exposed a limit the
+      # default already had.
+
+      shards =
+        Map.new(0..11, fn index ->
+          {index, %{socket: spawn(fn -> Process.sleep(:infinity) end), symbols: []}}
+        end)
+
+      feed = start_feed()
+      :sys.replace_state(feed, fn state -> %{state | shards: shards} end)
+
+      log =
+        capture_log(fn ->
+          send(feed, :resubscribe)
+          :sys.get_state(feed)
+        end)
+
+      # (12 - 1) * 5_000 + 8_000 = 63_000 span, + 5_000 send window = 68_000.
+      assert log =~ "12 shard(s) (63000ms)"
+      assert log =~ "68000ms instead"
+      assert Process.alive?(feed)
+    end
+
+    test "a comfortable interval is used as given, with no warning" do
+      feed = start_feed()
+
+      log =
+        capture_log(fn ->
+          send(feed, :resubscribe)
+          :sys.get_state(feed)
+        end)
+
+      refute log =~ "shorter than one re-issue cycle"
+      assert Process.alive?(feed)
     end
 
     test "an explicit nil falls back to the default rather than crashing the timer" do

@@ -406,7 +406,7 @@ defmodule DpExchange.Coinbase.Feed do
   end
 
   def handle_info(:resubscribe, state) do
-    Process.send_after(self(), :resubscribe, state.resubscribe_interval_ms)
+    Process.send_after(self(), :resubscribe, next_resubscribe_delay(state))
 
     # Staggered the same way `reshard/1` staggers opening several new shards: re-issuing
     # every shard's `level2` subscribe in the same instant is the identical connect/subscribe
@@ -435,6 +435,45 @@ defmodule DpExchange.Coinbase.Feed do
   def handle_info(_other, state), do: {:noreply, state}
 
   # --- internal ------------------------------------------------------------
+
+  # A re-issue cycle is not instantaneous: shards are staggered `@shard_spacing_ms` apart,
+  # and within each shard the channels are staggered `@channel_spacing_ms` apart, so the
+  # last frame of a cycle goes out roughly
+  #
+  #     (shards - 1) * @shard_spacing_ms + @channel_spacing_ms
+  #
+  # after the tick. If the timer re-fires before that, cycles overlap: frames queue behind
+  # each other, `WebSockex.send_frame/2` blows its window, and the `Feed` can stop
+  # answering calls entirely while it drains — a wedged feed, which is strictly worse than
+  # a late resubscribe.
+  #
+  # DpCryptoManagement hit this in issue #22 by setting `resubscribe_interval_ms: 5_000`,
+  # below the 8s channel spacing, and lost the run to it. But the same failure is reachable
+  # with NO option set: the 60s default is shorter than the cycle span from 12 shards
+  # (1,101 symbols at `@pairs_per_socket`) upward, so a large enough consumer would have
+  # walked into it on defaults alone.
+  #
+  # The delay is therefore derived from the shard count that actually exists right now,
+  # never from the configured value alone, and the extension is logged rather than applied
+  # silently — a diagnostic knob whose value is quietly ignored is its own trap.
+  defp next_resubscribe_delay(state) do
+    shard_count = map_size(state.shards)
+    span = max(shard_count - 1, 0) * @shard_spacing_ms + @channel_spacing_ms
+    floor_ms = span + @frame_window_ms
+
+    if state.resubscribe_interval_ms < floor_ms do
+      Logger.warning(
+        "[Coinbase Feed] resubscribe interval #{state.resubscribe_interval_ms}ms is shorter " <>
+          "than one re-issue cycle across #{shard_count} shard(s) (#{span}ms) — using " <>
+          "#{floor_ms}ms instead. Overlapping cycles queue frames behind each other and " <>
+          "can stop this feed answering calls."
+      )
+
+      floor_ms
+    else
+      state.resubscribe_interval_ms
+    end
+  end
 
   # Recomputes shards from `state.wanted` and reconciles: a shard whose symbol set
   # changed gets its socket's subscriptions brought current, a brand-new shard gets a
