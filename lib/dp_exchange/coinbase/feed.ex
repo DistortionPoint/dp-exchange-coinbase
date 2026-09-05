@@ -177,7 +177,18 @@ defmodule DpExchange.Coinbase.Feed do
 
   # Re-issue every shard's current subscriptions on this cadence, unconditionally — see
   # the moduledoc on reconnects.
-  @resubscribe_interval_ms 60_000
+  #
+  # Overridable via `:resubscribe_interval_ms`, and the reason is diagnostic rather than
+  # cosmetic. Because this re-issue is unconditional, the package sends a `level2`
+  # subscribe per shard per interval indefinitely, and `FrameSender`'s moduledoc leans on
+  # the assumption that "subscribes are idempotent on every venue in this family, so a
+  # duplicate is harmless". If a venue counted *attempted* L2 stream requests per session
+  # rather than established streams, that assumption would be false here and this timer
+  # would be feeding the counter — the open question in DpCryptoManagement's issue #22.
+  # Settling it needs a short interval against a symbol count too small to exhaust any
+  # plausible stream limit, which is not something a consumer could arrange while this was
+  # a hardcoded constant.
+  @default_resubscribe_interval_ms 60_000
 
   # WebSockex's own send window, which is not configurable.
   @frame_window_ms 5_000
@@ -232,7 +243,10 @@ defmodule DpExchange.Coinbase.Feed do
 
   @impl true
   def init(opts) do
-    Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
+    resubscribe_interval_ms =
+      Keyword.get(opts, :resubscribe_interval_ms) || @default_resubscribe_interval_ms
+
+    Process.send_after(self(), :resubscribe, resubscribe_interval_ms)
 
     credentials = Keyword.get(opts, :credentials)
 
@@ -259,6 +273,7 @@ defmodule DpExchange.Coinbase.Feed do
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
        delivering: %{},
+       resubscribe_interval_ms: resubscribe_interval_ms,
        # The venue's own declared alias relationships — see the moduledoc's "the venue
        # rewrites an aliased product id on delivery" section. `%{}` until fetched (or
        # forever, if the fetch fails), which is deliberately indistinguishable from "the
@@ -391,7 +406,7 @@ defmodule DpExchange.Coinbase.Feed do
   end
 
   def handle_info(:resubscribe, state) do
-    Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
+    Process.send_after(self(), :resubscribe, state.resubscribe_interval_ms)
 
     # Staggered the same way `reshard/1` staggers opening several new shards: re-issuing
     # every shard's `level2` subscribe in the same instant is the identical connect/subscribe

@@ -24,6 +24,51 @@ defmodule DpExchange.Coinbase.FeedTest do
     }
   end
 
+  describe "the resubscribe cadence is configurable, for a diagnostic reason" do
+    # The re-issue is unconditional by design, so this package sends a `level2` subscribe
+    # per shard per interval indefinitely — and `FrameSender`'s moduledoc leans on
+    # "subscribes are idempotent on every venue in this family, so a duplicate is
+    # harmless". Whether Coinbase counts *attempted* L2 stream requests rather than
+    # established streams is the open question in DpCryptoManagement's issue #22, and it
+    # can only be settled by running a short interval against a symbol count too small to
+    # exhaust any plausible stream limit. That was impossible while this was a hardcoded
+    # constant, which is the gap this closes.
+    test "a caller-supplied interval is used instead of the default" do
+      name = :"feed_#{System.unique_integer([:positive])}"
+
+      pid =
+        start_supervised!(
+          {Feed, name: name, alias_map_source: fn -> {:ok, %{}} end, resubscribe_interval_ms: 40}
+        )
+
+      assert :sys.get_state(pid).resubscribe_interval_ms == 40
+
+      # And it actually drives the timer: with no shards open the tick is a no-op, so the
+      # observable proof is that the process keeps ticking and stays healthy rather than
+      # scheduling once and stopping.
+      Process.sleep(150)
+      assert Process.alive?(pid)
+      assert :sys.get_state(pid).resubscribe_interval_ms == 40
+    end
+
+    test "the default is 60s when the caller supplies nothing" do
+      assert :sys.get_state(start_feed()).resubscribe_interval_ms == 60_000
+    end
+
+    test "an explicit nil falls back to the default rather than crashing the timer" do
+      # `Process.send_after/3` raises on a nil delay, and venue packages forward their own
+      # opts wholesale — the nil-vs-absent trap that Core.Config.opt/3 exists for.
+      name = :"feed_#{System.unique_integer([:positive])}"
+
+      pid =
+        start_supervised!(
+          {Feed, name: name, alias_map_source: fn -> {:ok, %{}} end, resubscribe_interval_ms: nil}
+        )
+
+      assert :sys.get_state(pid).resubscribe_interval_ms == 60_000
+    end
+  end
+
   describe "coverage is OBSERVED, never intended" do
     test "a symbol appears only once a payload for it arrives" do
       # The strongest guarantee in the contract. A venue once reported 325 symbols
