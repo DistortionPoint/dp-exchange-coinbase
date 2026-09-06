@@ -27,7 +27,7 @@ defmodule DpExchange.Coinbase.BaselineTest do
 
   @moduletag :capture_log
 
-  defp state, do: %{subscriber: self(), credentials: nil, delivering: MapSet.new(), books: %{}}
+  defp state, do: %{subscriber: self(), credentials: nil, delivering: MapSet.new()}
   defp frame(payload), do: Socket.handle_frame({:text, Jason.encode!(payload)}, state())
 
   describe "the v3 nesting is per channel, and getting it wrong drops everything" do

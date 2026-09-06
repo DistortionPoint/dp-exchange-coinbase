@@ -20,6 +20,64 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: `Socket` no longer maintains a `level2` order book. An `update` frame now
+  delivers `dp_exchange_core`'s new `Types.OrderBookDelta`, not a full `Types.OrderBook`.**
+  A consumer that used to receive a rebuilt `Types.OrderBook` on every `l2_data` frame —
+  including a single-row `update` — now receives a `Types.OrderBook` only on `snapshot`
+  (once per subscribe/resubscribe) and a `Types.OrderBookDelta` on every `update`: the
+  venue's own changed rows, in the venue's own order, both sides interleaved exactly as
+  the frame carried them, in a flat `levels :: [{side, price, quantity}]` list rather
+  than split into `bid_levels`/`ask_levels`. **A consumer wanting a maintained book now
+  builds and holds it itself.** This is not presented as a performance improvement — it
+  is the removal of state this package was never supposed to hold. See
+  `dp_exchange_core`'s `docs/design/closed/2026-09-06_stop-maintaining-books-in-packages.md`.
+
+  **Why:** holding the book cost 65–110 ms per delta at the book size DpCryptoManagement
+  measured live for `BTC-USD` (~22,800 bid / ~21,100 ask levels, issue #22), later
+  optimised to ~6.6 ms — but that work ran on the same single-threaded process
+  responsible for `WebSockex.send_frame/2`, so a socket busy rebuilding a book it was
+  never asked to keep could not service its own sends, which is the `:send_timeout`
+  behind issue #22. Maintaining state this package was not supposed to hold is what broke
+  the connections it was supposed to keep; this change removes the work rather than
+  making it faster a second time.
+
+  **A `quantity` of zero still means the level ceased to exist, not a price of zero** —
+  carried through completely unresolved now, since resolving it would itself be
+  state-keeping.
+
+  **Reconnect reconciliation is now the consumer's job, not this package's.** A dropped
+  and resumed connection does not promise the deltas after it are contiguous with the
+  deltas before it. `subscribe_notices/1`'s existing `:link_down`/`:link_up` pair
+  brackets where a gap may fall; neither that notice nor anything else reconstructs a
+  missing delta. The correct response to `:link_up` is to re-pull `get_order_book/2`
+  (unaffected by this change) or accept the venue's own fresh `snapshot` on resubscribe —
+  not to keep applying deltas across a gap. Coinbase's `level2` channel publishes no book
+  sequence number, so `:sequence` on both types is always `nil` here.
+
+  `Socket`'s `books` state, `apply_book_event/3`, `apply_book_row/2`, `update_level/4`,
+  `remove_level/3`, `deliver_book/3` and `price_key/1` are all gone, along with
+  `bench/order_book_resort.exs`, which benchmarked work that no longer exists.
+  `Feed.payload_kind/1` now maps `%Types.OrderBookDelta{}` to `:order_book`, the same
+  `data_kind()` a full `%Types.OrderBook{}` gets — `coverage_by_kind/1` answers "is book
+  data arriving", not "in what shape", and the struct type itself already tells a caller
+  which shape it is holding.
+
+  **Also dropped, deliberately, as part of the same change:** the exact-scaled-integer
+  precision check `price_key/1` used to enforce (refusing a price with more than 8
+  decimal digits) existed only to support the `:gb_trees` ordering key that mechanism
+  needed — it was never an independent business rule. Sorting a snapshot's own rows via
+  `Decimal.compare/2` needs no such key and has no rounding step to guard against, so a
+  price at any precision the venue sends now passes through unchanged, the same as every
+  other decimal field this module decodes. Likewise, two numerically-equal,
+  differently-scaled prices in one snapshot (`"1.5"` and `"1.50"`) are no longer folded
+  into one last-write-wins level — that folding was an accidental side effect of the old
+  map-keyed implementation's own key, never a documented venue behaviour (unlike the
+  8-decimal `quote_increment` finding, this had no live measurement behind it), and
+  silently choosing a winner between two rows is itself the kind of substitution this
+  family refuses. Both rows now pass through as the venue sent them.
+
 ### Added
 
 - **Five of Coinbase Prime's nine staking endpoints are now reachable from the facade

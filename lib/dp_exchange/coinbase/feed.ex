@@ -165,12 +165,11 @@ defmodule DpExchange.Coinbase.Feed do
   coverage and fanned out — because this is the one place that already holds `wanted`
   (what the caller actually asked for) beside the delivered payload. Duplicating `wanted`
   into `Socket` just to make the same decision twice would be a second place for the two
-  to disagree; `Socket.books` for `level2` stays keyed by whatever id the venue delivers
-  under, which is correct and unobservable — one maintained book per real market, whether
-  one or two caller-facing names point at it, matching whichever channel delivered it
-  (`ticker` via `deliver_ticker/3` or `level2` via `apply_book_event/3`/`deliver_book/3`
-  in `Socket`) since both arrive here as the same `{:dp_exchange, :coinbase, payload}`
-  shape and both structs carry `:symbol`.
+  to disagree. `Socket` holds no book to key by anything — see its own moduledoc — so
+  this holds regardless of which channel delivered the frame (`ticker` via
+  `deliver_ticker/3`, or `level2` via `Socket`'s `deliver_snapshot/4`/`deliver_delta/4`)
+  since all three arrive here as the same `{:dp_exchange, :coinbase, payload}` shape and
+  every struct `Socket` sends carries `:symbol`.
 
   ### Built once, from the venue's own catalogue, never from string-munging
 
@@ -300,9 +299,10 @@ defmodule DpExchange.Coinbase.Feed do
 
   `coverage/1` answers "is anything arriving for this symbol", and it answers that
   question truthfully — but it asks nothing about *which* kind of payload showed up.
-  `Types.Quote` and `Types.OrderBook` both carry `:symbol`, so a `level2` book update and
-  a `ticker` quote count identically toward `delivering`, and a symbol with one of the two
-  dark looks exactly like a symbol with both healthy.
+  `Types.Quote`, `Types.OrderBook` and `Types.OrderBookDelta` all carry `:symbol`, so a
+  `level2` book update (whether a full snapshot or an incremental delta) and a `ticker`
+  quote count identically toward `delivering`, and a symbol with one of the two dark
+  looks exactly like a symbol with both healthy.
 
   That is not a hypothetical: `level2` on this venue delivered upward of 11,000 frames
   across 406 subscribed symbols while `ticker` stayed dark on all but a handful of them,
@@ -316,10 +316,12 @@ defmodule DpExchange.Coinbase.Feed do
   `t:DpExchange.Core.Capabilities.data_kind/0` instead of collapsed across it.
 
   The kind is read off the payload's own struct — `%Types.Quote{}` is `:quotes`,
-  `%Types.OrderBook{}` is `:order_book` — never off a channel name. `level2` and `ticker`
-  are this venue's words for its own wire protocol and stop existing the moment a frame
-  becomes a `Core.Types.*` struct; `coverage_by_kind/1` never sees them and could not leak
-  them if it wanted to.
+  `%Types.OrderBook{}` and `%Types.OrderBookDelta{}` are both `:order_book` — never off a
+  channel name. Snapshot and delta share one kind deliberately: this question is "is
+  book data arriving", not "in what shape", and the struct type itself already tells a
+  caller which shape it is holding. `level2` and `ticker` are this venue's words for its
+  own wire protocol and stop existing the moment a frame becomes a `Core.Types.*` struct;
+  `coverage_by_kind/1` never sees them and could not leak them if it wanted to.
 
   `state.delivering` therefore keys each symbol to a small map of `kind => timestamp`
   rather than a single timestamp, so a symbol that has delivered both a quote and a book
@@ -1153,17 +1155,26 @@ defmodule DpExchange.Coinbase.Feed do
     end
   end
 
-  # `Types.Quote` and `Types.OrderBook` both carry `:symbol`; this is the one place
-  # coverage tracking needs to be generic over which kind arrived.
+  # `Types.Quote`, `Types.OrderBook` and `Types.OrderBookDelta` all carry `:symbol`;
+  # this is the one place coverage tracking needs to be generic over which kind
+  # arrived.
   defp delivered_symbol(%{symbol: symbol}), do: symbol
 
   # The `Core.Types.*` struct names its own kind — never a venue channel name. `Socket`
-  # sends exactly these two structs (plus `Notice`, matched in its own `handle_info/2`
+  # sends exactly these three structs (plus `Notice`, matched in its own `handle_info/2`
   # clause above) into this module, so there is deliberately no catch-all: an unrecognised
   # struct here means a new payload kind was wired into `Socket` without being taught to
   # this function, and failing loudly beats silently mis-tagging its coverage.
+  #
+  # `%Types.OrderBookDelta{}` maps to `:order_book`, the same kind `%Types.OrderBook{}`
+  # does — `coverage_by_kind/1` answers "which kind of data is arriving", not "in what
+  # shape", and a host checking whether book data is flowing does not care whether the
+  # next message is a full snapshot or an incremental delta. See `dp_exchange_core`'s
+  # `Types.OrderBookDelta` moduledoc and its
+  # `2026-09-06_stop-maintaining-books-in-packages.md` design doc for the reasoning.
   defp payload_kind(%Types.Quote{}), do: :quotes
   defp payload_kind(%Types.OrderBook{}), do: :order_book
+  defp payload_kind(%Types.OrderBookDelta{}), do: :order_book
 
   # Schedules the alias-map fetch exactly once, the first time it is needed — see the
   # moduledoc. `:unfetched` is the only status this fires from, and it flips to

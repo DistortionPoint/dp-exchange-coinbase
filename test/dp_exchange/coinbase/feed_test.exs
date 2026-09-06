@@ -62,6 +62,18 @@ defmodule DpExchange.Coinbase.FeedTest do
     }
   end
 
+  # What `Socket` now sends for a `level2` `update` frame instead of a rebuilt
+  # `Types.OrderBook` — see `dp_exchange_core`'s `Types.OrderBookDelta` and this
+  # package's own `Socket` moduledoc.
+  defp order_book_delta_for(symbol) do
+    %Types.OrderBookDelta{
+      symbol: symbol,
+      levels: [{:bid, Decimal.new("1"), Decimal.new("2")}],
+      timestamp: ~U[2026-08-28 12:00:00Z],
+      provider: :coinbase
+    }
+  end
+
   describe "the resubscribe cadence is configurable, for a diagnostic reason" do
     # The re-issue is unconditional by design, so this package sends a `level2` subscribe
     # per shard per interval indefinitely — and `FrameSender`'s moduledoc leans on
@@ -259,6 +271,31 @@ defmodule DpExchange.Coinbase.FeedTest do
       by_kind = Feed.coverage_by_kind(feed)
       assert by_kind[:quotes] == %{"ETH-USD" => :stream}
       assert by_kind[:order_book] == %{"ETH-USD" => :stream}
+    end
+
+    test "a symbol delivering only an OrderBookDelta ALSO appears under :order_book — " <>
+           "level2 `update` frames arrive as this struct now, not a rebuilt OrderBook" do
+      feed = start_feed()
+
+      send(feed, {:dp_exchange, :coinbase, order_book_delta_for("SOL-USD")})
+
+      by_kind = Feed.coverage_by_kind(feed)
+
+      assert Feed.coverage(feed) == %{"SOL-USD" => :stream}
+      assert by_kind[:order_book] == %{"SOL-USD" => :stream}
+      refute Map.has_key?(by_kind, :quotes)
+    end
+
+    test "a snapshot (OrderBook) and a later delta (OrderBookDelta) for the same symbol " <>
+           "both count toward the same :order_book kind, not two different ones" do
+      feed = start_feed()
+
+      send(feed, {:dp_exchange, :coinbase, order_book_for("XLM-USD")})
+      send(feed, {:dp_exchange, :coinbase, order_book_delta_for("XLM-USD")})
+
+      by_kind = Feed.coverage_by_kind(feed)
+      assert by_kind[:order_book] == %{"XLM-USD" => :stream}
+      assert map_size(by_kind) == 1
     end
 
     test "the symbol union across every kind matches coverage/1 exactly, under mixed delivery" do

@@ -110,18 +110,54 @@ rewritten name back, not the one you sent. Measured live 2026-09-05 against
 `/market/products` catalogue, where 112 of the first 114 USDC products carried a
 non-empty `alias` naming their `-USD` counterpart.
 
-This package undoes that before a frame reaches you: every `Types.Quote` and
-`Types.OrderBook` you receive is tagged with the symbol **you subscribed**, resolved
-against the venue's own declared alias relationship — never the venue's rewritten name.
-Subscribe to both names for a market the venue aliases and you get both, from the one
-frame the venue actually delivers. `coverage/1` follows the same rule: it reports under
-what you subscribed, never under what the venue renamed it to.
+This package undoes that before a frame reaches you: every `Types.Quote`,
+`Types.OrderBook` and `Types.OrderBookDelta` you receive is tagged with the symbol **you
+subscribed**, resolved against the venue's own declared alias relationship — never the
+venue's rewritten name. Subscribe to both names for a market the venue aliases and you
+get both, from the one frame the venue actually delivers. `coverage/1` follows the same
+rule: it reports under what you subscribed, never under what the venue renamed it to.
 
 If the venue's product catalogue can't be fetched, attribution degrades rather than
 guesses: frames deliver under whichever id the venue actually sent, and
 `subscribe_notices/1` receives one `:data_quality` notice saying attribution is
 degraded and why. There is no `-USDC`/`-USD` string-munging fallback — it would be wrong
 for any pair the venue does not actually alias.
+
+### `level2` delivers deltas, not a maintained book — BREAKING as of 0.2.0
+
+**Before 0.2.0**, subscribing `level2` delivered a full `Types.OrderBook` on every frame,
+including a single-row `update` — this package held the book itself and rebuilt it on
+your behalf. That was market state duplicated inside a socket process for no reason a
+consumer could see, and it was expensive enough to threaten this package's own job: at
+the book size DpCryptoManagement measured live for `BTC-USD` (~22,800 bid / ~21,100 ask
+levels), rebuilding it cost 65–110 ms on the same single-threaded process responsible for
+sending your subscribe frames, capping throughput and starving `ticker`.
+
+**As of 0.2.0**, this package holds no book, and you receive exactly what the venue sent:
+
+* A `snapshot` frame (once per subscribe, or resubscribe) delivers a `Types.OrderBook` —
+  the venue's whole book at that moment, `bids` and `asks` sorted best-price-first, as
+  the contract always promised.
+* An `update` frame delivers a `Types.OrderBookDelta` — the venue's own changed rows, in
+  the venue's own order, both sides interleaved exactly as the frame carried them.
+  `levels` is a flat `[{side, price, quantity}]` list rather than split into
+  `bid_levels`/`ask_levels`, because one delta frame can change both sides at once and a
+  per-side split would either drop the venue's ordering or invent one it never sent.
+* **A `quantity` of zero means that price level ceased to exist — not a price of zero.**
+  This package carries that through unresolved; it does not drop the row, and it does not
+  fold it into anything held here. If you want a maintained book, you build and hold it
+  yourself from the stream of deltas — that is now genuinely your job, not a trap this
+  package used to spring on whoever forgot to check.
+
+**Reconnect reconciliation is now your problem, and here is what to reconcile with.** A
+dropped-and-restored connection does not promise the deltas after it are contiguous with
+the deltas before it. `subscribe_notices/1`'s `:link_down` and `:link_up` bracket where a
+gap may have opened; neither that notice nor anything else reconstructs a missing delta.
+The correct response to `:link_up` is to re-pull `get_order_book/2` (unaffected by any of
+this) or accept the venue's own fresh `snapshot` on resubscribe — not to keep applying
+deltas across the gap and hope they still line up. Coinbase's `level2` channel does not
+publish a book sequence number, so `:sequence` on both types is always `nil` here; where a
+venue does publish one, it is the other half of this reconciliation.
 
 ### `resubscribe_interval_ms` — re-issuing subscriptions is unconditional, and the cadence is diagnostic, not a knob to tune coverage with
 

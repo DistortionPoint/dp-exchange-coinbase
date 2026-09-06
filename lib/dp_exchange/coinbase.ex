@@ -452,8 +452,9 @@ defmodule DpExchange.Coinbase do
   This answers the same observed-arrival question `coverage/1` does, partitioned by
   `t:DpExchange.Core.Capabilities.data_kind/0` instead of collapsed across it. The kind
   comes from which struct arrived — `%DpExchange.Core.Types.Quote{}` is `:quotes`,
-  `%DpExchange.Core.Types.OrderBook{}` is `:order_book` — never from this venue's own
-  channel names (`level2`, `ticker`), which never cross the facade.
+  `%DpExchange.Core.Types.OrderBook{}` and `%DpExchange.Core.Types.OrderBookDelta{}` are
+  both `:order_book` — never from this venue's own channel names (`level2`, `ticker`),
+  which never cross the facade.
 
   Optional on `c:DpExchange.Core.Venue.coverage_by_kind/1` and implemented here because
   Coinbase is the venue that motivated it. See

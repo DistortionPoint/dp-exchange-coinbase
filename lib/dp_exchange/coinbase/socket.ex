@@ -32,67 +32,70 @@ defmodule DpExchange.Coinbase.Socket do
   Never `WebSockex.send_frame/2` directly. See that module for why; the short version is
   that it exits rather than returning, and the exit kills this connection.
 
-  ## `level2` is a maintained book, not a series of standalone facts
+  ## `level2` deltas are passed straight through, never accumulated
 
-  Unlike `ticker`, one `l2_data` frame does not carry enough to answer "what does the
-  book look like right now" — a `snapshot` event seeds it and `update` events carry only
-  the price levels that changed, with `new_quantity: "0"` meaning the level is gone.
-  **This socket holds that state**, one ordered structure of price → quantity per side per
-  symbol, and
-  every `Core.Types.OrderBook` delivered is built from the maintained state, never from a
-  single frame's rows alone — a caller reading one delta as the whole book would see a
-  handful of prices and nothing else, which is a book with everything but two levels
-  simply missing rather than a partial update.
+  A `snapshot` event carries the venue's whole book as of subscribe time; an `update`
+  event carries only the price levels that changed, with `new_quantity: "0"` meaning
+  the level at that price ceased to exist — not a price of zero.
 
-  A **reconnect loses this state**, because the venue's own session is gone with it —
-  `handle_disconnect/2` clears every symbol's book, and the next `snapshot` this socket
-  receives after resubscribing rebuilds it from what the venue sends fresh. There is no
-  way to reconcile a stale local book against a venue that has moved on.
+  **This socket used to hold that state itself**: one ordered structure of price →
+  quantity per side per symbol, rebuilt into a `DpExchange.Core.Types.OrderBook` on
+  every frame including an `update` that touched a single row. Measured at the book
+  size DpCryptoManagement reported live for `BTC-USD` (~22,800 bid / ~21,100 ask
+  levels, issue #22): 65–110 ms per frame before an ordered-structure fix, 6.6 ms
+  after it — cost paid on the same single-threaded process responsible for
+  `WebSockex.send_frame/2`, so a socket busy rebuilding a book it was never asked to
+  keep could not service its own sends, which is the `:send_timeout` behind issue #22.
+  See `dp_exchange_core`'s `docs/design/2026-09-06_stop-maintaining-books-in-packages.md`:
+  holding market state here was never this socket's job, and making that work cheaper
+  was treating the symptom rather than removing the cause.
 
-  ## Each side is kept ORDERED, not sorted on the way out
+  **It holds none of that now.** A `snapshot` decodes straight into
+  `DpExchange.Core.Types.OrderBook` — `bids` and `asks` sorted once, because sorting a
+  single frame's own rows is decode work, not the maintenance this module no longer
+  does. An `update` decodes straight into `DpExchange.Core.Types.OrderBookDelta` — the
+  venue's own changed rows, in the venue's own order, both sides interleaved exactly as
+  the frame carried them: not re-sorted, not split into two lists beyond what the
+  venue's own `side` field already says, not folded into anything held here. A zero
+  `new_quantity` is carried through exactly as the venue sent it; resolving it —
+  dropping the row, treating it as "no size" — would be state-keeping wearing a
+  smaller shape, and state-keeping is exactly what this module stopped doing.
 
-  This used to be a plain `%{Decimal => Decimal}` map per side, and `deliver_book/3`
-  called `Enum.sort_by/3` with a `Decimal` comparator over the whole map on **every**
-  frame — including an `update` touching one price level. Measured at the book size
-  DpCryptoManagement reported live for `BTC-USD` (~22,800 bid levels, issue #22): a
-  full re-sort of both sides cost 91.5 ms per frame, a ceiling of roughly 13 book
-  updates/second on a socket that a shard shares across up to 100 symbols. See
-  `dp_exchange_core`'s `docs/design/2026-09-06_order-book-resort-cost.md` for the full
-  measurement and the causal hypothesis linking this to `ticker` starving in #22.
+  ### Why a caller still cannot mistake a delta for the whole book
 
-  Each side is now a `:gb_trees` tree, so delivery is an ordered traversal — no
-  comparison sort at all. Run `mix run bench/order_book_resort.exs` for a repeatable
-  before/after at this book size on whatever machine you are reading this from; the
-  design doc's own run measured a 6.3x reduction on the bids side, and repeat runs in
-  this repo have measured considerably more, likely because `Enum.sort_by/3`'s
-  `Decimal` comparator dominates the "before" cost far more than an O(n log n) sort
-  alone would suggest. The subtle part is the key: `:gb_trees` uses Erlang
-  term ordering, which for a `%Decimal{}` struct compares `sign`, `coef` and `exp` as
-  plain fields, not the number they represent — `Decimal.new("1.5")` and
-  `Decimal.new("1.50")` are numerically equal and structurally different, so keying by
-  the struct directly does not give numeric order. A float is exact-but-fast in the
-  wrong direction: this family refuses lossy prices everywhere, including here.
+  The reason the maintained book existed in the first place is real, and the failure it
+  prevented is worth keeping on record rather than only the fact that a guard once
+  stood here: a caller reading a single `l2_data` delta as though it were the whole book
+  **would see a handful of prices and nothing else** — a book with everything but a
+  couple of levels simply missing, not a partial update honestly labelled as one.
 
-  The key is an **exactly scaled integer**: the price multiplied by `10^8`. That scale
-  was not assumed — verified 2026-09-06 against Coinbase's own public, unauthenticated
-  `GET https://api.coinbase.com/api/v3/brokerage/market/products` (931 products): the
-  smallest published `quote_increment` across every one of them is `0.00000001` (8
-  decimal places — e.g. `PEPE-USD`, `SHIB-USD`, `BONK-USD`), and no product's own
-  `price` field carries more decimal digits than that either. `10^8` is therefore exact
-  for every real Coinbase price. `price_key/1` does not trust that blindly on every
-  call, though: it checks `Decimal.integer?/1` on the scaled result and refuses —
-  reported through the same `malformed_row/3` path as any other unparseable row —
-  rather than rounding, on the chance the venue ever sends more precision than it
-  currently publishes.
+  What changed is how that is prevented. A distinct type is the fix, not accumulated
+  state: `%DpExchange.Core.Types.OrderBookDelta{}` is not
+  `%DpExchange.Core.Types.OrderBook{}`, so a caller cannot read one as the other — the
+  struct itself says which one it is holding, at compile time and at a glance. The
+  original defect was a *snapshot-shaped value carrying delta content*; a delta with its
+  own type has nothing snapshot-shaped left to be mistaken for.
 
-  The original `Decimal` is carried as the tree's value, alongside the quantity, so
-  what a consumer receives is byte-identical to the map-based implementation for every
-  book this venue actually sends. The one behaviour that is NOT identical: two
-  differently-scaled representations of the same numeric price used to become two map
-  entries (two "levels" at one price, since `%Decimal{}` structs compare unequal) and
-  now collapse into one, last-write-wins — which is the correct reading of a price
-  level (identified by its numeric value) and was a latent defect in the map-keyed
-  version, not a behaviour deliberately being changed.
+  ### A reconnect has nothing to wipe, and the gap that follows is now the host's problem
+
+  A reconnect used to lose the maintained book, because the venue's own session went
+  with it — `handle_disconnect/2` cleared every symbol's book, and the next `snapshot`
+  rebuilt it fresh. There is no book to lose now, so `handle_disconnect/2` clears
+  nothing beyond what it always cleared for delivery bookkeeping.
+
+  What was true then is still true, and now visible instead of silently absorbed:
+  deltas delivered after a reconnect are **not contiguous** with deltas delivered
+  before it. `handle_connect/2`'s `:link_up` notice and `handle_disconnect/2`'s
+  `:link_down` notice bracket where that gap may fall; `:sequence` on both
+  `DpExchange.Core.Types.OrderBook` and `DpExchange.Core.Types.OrderBookDelta` is the
+  other tool where a venue publishes one (Coinbase's `l2_data` channel does not, so
+  this socket always sends `nil` there — see `decode_book_event/3`). Neither tool
+  reconstructs a missing delta; nothing does. The correct response to `:link_up` is to
+  re-pull `get_order_book/2` (unaffected by any of this) or accept the venue's own
+  fresh `snapshot` on resubscribe, not to keep applying deltas across a gap and hope
+  they still line up. See `DpExchange.Core.Types.OrderBookDelta`'s own moduledoc and
+  this family's `usage-rules/feeds.md` for the full account of why those two signals
+  are sufficient.
 
   ## The connect timeouts are chosen against `Feed`'s call budget, not inherited by accident
 
@@ -164,13 +167,7 @@ defmodule DpExchange.Coinbase.Socket do
       credentials: Keyword.get(opts, :credentials),
       # Observed delivery, not intended: a symbol enters this set when a payload for it
       # arrives, never when it is subscribed.
-      delivering: MapSet.new(),
-      # symbol => %{bids: gb_trees(), asks: gb_trees()}, each tree keyed by
-      # `price_key/1`'s scaled integer and valued `{price, quantity}` — see the
-      # moduledoc's "Each side is kept ORDERED" section for why. Maintained across
-      # `update` frames; wiped on every reconnect, because the venue's session — and
-      # the guarantee that our deltas are contiguous with its book — is gone with it.
-      books: %{}
+      delivering: MapSet.new()
     }
 
     opts = connection_opts(opts)
@@ -228,11 +225,14 @@ defmodule DpExchange.Coinbase.Socket do
   @impl true
   def handle_disconnect(%{reason: reason}, state) do
     notify(state, Notice.new(:link_down, :coinbase, details: %{reason: inspect(reason)}))
-    # The venue's session is gone, and every maintained book with it — see the moduledoc.
-    # `delivering` is left alone: a symbol that was streaming is reasonably still "was
-    # covered a moment ago" until the coordinator's resubscribe timer either revives it
-    # or its own staleness ages it out of whatever freshness a caller applies downstream.
-    {:reconnect, %{state | books: %{}}}
+    # No maintained book to wipe — see the moduledoc's "A reconnect has nothing to
+    # wipe" section. `delivering` is left alone: a symbol that was streaming is
+    # reasonably still "was covered a moment ago" until the coordinator's resubscribe
+    # timer either revives it or its own staleness ages it out of whatever freshness a
+    # caller applies downstream. The gap this disconnect opens in the delta stream is
+    # real and is now the host's to reconcile — this notice plus `:link_up` on
+    # reconnect are the brackets it needs.
+    {:reconnect, state}
   end
 
   @impl true
@@ -295,7 +295,7 @@ defmodule DpExchange.Coinbase.Socket do
   defp dispatch(%{"channel" => "l2_data", "events" => events} = payload, state)
        when is_list(events) do
     timestamp = Map.get(payload, "timestamp")
-    Enum.reduce(events, state, &apply_book_event(&1, &2, timestamp))
+    Enum.reduce(events, state, &decode_book_event(&1, &2, timestamp))
   end
 
   defp dispatch(%{"channel" => "subscriptions"}, state) do
@@ -385,137 +385,56 @@ defmodule DpExchange.Coinbase.Socket do
   # --- level2 / order book -------------------------------------------------
 
   # `type` is `"snapshot"` once per subscribe (or resubscribe) and `"update"` after —
-  # both carry rows in the same shape, and the ONLY difference in how they are applied
-  # is that a snapshot replaces the book outright while an update patches it. Folding
-  # them into one clause would let a delayed snapshot silently merge into stale state
-  # instead of replacing it.
-  defp apply_book_event(
+  # both carry rows in the same shape on the wire, but they decode into two DIFFERENT
+  # contract types now, and that is the only distinction this clause exists to make. A
+  # snapshot is the venue's whole book right now: decoded straight into
+  # `Types.OrderBook`, sorted once because sorting a single frame's own rows is decode
+  # work, not the maintenance this module no longer does. An update is the venue's own
+  # changed rows: decoded straight into `Types.OrderBookDelta` and passed on exactly as
+  # received, in the venue's own order, with nothing folded into anything held here. See
+  # the moduledoc.
+  defp decode_book_event(
          %{"type" => "snapshot", "product_id" => product, "updates" => rows},
          state,
          timestamp
        )
        when is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(product)
-    book = rows |> Enum.reduce(empty_book(), &apply_book_row(&1, &2, state))
-
-    state
-    |> put_in([Access.key(:books), symbol], book)
-    |> deliver_book(symbol, timestamp)
+    deliver_snapshot(state, symbol, rows, timestamp)
   end
 
-  defp apply_book_event(
+  defp decode_book_event(
          %{"type" => "update", "product_id" => product, "updates" => rows},
          state,
          timestamp
        )
        when is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(product)
-    book = Map.get(state.books, symbol, empty_book())
-    book = Enum.reduce(rows, book, &apply_book_row(&1, &2, state))
-
-    state
-    |> put_in([Access.key(:books), symbol], book)
-    |> deliver_book(symbol, timestamp)
+    deliver_delta(state, symbol, rows, timestamp)
   end
 
-  defp apply_book_event(_other, state, _timestamp), do: state
+  defp decode_book_event(_other, state, _timestamp), do: state
 
-  defp empty_book, do: %{bids: :gb_trees.empty(), asks: :gb_trees.empty()}
-
-  # A price level's quantity is the venue's CURRENT total at that price, not a delta to
-  # add — replacing the tree entry is correct; summing it would double every level that
-  # appears in two update frames in a row. `new_quantity: "0"` removes the level: it is
-  # not a price of zero, it is the level no longer existing, and leaving a zero-quantity
-  # entry in the book would make it a phantom best price the moment nothing outranks it.
+  # Bids/asks are sorted ONCE here, decoding this one frame's own rows — not maintained
+  # or re-sorted against anything held across frames, which is the work this module no
+  # longer does. See the moduledoc.
   #
-  # An unparseable `price_level` or `new_quantity` used to return the book unchanged with
-  # no signal — silent among siblings that all report through `report_quality/2`. That
-  # matters concretely for `new_quantity: "0"`: it is how the venue signals removal, so an
-  # unparseable quantity silently ignored can leave a stale price level in the maintained
-  # book indefinitely with nothing indicating why. Reported, not swallowed, same as
-  # `deliver_ticker/3` and `deliver_book/3` — and still never fatal to the connection.
-  #
-  # A `price_level` that parses as a `Decimal` but cannot be represented exactly at
-  # `price_key/1`'s scale is reported through the identical path — see the moduledoc's
-  # "Each side is kept ORDERED" section for why that must fail closed rather than round.
-  defp apply_book_row(
-         %{"side" => side, "price_level" => price, "new_quantity" => quantity} = row,
-         book,
-         state
-       ) do
-    side_key = book_side(side)
-
-    case {decimal(price), decimal(quantity)} do
-      {nil, _ignored} -> malformed_row(state, book, row)
-      {_ignored, nil} -> malformed_row(state, book, row)
-      {price, quantity} -> apply_priced_row(book, side_key, price, quantity, row, state)
-    end
-  end
-
-  defp apply_book_row(row, book, state), do: malformed_row(state, book, row)
-
-  defp apply_priced_row(book, side, price, quantity, row, state) do
-    case price_key(price) do
-      {:ok, key} -> update_level(book, side, key, price, quantity)
-      :error -> malformed_row(state, book, row)
-    end
-  end
-
-  defp malformed_row(state, book, row) do
-    report_quality(state, inspect(row))
-    book
-  end
-
-  defp book_side("bid"), do: :bids
-  defp book_side(_offer_or_other), do: :asks
-
-  # See the moduledoc: verified 2026-09-06 against Coinbase's own public
-  # `GET /api/v3/brokerage/market/products` (931 products) — the smallest published
-  # `quote_increment` across every one is `0.00000001` (8 decimal places), and no
-  # product's own `price` field carries more decimal digits than that. `10^8` is exact
-  # for every real Coinbase price on record.
-  @price_scale_factor 100_000_000
-
-  # Exact by construction, not by assumption: `Decimal.integer?/1` on the scaled value
-  # is checked on every call rather than trusted from the evidence above, so a price
-  # this venue somehow sends with more precision than it currently publishes is refused
-  # — reported by the caller — rather than rounded.
-  defp price_key(price) do
-    scaled = Decimal.mult(price, @price_scale_factor)
-
-    if Decimal.integer?(scaled) do
-      {:ok, Decimal.to_integer(scaled)}
-    else
-      :error
-    end
-  end
-
-  defp update_level(book, side, key, price, quantity) do
-    if Decimal.compare(quantity, 0) == :eq do
-      remove_level(book, side, key)
-    else
-      Map.update!(book, side, &:gb_trees.enter(key, {price, quantity}, &1))
-    end
-  end
-
-  defp remove_level(book, side, key),
-    do: Map.update!(book, side, &:gb_trees.delete_any(key, &1))
-
-  # FAILS CLOSED on the timestamp, same as `build_quote/3` — this used to substitute
-  # `DateTime.utc_now/0` unconditionally, which is the exact substitution the moduledoc
-  # already warned against for the ticker path while doing it anyway here. The venue's
-  # own `timestamp` is real and available on every `l2_data` message; a book whose
-  # freshness cannot be stated is refused rather than stamped with whenever this process
-  # happened to process the frame.
-  defp deliver_book(state, symbol, timestamp) do
-    book = Map.fetch!(state.books, symbol)
+  # FAILS CLOSED on the timestamp, same as `build_quote/3` — the venue's own `timestamp`
+  # is real and available on every `l2_data` message; a book whose freshness cannot be
+  # stated is refused rather than stamped with whenever this process happened to
+  # process the frame. Row decoding runs first regardless, so a malformed row is
+  # reported even when the frame's timestamp is also bad — two independent problems,
+  # both worth a signal.
+  defp deliver_snapshot(state, symbol, rows, timestamp) do
+    {levels, state} = decode_rows(rows, state)
+    {bids, asks} = split_sides(levels)
 
     case parse_time(timestamp) do
       {:ok, at} ->
         order_book = %Types.OrderBook{
           symbol: symbol,
-          bids: ordered_levels(book.bids, :desc),
-          asks: ordered_levels(book.asks, :asc),
+          bids: sorted(bids, :desc),
+          asks: sorted(asks, :asc),
           timestamp: at,
           provider: :coinbase
         }
@@ -528,14 +447,98 @@ defmodule DpExchange.Coinbase.Socket do
     end
   end
 
-  # No comparison sort: `tree`'s keys are already in ascending numeric order by
-  # construction (see `price_key/1`), so `:gb_trees.to_list/1` is an ordered traversal,
-  # not a sort. `:asc` needs no further work; `:desc` reverses the already-ordered list
-  # — still no comparator invoked. See the moduledoc for the cost this replaced.
-  defp ordered_levels(tree, :asc), do: tree |> :gb_trees.to_list() |> Enum.map(&elem(&1, 1))
+  # The venue's own changed rows, passed on exactly as decoded: in the venue's own
+  # order, both sides interleaved exactly as the frame carried them, and a zero
+  # `new_quantity` left as zero rather than resolved into a removal. Resolving it here
+  # would be maintaining a level's meaning on the way past — the job this module no
+  # longer does. See the moduledoc and `Types.OrderBookDelta`'s own moduledoc.
+  #
+  # `:sequence` is left at its default `nil`: Coinbase's `l2_data` channel does not
+  # publish a book sequence number, so there is nothing here to carry — see the
+  # moduledoc's reconnect section.
+  defp deliver_delta(state, symbol, rows, timestamp) do
+    {levels, state} = decode_rows(rows, state)
 
-  defp ordered_levels(tree, :desc),
-    do: tree |> :gb_trees.to_list() |> Enum.reverse() |> Enum.map(&elem(&1, 1))
+    case parse_time(timestamp) do
+      {:ok, at} ->
+        delta = %Types.OrderBookDelta{
+          symbol: symbol,
+          levels: levels,
+          timestamp: at,
+          provider: :coinbase
+        }
+
+        send(state.subscriber, {:dp_exchange, :coinbase, delta})
+        %{state | delivering: MapSet.put(state.delivering, symbol)}
+
+      {:error, _reason} ->
+        report_quality(state, symbol)
+    end
+  end
+
+  # Order preserved: builds the list backward with `[level | levels]` and reverses once
+  # at the end, so a delta's rows reach `deliver_delta/4` in the exact order the venue
+  # sent them — required by `Types.OrderBookDelta`'s own contract, not merely
+  # convenient. A snapshot re-sorts its own two sides afterward regardless, so
+  # preserving order here costs it nothing.
+  #
+  # An unparseable `price_level` or `new_quantity` is reported through the same
+  # `:data_quality` path as any other unparseable row, and dropped from the result —
+  # from a snapshot's book, or from a delta's own list of changed rows. That matters
+  # concretely for `new_quantity: "0"`: it is how the venue signals removal, so an
+  # unparseable quantity silently ignored could leave a stale price level unaccounted
+  # for with nothing indicating why. Reported, not swallowed, same as `deliver_ticker/3`
+  # — and still never fatal to the connection.
+  defp decode_rows(rows, state) do
+    {reversed, state} =
+      Enum.reduce(rows, {[], state}, fn row, {levels, acc_state} ->
+        case decode_row(row) do
+          {:ok, level} -> {[level | levels], acc_state}
+          :error -> {levels, malformed_row(acc_state, row)}
+        end
+      end)
+
+    {Enum.reverse(reversed), state}
+  end
+
+  defp decode_row(%{"side" => side, "price_level" => price, "new_quantity" => quantity}) do
+    case {decimal(price), decimal(quantity)} do
+      {nil, _ignored} -> :error
+      {_ignored, nil} -> :error
+      {parsed_price, parsed_quantity} -> {:ok, {book_side(side), parsed_price, parsed_quantity}}
+    end
+  end
+
+  defp decode_row(_row), do: :error
+
+  defp malformed_row(state, row), do: report_quality(state, inspect(row))
+
+  # `Types.OrderBookDelta.side/0` is `:bid | :ask` — singular, unlike `OrderBook`'s
+  # separate `bids`/`asks` lists, because one delta level names its own side rather
+  # than living in a side-keyed collection.
+  defp book_side("bid"), do: :bid
+  defp book_side(_offer_or_other), do: :ask
+
+  # Both accumulators are reversed once at the end, so a tie in `sorted/2`'s stable
+  # sort breaks in the venue's own row order rather than the reverse of it — matters
+  # concretely for two numerically-equal, differently-scaled prices in one snapshot
+  # (e.g. `"1.5"` and `"1.50"`), both of which now survive as separate rows rather
+  # than being folded into one.
+  defp split_sides(levels) do
+    {bids, asks} =
+      Enum.reduce(levels, {[], []}, fn
+        {:bid, price, quantity}, {bids, asks} -> {[{price, quantity} | bids], asks}
+        {:ask, price, quantity}, {bids, asks} -> {bids, [{price, quantity} | asks]}
+      end)
+
+    {Enum.reverse(bids), Enum.reverse(asks)}
+  end
+
+  defp sorted(levels, :desc),
+    do: Enum.sort_by(levels, fn {price, _qty} -> price end, {:desc, Decimal})
+
+  defp sorted(levels, :asc),
+    do: Enum.sort_by(levels, fn {price, _qty} -> price end, {:asc, Decimal})
 
   defp parse_time(nil), do: {:error, :missing_venue_timestamp}
 
