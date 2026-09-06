@@ -221,6 +221,39 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert Map.keys(Fake.coverage()) == ~w(ETH-USD)
     end
 
+    test "coverage_by_kind reports every subscribed symbol under :quotes only — the fake " <>
+           "never synthesises an order book" do
+      assert :ok = Fake.subscribe(~w(BTC-USD ETH-USD), to: self())
+
+      by_kind = Fake.coverage_by_kind()
+
+      assert by_kind == %{quotes: %{"BTC-USD" => :stream, "ETH-USD" => :stream}}
+      refute Map.has_key?(by_kind, :order_book)
+    end
+
+    test "coverage_by_kind's symbol union matches coverage/1 exactly" do
+      assert :ok = Fake.subscribe(~w(BTC-USD ETH-USD), to: self())
+
+      coverage_symbols = Fake.coverage() |> Map.keys() |> MapSet.new()
+
+      union =
+        Fake.coverage_by_kind()
+        |> Map.values()
+        |> Enum.flat_map(&Map.keys/1)
+        |> MapSet.new()
+
+      assert union == coverage_symbols
+    end
+
+    test "every kind coverage_by_kind reports is declared streamable" do
+      Fake.subscribe(~w(BTC-USD), to: self())
+
+      declared = MapSet.new(Fake.capabilities().streamable)
+      reported = Fake.coverage_by_kind() |> Map.keys() |> MapSet.new()
+
+      assert MapSet.subset?(reported, declared)
+    end
+
     test "state is per process, so two tests cannot interfere" do
       Fake.subscribe(~w(BTC-USD), to: self())
 

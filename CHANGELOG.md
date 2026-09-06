@@ -22,6 +22,29 @@ acceptable changelog line.
 
 ### Added
 
+- **`coverage_by_kind/1` implemented — Coinbase is the motivating case for
+  `dp_exchange_core` 0.1.48's new optional callback.** `coverage/1` answers "is
+  anything arriving for this symbol" by counting any payload at all, so a `level2`
+  book update counted identically to a `ticker` quote. That blindness is not
+  hypothetical: `level2` delivered upward of 11,000 frames across 406 subscribed
+  symbols while `ticker` stayed dark on all but a handful, and `coverage/1` still
+  answered `:stream` for all 406 — correct by its own definition, and exactly why
+  DpCryptoManagement's issues #20 and #22 stayed unpinned for days.
+
+  `Feed`'s `delivering` map now tracks `%{symbol => %{kind => timestamp}}` instead of a
+  bare timestamp, keyed off which `Core.Types` struct actually arrived
+  (`%Types.Quote{}` → `:quotes`, `%Types.OrderBook{}` → `:order_book`) — never off this
+  venue's own channel names, which stay internal. `coverage_by_kind/1` on
+  `DpExchange.Coinbase` and `DpExchange.Coinbase.Fake` both satisfy the union
+  invariant `dp_exchange_core`'s conformance suite now checks whenever a venue exports
+  this callback: the symbol keys across every kind exactly match `coverage/1`'s own
+  keys, and every kind reported is one `capabilities().streamable` declares. The fake
+  reports everything under `:quotes` only, honestly — `subscribe/2` never synthesises
+  an order book, and claiming `:order_book` coverage it cannot back would be the
+  "differently capable" divergence this fake's own moduledoc forbids.
+
+  Bumped `dp_exchange_core` from `~> 0.1.36` to `~> 0.1.48` to pick up the callback.
+
 - **`Fake` wired to `Core.FakeInjection` — DpCryptoManagement's issue #14.** Every
   function with a real success path (not an unconditional `Venue.not_supported()`) now
   checks a queued or always-set outcome first: `get_price/2`, `get_top_of_book/2`,

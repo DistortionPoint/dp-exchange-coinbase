@@ -178,6 +178,12 @@ defmodule DpExchange.CoinbaseTest do
     end
   end
 
+  describe "coverage_by_kind/1 with no feed running" do
+    test "answers empty rather than crashing" do
+      assert Coinbase.coverage_by_kind(feed: :a_feed_nobody_started) == %{}
+    end
+  end
+
   describe "child_spec/1" do
     test "is present and names itself from opts" do
       Code.ensure_loaded!(Coinbase)

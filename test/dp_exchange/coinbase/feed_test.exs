@@ -26,6 +26,16 @@ defmodule DpExchange.Coinbase.FeedTest do
     }
   end
 
+  defp order_book_for(symbol) do
+    %Types.OrderBook{
+      symbol: symbol,
+      bids: [{Decimal.new("1"), Decimal.new("2")}],
+      asks: [{Decimal.new("1.1"), Decimal.new("2")}],
+      timestamp: ~U[2026-08-28 12:00:00Z],
+      provider: :coinbase
+    }
+  end
+
   describe "the resubscribe cadence is configurable, for a diagnostic reason" do
     # The re-issue is unconditional by design, so this package sends a `level2` subscribe
     # per shard per interval indefinitely — and `FrameSender`'s moduledoc leans on
@@ -180,6 +190,92 @@ defmodule DpExchange.Coinbase.FeedTest do
       Process.sleep(20)
 
       assert %{"BTC-USD" => :stream} = Feed.coverage(feed)
+    end
+  end
+
+  describe "coverage_by_kind/1 — ticker-dark/book-healthy, which coverage/1 cannot show" do
+    test "a symbol delivering only a Quote appears under :quotes and not :order_book" do
+      feed = start_feed()
+
+      send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
+      Process.sleep(20)
+
+      by_kind = Feed.coverage_by_kind(feed)
+
+      assert by_kind[:quotes] == %{"BTC-USD" => :stream}
+      refute Map.has_key?(by_kind, :order_book)
+    end
+
+    test "a symbol delivering only an OrderBook appears under :order_book, not :quotes " <>
+           "— the literal issue #22 regression: level2 delivered thousands of frames " <>
+           "while ticker stayed dark" do
+      feed = start_feed()
+
+      send(feed, {:dp_exchange, :coinbase, order_book_for("XLM-USD")})
+      Process.sleep(20)
+
+      by_kind = Feed.coverage_by_kind(feed)
+
+      # coverage/1 answers :stream here too — truthfully, and precisely the blindness
+      # coverage_by_kind/1 exists to close.
+      assert Feed.coverage(feed) == %{"XLM-USD" => :stream}
+
+      assert by_kind[:order_book] == %{"XLM-USD" => :stream}
+      refute Map.has_key?(by_kind, :quotes)
+    end
+
+    test "a symbol delivering both kinds appears under both, and one going quiet later " <>
+           "does not erase the other" do
+      feed = start_feed()
+
+      send(feed, {:dp_exchange, :coinbase, quote_for("ETH-USD")})
+      send(feed, {:dp_exchange, :coinbase, order_book_for("ETH-USD")})
+      Process.sleep(20)
+
+      by_kind = Feed.coverage_by_kind(feed)
+      assert by_kind[:quotes] == %{"ETH-USD" => :stream}
+      assert by_kind[:order_book] == %{"ETH-USD" => :stream}
+    end
+
+    test "the symbol union across every kind matches coverage/1 exactly, under mixed delivery" do
+      feed = start_feed()
+
+      # BTC-USD: quote only. XLM-USD: book only. ETH-USD: both.
+      send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
+      send(feed, {:dp_exchange, :coinbase, order_book_for("XLM-USD")})
+      send(feed, {:dp_exchange, :coinbase, quote_for("ETH-USD")})
+      send(feed, {:dp_exchange, :coinbase, order_book_for("ETH-USD")})
+      Process.sleep(20)
+
+      coverage_symbols = feed |> Feed.coverage() |> Map.keys() |> MapSet.new()
+
+      union =
+        feed
+        |> Feed.coverage_by_kind()
+        |> Map.values()
+        |> Enum.flat_map(&Map.keys/1)
+        |> MapSet.new()
+
+      assert union == coverage_symbols
+      assert union == MapSet.new(~w(BTC-USD XLM-USD ETH-USD))
+    end
+
+    test "every kind key reported is a kind DpExchange.Coinbase declares streamable" do
+      feed = start_feed()
+
+      send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
+      send(feed, {:dp_exchange, :coinbase, order_book_for("XLM-USD")})
+      Process.sleep(20)
+
+      declared = MapSet.new(DpExchange.Coinbase.capabilities().streamable)
+      reported = feed |> Feed.coverage_by_kind() |> Map.keys() |> MapSet.new()
+
+      assert MapSet.subset?(reported, declared)
+    end
+
+    test "a feed that has delivered nothing reports no kinds" do
+      feed = start_feed()
+      assert Feed.coverage_by_kind(feed) == %{}
     end
   end
 

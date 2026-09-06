@@ -152,12 +152,43 @@ defmodule DpExchange.Coinbase.Feed do
   delivery is recorded under the caller's own requested name instead of the venue's
   rewritten one, `coverage/1` reports exactly what was asked for, by construction, with
   nothing endpoint-specific added at the `coverage/1` call site itself.
+
+  ### `coverage_by_kind/1` — the same fact, split by what actually arrived
+
+  `coverage/1` answers "is anything arriving for this symbol", and it answers that
+  question truthfully — but it asks nothing about *which* kind of payload showed up.
+  `Types.Quote` and `Types.OrderBook` both carry `:symbol`, so a `level2` book update and
+  a `ticker` quote count identically toward `delivering`, and a symbol with one of the two
+  dark looks exactly like a symbol with both healthy.
+
+  That is not a hypothetical: `level2` on this venue delivered upward of 11,000 frames
+  across 406 subscribed symbols while `ticker` stayed dark on all but a handful of them,
+  and `coverage/1` still answered `:stream` for all 406 — correctly, by its own definition,
+  and useless for telling anyone that quotes had gone silent. Two separate
+  DpCryptoManagement issues (#20 and #22) sat unpinned for days because nothing in this
+  package's own observability could distinguish "everything is fine" from "the book is
+  fine and the ticker is dead". `coverage_by_kind/1` exists to make that distinction
+  answerable without adding a second, differently-shaped API: it reports the same
+  observed-arrival fact `coverage/1` reports, just partitioned by
+  `t:DpExchange.Core.Capabilities.data_kind/0` instead of collapsed across it.
+
+  The kind is read off the payload's own struct — `%Types.Quote{}` is `:quotes`,
+  `%Types.OrderBook{}` is `:order_book` — never off a channel name. `level2` and `ticker`
+  are this venue's words for its own wire protocol and stop existing the moment a frame
+  becomes a `Core.Types.*` struct; `coverage_by_kind/1` never sees them and could not leak
+  them if it wanted to.
+
+  `state.delivering` therefore keys each symbol to a small map of `kind => timestamp`
+  rather than a single timestamp, so a symbol that has delivered both a quote and a book
+  update carries both kinds at once, and one going dark does not erase the other.
+  `coverage_by_kind/1` folds that structure the other way — kind first, then symbol — to
+  match the shape `c:DpExchange.Core.Venue.coverage_by_kind/1` promises.
   """
 
   use GenServer
 
   alias DpExchange.Coinbase.{Rest, Socket}
-  alias DpExchange.Core.Notice
+  alias DpExchange.Core.{Capabilities, Notice, Types}
 
   require Logger
 
@@ -235,6 +266,16 @@ defmodule DpExchange.Coinbase.Feed do
   @spec coverage(GenServer.server()) :: %{String.t() => :stream | :internal_poll | :not_covered}
   def coverage(feed \\ __MODULE__), do: GenServer.call(feed, :coverage)
 
+  @doc """
+  `coverage/1`, split by which `Core.Types.*` kind actually arrived — see the moduledoc's
+  "coverage_by_kind/1" section for why `coverage/1` alone could not tell "ticker dark,
+  book healthy" apart from "everything healthy".
+  """
+  @spec coverage_by_kind(GenServer.server()) :: %{
+          Capabilities.data_kind() => %{String.t() => :stream | :internal_poll | :not_covered}
+        }
+  def coverage_by_kind(feed \\ __MODULE__), do: GenServer.call(feed, :coverage_by_kind)
+
   @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
   def subscribe_notices(feed \\ __MODULE__, opts \\ []),
     do: GenServer.call(feed, {:subscribe_notices, Keyword.get(opts, :to, self())})
@@ -272,6 +313,11 @@ defmodule DpExchange.Coinbase.Feed do
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
+       # symbol => %{kind => timestamp_ms}, one entry per `Capabilities.data_kind()` that
+       # has actually delivered for that symbol — see the moduledoc's "coverage_by_kind/1"
+       # section. `coverage/1` only needs "does this symbol have any entry at all";
+       # `coverage_by_kind/1` needs the kinds themselves, which is why this is a nested
+       # map rather than the bare timestamp it used to be.
        delivering: %{},
        resubscribe_interval_ms: resubscribe_interval_ms,
        # The venue's own declared alias relationships — see the moduledoc's "the venue
@@ -317,8 +363,27 @@ defmodule DpExchange.Coinbase.Feed do
 
   def handle_call(:coverage, _from, state) do
     # Only what arrived. A subscribed symbol that has delivered nothing is absent, and
-    # the facade documents absence as `:not_covered`.
-    {:reply, Map.new(state.delivering, fn {symbol, _at} -> {symbol, :stream} end), state}
+    # the facade documents absence as `:not_covered`. `state.delivering` values are now
+    # `%{kind => timestamp}` rather than a bare timestamp — see `coverage_by_kind/1` — but
+    # this reply only ever needs "has this symbol delivered anything at all", so the kind
+    # breakdown is irrelevant here and dropped.
+    {:reply, Map.new(state.delivering, fn {symbol, _kinds} -> {symbol, :stream} end), state}
+  end
+
+  def handle_call(:coverage_by_kind, _from, state) do
+    # Inverts `state.delivering` from symbol-first (`%{symbol => %{kind => timestamp}}`)
+    # to kind-first (`%{kind => %{symbol => :stream}}`) — the shape
+    # `c:DpExchange.Core.Venue.coverage_by_kind/1` promises. A symbol that has delivered
+    # both a quote and a book update appears under both kinds; one going dark later drops
+    # only that kind's entry, never the other's.
+    by_kind =
+      Enum.reduce(state.delivering, %{}, fn {symbol, kinds}, acc ->
+        Enum.reduce(Map.keys(kinds), acc, fn kind, acc_by_kind ->
+          Map.update(acc_by_kind, kind, %{symbol => :stream}, &Map.put(&1, symbol, :stream))
+        end)
+      end)
+
+    {:reply, by_kind, state}
   end
 
   def handle_call({:subscribe_notices, subscriber}, _from, state) do
@@ -339,6 +404,8 @@ defmodule DpExchange.Coinbase.Feed do
     # catalogue says so, its alias — falling back to the delivered id itself when nothing
     # in `wanted` resolves.
     targets = attribution_targets(payload, state)
+    kind = payload_kind(payload)
+    now = :os.system_time(:millisecond)
 
     Enum.each(targets, fn symbol ->
       fan_out(state.subscribers, {:dp_exchange, :coinbase, %{payload | symbol: symbol}})
@@ -346,7 +413,7 @@ defmodule DpExchange.Coinbase.Feed do
 
     delivering =
       Enum.reduce(targets, state.delivering, fn symbol, acc ->
-        Map.put(acc, symbol, :os.system_time(:millisecond))
+        Map.update(acc, symbol, %{kind => now}, &Map.put(&1, kind, now))
       end)
 
     {:noreply, %{state | delivering: delivering}}
@@ -695,6 +762,14 @@ defmodule DpExchange.Coinbase.Feed do
   # `Types.Quote` and `Types.OrderBook` both carry `:symbol`; this is the one place
   # coverage tracking needs to be generic over which kind arrived.
   defp delivered_symbol(%{symbol: symbol}), do: symbol
+
+  # The `Core.Types.*` struct names its own kind — never a venue channel name. `Socket`
+  # sends exactly these two structs (plus `Notice`, matched in its own `handle_info/2`
+  # clause above) into this module, so there is deliberately no catch-all: an unrecognised
+  # struct here means a new payload kind was wired into `Socket` without being taught to
+  # this function, and failing loudly beats silently mis-tagging its coverage.
+  defp payload_kind(%Types.Quote{}), do: :quotes
+  defp payload_kind(%Types.OrderBook{}), do: :order_book
 
   # Schedules the alias-map fetch exactly once, the first time it is needed — see the
   # moduledoc. `:unfetched` is the only status this fires from, and it flips to

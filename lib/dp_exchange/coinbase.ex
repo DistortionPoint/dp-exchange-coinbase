@@ -434,6 +434,41 @@ defmodule DpExchange.Coinbase do
     if alive?(feed), do: Feed.coverage(feed), else: %{}
   end
 
+  @doc """
+  `coverage/1`, split by which `DpExchange.Core.Types` struct is actually arriving.
+
+  `coverage/1` is honest but coarse: it answers "is anything arriving for this symbol" by
+  counting any payload at all, so a `Core.Types.OrderBook` update counts exactly the same
+  as a `Core.Types.Quote` — a symbol whose book is healthy and whose quotes have gone dark
+  looks identical to one where both are fine. That is not hypothetical here: `level2`
+  delivered over 11,000 frames across 406 symbols while `ticker` was dark on all but a
+  handful, and `coverage/1` reported `:stream` for all 406, correctly by its own
+  definition and uninformative about the gap. Two DpCryptoManagement issues (#20, #22)
+  stayed unpinned for days because nothing distinguished "book healthy, ticker dark" from
+  "everything healthy".
+
+  This answers the same observed-arrival question `coverage/1` does, partitioned by
+  `t:DpExchange.Core.Capabilities.data_kind/0` instead of collapsed across it. The kind
+  comes from which struct arrived — `%DpExchange.Core.Types.Quote{}` is `:quotes`,
+  `%DpExchange.Core.Types.OrderBook{}` is `:order_book` — never from this venue's own
+  channel names (`level2`, `ticker`), which never cross the facade.
+
+  Optional on `c:DpExchange.Core.Venue.coverage_by_kind/1` and implemented here because
+  Coinbase is the venue that motivated it. See
+  `DpExchange.Coinbase.Feed`'s moduledoc, "coverage_by_kind/1" section, for how delivery
+  is tracked per kind.
+  """
+  @impl true
+  @spec coverage_by_kind(keyword()) :: %{
+          DpExchange.Core.Capabilities.data_kind() => %{
+            DpExchange.Core.Venue.symbol() => DpExchange.Core.Venue.route()
+          }
+        }
+  def coverage_by_kind(opts \\ []) do
+    feed = feed(opts)
+    if alive?(feed), do: Feed.coverage_by_kind(feed), else: %{}
+  end
+
   @impl true
   def subscribe_notices(opts \\ []), do: Feed.subscribe_notices(feed(opts), opts)
 

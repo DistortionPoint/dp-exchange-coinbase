@@ -59,7 +59,7 @@ defmodule DpExchange.Coinbase.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Coinbase.Rest
-  alias DpExchange.Core.{FakeInjection, Instrument, Notice, Types, Venue}
+  alias DpExchange.Core.{Capabilities, FakeInjection, Instrument, Notice, Types, Venue}
 
   @symbols ~w(BTC-USD BTC-USDC ETH-USD ETH-EUR)
 
@@ -466,6 +466,20 @@ defmodule DpExchange.Coinbase.Fake do
   # subscribed-but-not-delivering case gets the same shape the real venue would give.
   @impl true
   def coverage(_opts \\ []), do: Map.new(subscribed(), &{&1, :stream})
+
+  @doc """
+  `coverage/1`, split by kind — see `DpExchange.Coinbase.coverage_by_kind/1`.
+
+  `subscribe/2` above only ever pushes a `DpExchange.Core.Types.Quote` (it never
+  synthesises a `DpExchange.Core.Types.OrderBook`), so every symbol this fake reports
+  arrives under `:quotes` and `:quotes` alone — anything else would claim delivery this
+  fake never actually sends, which is exactly the "differently capable" divergence this
+  module's own moduledoc forbids. Less capable than the real venue here is honest; a
+  fabricated `:order_book` entry would not be.
+  """
+  @impl true
+  @spec coverage_by_kind(keyword()) :: %{Capabilities.data_kind() => %{String.t() => atom()}}
+  def coverage_by_kind(_opts \\ []), do: %{quotes: Map.new(subscribed(), &{&1, :stream})}
 
   @impl true
   def subscribe_notices(opts \\ []) do
