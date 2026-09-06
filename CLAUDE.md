@@ -49,8 +49,15 @@ supervisor pids.
   Core ships no transport library at any strength.
 - **Its authentication.** The CDP JWT builder lives here, passed to Core's
   `build_auth_headers/5` as a function. Core keeps only the generic schemes.
-- **Its rate-limit header parsing.** Coinbase's `cb-after` / `cb-before` headers are a
-  venue fact and are parsed here. Core parses only the conventional `x-ratelimit-*`.
+- **No rate-limit header parsing, deliberately.** `cb-after` / `cb-before` are pagination
+  cursors, not rate-limit headers, and Coinbase publishes no `x-ratelimit-*` or
+  `retry-after` either — measured live 2026-08-28 against `.../candles`. A prior adapter's
+  parser keyed off the cursor headers and returned three hardcoded constants
+  (`remaining: 100`, `limit: 100`, a reset time one minute out) labelled as rate-limit
+  data; porting it would have been exactly the fabrication this family refuses — see
+  `docs/reference/coinbase/reconciliation.md` §5.5. Core's generic
+  `parse_rate_limit_headers/1` answers `nil` here, correctly meaning "this response did
+  not say" rather than "there is no limit".
 - **Its whole connection strategy** — how many sockets, which channels, how many pairs
   each carries, in what order, at what pace.
 

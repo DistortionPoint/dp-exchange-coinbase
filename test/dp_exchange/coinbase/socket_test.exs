@@ -15,6 +15,16 @@ defmodule DpExchange.Coinbase.SocketTest do
 
   defp frame(payload), do: Socket.handle_frame({:text, Jason.encode!(payload)}, state())
 
+  # Deterministic instead of `spawn(fn -> :ok end)` plus a guessed sleep: a monitor's
+  # `:DOWN` message only arrives once the process has genuinely exited, so this never
+  # races a scheduler slower than whatever fixed delay was guessed.
+  defp dead_pid do
+    pid = spawn(fn -> :ok end)
+    ref = Process.monitor(pid)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 500
+    pid
+  end
+
   # No per-row "time" field — the venue's own documented schema puts the timestamp on
   # the message envelope, not on each ticker row. See `Socket.dispatch/2`'s moduledoc
   # comment on this exact point.
@@ -234,8 +244,7 @@ defmodule DpExchange.Coinbase.SocketTest do
     # runs in production. `send/3` fails on a dead pid, which is enough to observe the
     # message that was built.
     defp subscription(channel, symbols, credentials) do
-      dead = spawn(fn -> :ok end)
-      Process.sleep(5)
+      dead = dead_pid()
 
       case Socket.subscribe(dead, channel, symbols, credentials) do
         {:error, {:credentials_required, _channel}} = refusal -> refusal
@@ -259,8 +268,7 @@ defmodule DpExchange.Coinbase.SocketTest do
 
   describe "unsubscribe" do
     test "returns an error for a dead socket rather than exiting" do
-      dead = spawn(fn -> :ok end)
-      Process.sleep(5)
+      dead = dead_pid()
 
       assert {:error, {:send_exit, _reason}} = Socket.unsubscribe(dead, "ticker", ~w(BTC-USD))
     end

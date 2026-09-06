@@ -10,9 +10,14 @@ defmodule DpExchange.Coinbase.SupervisorTest do
   # process depends on the order the suite happens to run in — which is the exact
   # async-hostile shape this package's own isolation seam exists to prevent, so a test
   # here should not be committing it.
-  defp start_venue do
+  defp start_venue(extra_opts \\ []) do
     id = System.unique_integer([:positive])
-    opts = [name: :"venue_#{id}", limiter: :"limiter_#{id}", feed: :"feed_#{id}"]
+
+    opts =
+      Keyword.merge(
+        [name: :"venue_#{id}", limiter: :"limiter_#{id}", feed: :"feed_#{id}"],
+        extra_opts
+      )
 
     start_supervised!(%{id: opts[:name], start: {DpExchange.Coinbase, :start_link, [opts]}})
     opts
@@ -29,6 +34,43 @@ defmodule DpExchange.Coinbase.SupervisorTest do
       assert DpExchange.Coinbase.capabilities().public_ceiling == %{limit: 3, per_ms: 1_000}
 
       # Three per second declared, so three immediate acquires and no fourth.
+      for _i <- 1..3 do
+        assert :ok = DefaultRateLimiter.acquire(:coinbase, 1, limiter: limiter, timeout: 0)
+      end
+
+      assert {:error, :rate_limit_timeout} =
+               DefaultRateLimiter.acquire(:coinbase, 1, limiter: limiter, timeout: 0)
+    end
+
+    test "with credentials, the limiter is configured from the AUTHENTICATED ceiling" do
+      # `capabilities/0`'s own moduledoc claim — "Pass credentials and this package uses
+      # the authenticated path, which has the higher ceiling" — is a promise about the
+      # mechanism, not just the declaration. Before this fix `limits/1` read only
+      # `public_ceiling` regardless of `opts[:credentials]`, which throttled a
+      # credentialed consumer's authenticated traffic to a third of what the venue
+      # actually allows it, silently.
+      opts = start_venue(credentials: %{api_key: "k", api_secret: "cw=="})
+      limiter = VenueSupervisor.limiter_name(opts)
+
+      caps = DpExchange.Coinbase.capabilities()
+      assert caps.authenticated_ceiling == %{limit: 10, per_ms: 1_000}
+
+      for _i <- 1..10 do
+        assert :ok = DefaultRateLimiter.acquire(:coinbase, 1, limiter: limiter, timeout: 0)
+      end
+
+      assert {:error, :rate_limit_timeout} =
+               DefaultRateLimiter.acquire(:coinbase, 1, limiter: limiter, timeout: 0)
+    end
+
+    test "an empty credentials map does not buy the higher ceiling" do
+      # `%{}` is truthy but names no actual credential — `Rest`'s own request paths treat
+      # it the same as absent (`if credentials, do: authenticated_path, else: public_path`
+      # would be wrong for `%{}` too, which is why this is worth pinning down here rather
+      # than assuming `Keyword.get/2` truthiness is enough).
+      opts = start_venue(credentials: %{})
+      limiter = VenueSupervisor.limiter_name(opts)
+
       for _i <- 1..3 do
         assert :ok = DefaultRateLimiter.acquire(:coinbase, 1, limiter: limiter, timeout: 0)
       end

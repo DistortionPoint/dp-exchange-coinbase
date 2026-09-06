@@ -386,7 +386,85 @@ acceptable changelog line.
   subscribes or delivered frames follow — and `rest_test.exs` covers `get_alias_map/1`
   itself against a catalogue shaped like the live response captured while proving this.
 
+- **`Supervisor`'s own rate limiter was configured from `public_ceiling` unconditionally,
+  contradicting `capabilities/0`'s own documented promise that credentials buy the higher
+  ceiling.** `capabilities/0` states outright: *"Pass credentials and this package uses
+  the authenticated path, which has the higher ceiling."* `Rest`'s request paths honour
+  that — but `Supervisor`'s `init/1` started `DefaultRateLimiter` from `caps.public_ceiling`
+  (3 req/s) for every instance, credentialed or not, so a consumer supplying credentials
+  got the documented 10 req/s from the venue and a third of that from this package's own
+  throttle regardless — a mechanism silently disagreeing with the declaration it exists to
+  encode, per this module's own moduledoc rule. `limits/1` now reads `opts[:credentials]`
+  (the same opts `Feed` reads it from) and configures the bucket from
+  `authenticated_ceiling` when a non-empty credential map was given, `public_ceiling`
+  otherwise. New tests in `supervisor_test.exs` prove both ceilings actually reach the
+  running limiter, and that an empty `%{}` does not buy the higher one.
+
+- **A shard whose socket failed to open at all was silent at the facade — no
+  `Core.Notice`, only a `Logger.warning` that never crosses it.** Every shard beyond the
+  first opens asynchronously; when its `Socket.start_link/1` failed (a transient connect
+  refusal, a timeout), `handle_info({:open_shard, _, _}, _)` logged and stopped, leaving
+  those symbols silently absent from `coverage/1` with nothing telling a consumer why —
+  the exact "silent half-dead feed" this module's own moduledoc is about, and worse than
+  the channel-subscribe case one section up, which already got a `:coverage_change`
+  notice for the identical shape of fact (subscribed intent that did not become
+  delivery). Now emits one, through the same `notify_shard_open_failed/3` path.
+
+  **Worse: a shard that failed to open had no automatic recovery path at all.** The
+  unconditional `:resubscribe` tick only ever walked `state.shards` — a shard whose
+  socket never opened is not a key in it, so the tick had nothing to re-issue for it, and
+  the only thing that would ever reconsider it was a fresh `subscribe/3` or
+  `update_symbols/2` call, which may never come for a consumer whose scope is stable
+  after boot. `retry_missing_shards/1` closes this: on every `:resubscribe` tick, any
+  shard `state.wanted` still implies but `state.shards` has no entry for is retried on
+  the same unconditional cadence an already-open shard's subscriptions are re-issued on,
+  staggered past them by the usual `@shard_spacing_ms`. New tests in `feed_test.exs`
+  cover both: the notice on a failed open, and the tick recovering a shard that never
+  opened.
+
+- **Reconciling more than one ALREADY-OPEN shard in a single `update_symbols/2` call
+  dropped the stagger between them — only a brand-new shard's connect was staggered.**
+  `reshard/1` computes `position * @shard_spacing_ms` for every shard beyond the
+  synchronous primary and hands it to `touch_shard/4`, but `reconcile_shard/6` (an
+  existing, already-open shard) never received it — every already-open shard a single
+  call touched had its `level2` subscribe scheduled at the identical instant regardless
+  of position. This is not the connect burst `@shard_spacing_ms` was written against (no
+  new socket opens here), but a related hazard: `Socket.subscribe/4` blocks THIS `Feed`
+  process — via `FrameSender`, up to `WebSockex.send_frame/2`'s 5s window — for as long
+  as its target socket takes to acknowledge, and several such messages landing in this
+  process's single mailbox together serialise into back-to-back blocking sends, capable
+  of stalling `coverage/1` and every other call to this `Feed` for as long as the
+  slowest one takes. `reconcile_shard/7` now receives and applies the same `delay`
+  `open_shard/5` already did. A new test in `feed_test.exs` proves it with two live
+  sockets recording arrival time: touching two already-open shards in one call now
+  delivers their first frames `@shard_spacing_ms` apart, not together.
+
+- **`Fake`'s `get_top_of_book/2` ignored `opts[:credentials]` entirely,
+  making the fake MORE capable than the real venue on the one call where that gap
+  matters.** `Rest.get_top_of_book/2` refuses `{:refused, :missing_credentials}` before
+  sending anything when given none — `/best_bid_ask` has no public form on this venue,
+  confirmed live (`401` authenticated, `404` at the `/market/...` path a caller would
+  expect). The fake answered `{:ok, %Types.TopOfBook{}}` regardless, so a consumer's test
+  written without credentials would pass against the fake and refuse identically in
+  production — precisely the silent "differently capable" divergence this module's own
+  moduledoc says it exists to prevent (*"Six were loud... Three were silent, and those
+  are the ones this is designed against"*). The fake now refuses the same way, gated on
+  the same field. New tests in `fake_test.exs` and an updated one in
+  `fake_injection_test.exs` (which previously called it with no credentials at all and
+  got away with it) cover both branches.
+
 ### Documentation
+
+- **CLAUDE.md claimed this package parses Coinbase's `cb-after` / `cb-before`
+  rate-limit headers; it deliberately does not, and never has.** Those are pagination
+  cursors, not rate-limit data, and Coinbase publishes no `x-ratelimit-*` or
+  `retry-after` either — measured live 2026-08-28. A prior adapter's parser keyed off
+  the cursor headers and returned three hardcoded constants labelled as measurements
+  (`remaining: 100`, `limit: 100`, a reset time one minute out); porting it would have
+  been exactly the fabrication this family refuses — recorded in
+  `docs/reference/coinbase/reconciliation.md` §5.5, which CLAUDE.md's own claim
+  contradicted. Corrected to state what actually happens: nothing is parsed, and
+  `Core.HttpClient`'s generic parser correctly answers `nil`.
 
 - **`docs/reference/coinbase/endpoint-inventory.md` still listed `/best_bid_ask` and
   `/product_book` as not implemented — family-wide defect sweep, Coinbase B3.** Both were

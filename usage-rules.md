@@ -18,6 +18,12 @@ convenience: `Core.HttpClient` fails closed when no limiter is reachable, so a v
 package that expected someone else to start one answers `{:error, "Rate limiter
 unavailable"}` to everything.
 
+**Which of the two declared ceilings the limiter is configured from follows whether you
+passed `credentials:` above** — see "Credentials choose the endpoint" below. Pass none
+and the limiter runs at `public_ceiling`; pass a non-empty credential map and it runs at
+`authenticated_ceiling` instead, matching whichever request path `Rest` actually takes for
+this instance.
+
 Running two — two credentials, two scopes — needs distinct names:
 
 ```elixir
@@ -137,12 +143,27 @@ it happened both from an explicit `resubscribe_interval_ms: 5_000` and from the 
 *default* past twelve shards (1,101 symbols at 100/socket). There is no way to make this
 package re-issue faster than that floor — only a log line explaining why it didn't.
 
+**A shard whose socket never opened at all is retried on this same cadence, and it says
+so.** A transient connect failure on a shard beyond the first (a brief DNS blip, a refused
+connection) used to have no automatic recovery — nothing re-asked the venue for it until
+you called `subscribe/3` or `update_symbols/2` again yourself, which may never happen if
+your scope is stable after boot. It is now retried on every unconditional tick alongside
+already-open shards' own resubscribes, and `subscribe_notices/1` receives a
+`:coverage_change` notice the moment the attempt fails — the same kind a channel that
+never subscribed already produces — so you learn about it rather than inferring it from a
+symbol that quietly never joined `coverage/1`.
+
 ## Testing against this package
 
 Use `DpExchange.Coinbase.Fake`, selected per process through `DpExchange.Core.Config`. It
 is a real implementation of the facade that answers from memory, models Coinbase's
 refusals — unlisted symbols, `12h`, the 350 boundary — and passes the same conformance
 suite as the real adapter.
+
+**`get_top_of_book/2` refuses without `opts[:credentials]`, in the fake too** — the one
+call this venue genuinely requires them for (see above). A test calling it with none gets
+`{:refused, :missing_credentials}` against both the fake and the real client, on purpose:
+a fake that answered `:ok` regardless would pass a suite that then refuses in production.
 
 **Do not point tests at the live venue.** This package's own tier-2 tests do that, tagged
 and excluded, run by hand. A venue that sees a package polling it on a timer will

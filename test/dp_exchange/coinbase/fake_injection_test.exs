@@ -180,8 +180,12 @@ defmodule DpExchange.Coinbase.FakeInjectionTest do
     test "get_top_of_book/2 only fails for the targeted symbol" do
       FakeInjection.fail_always(:coinbase, "BTC-USD", {:error, :injected})
 
-      assert Fake.get_top_of_book("BTC-USD") == {:error, :injected}
-      assert {:ok, _tob} = Fake.get_top_of_book("ETH-USD")
+      # Credentials are required here — see the real client's own moduledoc: this is the
+      # one endpoint with no public form, and the fake refuses without them exactly as
+      # the venue does.
+      opts = [credentials: %{api_key: "k", api_secret: "s"}]
+      assert Fake.get_top_of_book("BTC-USD", opts) == {:error, :injected}
+      assert {:ok, _tob} = Fake.get_top_of_book("ETH-USD", opts)
     end
 
     test "get_historical_prices/4 only fails for the targeted symbol" do

@@ -10,6 +10,21 @@ defmodule DpExchange.Coinbase.Supervisor do
   configured with.** The declaration is not decoration that happens to sit beside the
   mechanism — it *is* the mechanism's configuration, so the two cannot drift apart.
 
+  ## The ceiling follows whether this instance was given credentials
+
+  `capabilities/0` declares two ceilings and says outright that credentials buy the
+  higher one: *"Pass credentials and this package uses the authenticated path, which has
+  the higher ceiling; pass none and it uses the public one."* That is a claim about
+  `Rest`'s request paths, and the limiter has to agree with it — a limiter fixed at
+  `public_ceiling` regardless of `opts[:credentials]` would throttle a credentialed
+  consumer's authenticated calls to a third of what the venue actually allows them,
+  while the moduledoc kept promising the higher number. `limits/1` reads the same
+  `opts` this supervisor was started with (the same map `Feed` reads `:credentials`
+  out of) and configures the bucket from `authenticated_ceiling` when one was given,
+  `public_ceiling` otherwise — so the mechanism agrees with the declaration for
+  whichever path this instance is actually going to take, not only for the
+  unauthenticated one.
+
   It also fixes a real usability trap. `Core.HttpClient` fails closed when no limiter is
   running, which is correct — an unmetered package is how a venue answers with HTTP 429
   while a budget panel reads comfortable. But it means a venue package that expected
@@ -44,7 +59,7 @@ defmodule DpExchange.Coinbase.Supervisor do
     # second instance collides with the first, which is a failure at start rather than in
     # production but is still a failure a consumer should not have to discover.
     children = [
-      {DefaultRateLimiter, name: limiter_name(opts), limits: limits()},
+      {DefaultRateLimiter, name: limiter_name(opts), limits: limits(opts)},
       {Feed, Keyword.put(opts, :name, feed_name(opts))}
     ]
 
@@ -62,13 +77,28 @@ defmodule DpExchange.Coinbase.Supervisor do
   def feed_name(opts), do: Keyword.get(opts, :feed, Feed)
 
   # Straight from the declaration. If a ceiling changes, it changes in one place.
-  defp limits do
+  #
+  # `opts[:credentials]` decides which of the two declared ceilings applies — see the
+  # moduledoc's "The ceiling follows whether this instance was given credentials"
+  # section. An empty map is treated the same as none: `Rest`'s own request paths key
+  # off `Keyword.get(opts, :credentials)` being truthy, and `%{}` is truthy but carries
+  # no actual credential, so a caller passing one through by accident must not silently
+  # buy a higher ceiling than it can use.
+  defp limits(opts) do
     caps = DpExchange.Coinbase.capabilities()
+    ceiling = if authenticated?(opts), do: caps.authenticated_ceiling, else: caps.public_ceiling
 
     %{
-      coinbase: to_limit(caps.public_ceiling),
-      default: to_limit(caps.public_ceiling)
+      coinbase: to_limit(ceiling),
+      default: to_limit(ceiling)
     }
+  end
+
+  defp authenticated?(opts) do
+    case Keyword.get(opts, :credentials) do
+      %{} = credentials -> map_size(credentials) > 0
+      _absent -> false
+    end
   end
 
   # Burst equal to the per-second allowance: the venue's published limit is a rate, and a

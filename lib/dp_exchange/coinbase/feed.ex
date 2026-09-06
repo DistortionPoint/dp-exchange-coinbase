@@ -128,6 +128,18 @@ defmodule DpExchange.Coinbase.Feed do
   60-second unconditional resubscribe re-issued the same burst every minute. Both paths
   now schedule each shard's turn `position * @shard_spacing_ms` after the one before it.
 
+  **This staggering has to reach an already-open shard too, not only a brand-new
+  connection.** `reconcile_shard/7` used to receive the same `delay` `reshard/1` computes
+  for it and drop it on the floor — every already-open shard `update_symbols/2` touches in
+  one call had its `level2` subscribe scheduled at the identical instant. That is not the
+  connect burst above (no new socket opens), but it is a related hazard: `Socket.
+  subscribe/4` blocks THIS `GenServer` — via `FrameSender`, up to `WebSockex.send_frame/2`'s
+  5s window — for as long as its target socket takes to acknowledge, and several such
+  messages landing in this process's own mailbox together serialise into back-to-back
+  blocking sends, stalling `coverage/1` and every other call to this `Feed` for as long as
+  the slowest one takes. Fixed the same way: `delay` now reaches `reconcile_shard/7` and
+  staggers its frames exactly as it already staggered a new shard's.
+
   ## The venue rewrites an aliased product id on delivery, and that has to be undone HERE
 
   **Measured live, 2026-09-05**, against `wss://advanced-trade-ws.coinbase.com`:
@@ -651,12 +663,24 @@ defmodule DpExchange.Coinbase.Feed do
       {:error, reason} ->
         # Never silent: this shard's symbols keep arriving over whatever REST poll runs
         # beside this feed, but at poll cadence rather than stream cadence, and that
-        # difference has to be findable rather than inferred from a quiet chart.
+        # difference has to be findable rather than inferred from a quiet chart. A
+        # `Logger.warning` alone does not make that findable — it never crosses the
+        # facade, and a consumer's only facade-level window onto this feed's health is
+        # `coverage/1`, `coverage_by_kind/1` and `subscribe_notices/1`. Before this fix
+        # this branch logged and nothing else: a shard whose socket never opened at all —
+        # the async path every shard past the first (or a resharded existing shard) takes
+        # — left its symbols silently absent from coverage with no `Core.Notice` telling a
+        # consumer why, the exact "silent half-dead feed" this module's own moduledoc is
+        # about. `notify_shard_open_failed/3` closes that gap with the same
+        # `:coverage_change` kind `notify_subscribe_failed/5` already uses for a channel
+        # that never subscribed — both are "subscribed intent that did not become
+        # delivery".
         Logger.warning(
           "[Coinbase Feed] shard #{index} did not open (#{inspect(reason)}) — " <>
             "its #{length(symbols)} symbol(s) stay on the internal poll only"
         )
 
+        notify_shard_open_failed(state, index, symbols, reason)
         {:noreply, state}
     end
   end
@@ -695,6 +719,19 @@ defmodule DpExchange.Coinbase.Feed do
         )
       end
     end)
+
+    # A shard that never got a socket in the first place — its async `:open_shard`
+    # connect failed or timed out — is absent from `state.shards` entirely, so the walk
+    # above never touches it: there is nothing there to resubscribe. Without this, such a
+    # shard has NO automatic recovery path at all, ever — `reshard/1` only reconsiders it
+    # on the next explicit `subscribe/3`, `unsubscribe/2` or `update_symbols/2` call, which
+    # may never come if a consumer's scope is stable. That is a silent, permanent coverage
+    # gap indistinguishable from a quiet market, on a venue this coordinator's OWN
+    # moduledoc says must never go unretried. Retrying it here, on the same unconditional
+    # cadence an already-open shard's subscriptions are re-issued on, closes that gap —
+    # staggered past whatever this tick already scheduled for open shards, for the same
+    # connect-burst reason `@shard_spacing_ms` exists everywhere else in this module.
+    retry_missing_shards(state)
 
     {:noreply, state}
   end
@@ -745,6 +782,34 @@ defmodule DpExchange.Coinbase.Feed do
     else
       state.resubscribe_interval_ms
     end
+  end
+
+  # Re-attempts opening any shard `state.wanted` implies that is not currently a key in
+  # `state.shards` — see `handle_info(:resubscribe, _)` for why this exists: a shard whose
+  # socket never opened has no other automatic recovery path. Computed the same way
+  # `reshard/1` computes `new_shards`, so the indices agree with whatever a fresh
+  # `subscribe/3` or `update_symbols/2` call would also compute for the same `wanted` set.
+  #
+  # Staggered starting one `@shard_spacing_ms` past every already-open shard's own
+  # resubscribe slot (`map_size(state.shards)` of them, scheduled just above), so a retry
+  # here never lands in the same instant as an open shard's unconditional resubscribe.
+  defp retry_missing_shards(state) do
+    existing = Map.keys(state.shards)
+    base = map_size(state.shards)
+
+    state.wanted
+    |> MapSet.to_list()
+    |> shards()
+    |> Enum.with_index()
+    |> Enum.reject(fn {_symbols, index} -> index in existing end)
+    |> Enum.with_index()
+    |> Enum.each(fn {{symbols, index}, position} ->
+      Process.send_after(
+        self(),
+        {:open_shard, index, symbols},
+        (base + position) * @shard_spacing_ms
+      )
+    end)
   end
 
   # Recomputes shards from `state.wanted` and reconciles: a shard whose symbol set
@@ -841,7 +906,7 @@ defmodule DpExchange.Coinbase.Feed do
         open_shard(state, index, wanted_symbols, sync?, delay)
 
       %{symbols: current, socket: socket} ->
-        reconcile_shard(state, index, socket, current, wanted_symbols, sync?)
+        reconcile_shard(state, index, socket, current, wanted_symbols, sync?, delay)
     end
   end
 
@@ -863,7 +928,7 @@ defmodule DpExchange.Coinbase.Feed do
     {:ok, state}
   end
 
-  defp reconcile_shard(state, index, socket, current, wanted, true) do
+  defp reconcile_shard(state, index, socket, current, wanted, true, _delay) do
     added = wanted -- current
     removed = current -- wanted
 
@@ -894,18 +959,31 @@ defmodule DpExchange.Coinbase.Feed do
     {result, put_in(state.shards[index], %{socket: socket, symbols: wanted})}
   end
 
-  defp reconcile_shard(state, index, socket, current, wanted, false) do
+  # `delay` staggers this shard's frames past every OTHER shard `reshard/1` is touching in
+  # the same call, the same way `open_shard/5`'s async clause already staggers opening a
+  # brand-new socket — see `reshard/1`'s "position * @shard_spacing_ms" comment. Before
+  # this fix `delay` was computed by `reshard/1` and then silently dropped here: a single
+  # `update_symbols/2` that reshuffled several ALREADY-OPEN shards at once scheduled every
+  # one of their `level2` subscribes at the same instant regardless. Because `Socket.
+  # subscribe/4` blocks THIS process (via `FrameSender`, up to `WebSockex.send_frame/2`'s
+  # 5s window) once `attempt_channel_subscribe/6` runs it, several such messages landing on
+  # this GenServer's mailbox together serialise into back-to-back blocking sends — a socket
+  # answering slowly stalls this shard's own subscribe AND every later one queued behind
+  # it in the SAME mailbox, taking `coverage/1`, `subscribe/3` and every other call to this
+  # `Feed` down with it for as long as the stall lasts. Staggering by `delay` spreads that
+  # risk out exactly as it already is for a newly-opened shard.
+  defp reconcile_shard(state, index, socket, current, wanted, false, delay) do
     added = wanted -- current
     removed = current -- wanted
 
     if removed != [] and Process.alive?(socket) do
       Enum.each(channels_for(state.credentials), fn channel ->
-        Process.send_after(self(), {:channel_unsubscribe, socket, channel, removed}, 0)
+        Process.send_after(self(), {:channel_unsubscribe, socket, channel, removed}, delay)
       end)
     end
 
     if added != [] and Process.alive?(socket) do
-      schedule_channel_subscribes(socket, added, state.credentials)
+      schedule_channel_subscribes(socket, added, state.credentials, delay)
     end
 
     {:ok, put_in(state.shards[index], %{socket: socket, symbols: wanted})}
@@ -930,7 +1008,10 @@ defmodule DpExchange.Coinbase.Feed do
     end)
   end
 
-  defp schedule_channel_subscribes(socket, symbols, credentials) do
+  # `base_delay` lets a caller stagger this shard's whole channel sequence past another
+  # shard's — see `reconcile_shard/7`'s async clause. Every existing caller passes none,
+  # which is `0` and reproduces the exact scheduling this had before that parameter existed.
+  defp schedule_channel_subscribes(socket, symbols, credentials, base_delay \\ 0) do
     credentials
     |> channels_for()
     |> Enum.with_index()
@@ -938,7 +1019,7 @@ defmodule DpExchange.Coinbase.Feed do
       Process.send_after(
         self(),
         {:channel_subscribe, socket, channel, symbols, credentials},
-        channel_index * @channel_spacing_ms
+        base_delay + channel_index * @channel_spacing_ms
       )
     end)
   end
@@ -1037,6 +1118,26 @@ defmodule DpExchange.Coinbase.Feed do
         severity: :warning,
         message: "#{channel} subscribe for #{length(symbols)} symbol(s) never took — #{outlook}",
         details: %{channel: channel, symbol_count: length(symbols), reason: inspect(reason)}
+      )
+
+    fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})
+  end
+
+  # A shard whose socket never opened at all — connect refused, timed out, or DNS
+  # failed — is the same "subscribed intent that did not become delivery" fact as a
+  # channel that failed to subscribe on an already-open socket, so it gets the same
+  # `:coverage_change` kind `notify_subscribe_failed/5` uses. See
+  # `handle_info({:open_shard, _, _}, _)` for why a `Logger.warning` alone was not enough:
+  # it never crosses the facade, and this shard's symbols are otherwise silently absent
+  # from `coverage/1` with nothing telling a consumer why.
+  defp notify_shard_open_failed(state, index, symbols, reason) do
+    notice =
+      Notice.new(:coverage_change, :coinbase,
+        severity: :warning,
+        message:
+          "shard #{index} (#{length(symbols)} symbol(s)) did not open — " <>
+            "staying on the internal poll until the next resubscribe cycle retries it",
+        details: %{shard: index, symbol_count: length(symbols), reason: inspect(reason)}
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})

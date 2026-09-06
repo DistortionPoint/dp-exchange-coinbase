@@ -115,27 +115,39 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  # **`get_top_of_book/2` is the one endpoint on this venue with no public form** — see
+  # `DpExchange.Coinbase.Rest.get_top_of_book/2`'s moduledoc: `/best_bid_ask` answers `401`
+  # unauthenticated and has no `/market/...` counterpart, so the real client refuses with
+  # `{:refused, :missing_credentials}` before a request is even built. A fake that answered
+  # `:ok` regardless of `opts[:credentials]` would be *more* capable than the venue on
+  # exactly the one call where that gap matters — a consumer's test would pass without
+  # credentials and the same call would refuse in production, which is the silent
+  # "differently capable" divergence this module's own moduledoc says it exists to prevent.
   @impl true
-  def get_top_of_book(symbol, _opts \\ []) do
+  def get_top_of_book(symbol, opts \\ []) do
     with_injection(symbol, fn ->
-      case Map.fetch(@price, symbol) do
-        {:ok, price} ->
-          {:ok,
-           %Types.TopOfBook{
-             symbol: symbol,
-             # A spread around the fake's price, and the bid deliberately not equal to it: a
-             # test that passes only when they coincide is not testing the split.
-             bid: Decimal.sub(Decimal.new(price), Decimal.new("0.40")),
-             ask: Decimal.add(Decimal.new(price), Decimal.new("0.60")),
-             bid_size: nil,
-             ask_size: nil,
-             venue_time: @at,
-             observed_at: @at,
-             provider: :coinbase
-           }}
+      if is_nil(Keyword.get(opts, :credentials)) do
+        {:refused, :missing_credentials}
+      else
+        case Map.fetch(@price, symbol) do
+          {:ok, price} ->
+            {:ok,
+             %Types.TopOfBook{
+               symbol: symbol,
+               # A spread around the fake's price, and the bid deliberately not equal to it: a
+               # test that passes only when they coincide is not testing the split.
+               bid: Decimal.sub(Decimal.new(price), Decimal.new("0.40")),
+               ask: Decimal.add(Decimal.new(price), Decimal.new("0.60")),
+               bid_size: nil,
+               ask_size: nil,
+               venue_time: @at,
+               observed_at: @at,
+               provider: :coinbase
+             }}
 
-        :error ->
-          {:refused, :not_listed}
+          :error ->
+            {:refused, :not_listed}
+        end
       end
     end)
   end

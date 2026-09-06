@@ -70,6 +70,30 @@ defmodule DpExchange.Coinbase.FakeTest do
     end
   end
 
+  describe "get_top_of_book/2 — the one endpoint with no public form" do
+    test "without credentials it refuses, exactly as the real client does" do
+      # DpExchange.Coinbase.Rest.get_top_of_book/2 refuses before sending anything when
+      # given no credentials, because /best_bid_ask has no /market/... counterpart on this
+      # venue. A fake that answered :ok regardless would be MORE capable than the real
+      # venue on the one call where that gap matters — a consumer's test would pass
+      # without credentials and the identical call would refuse in production.
+      assert {:refused, :missing_credentials} = Fake.get_top_of_book("BTC-USD")
+      assert {:refused, :missing_credentials} = Fake.get_top_of_book("BTC-USD", [])
+    end
+
+    test "with credentials it answers, with the bid split from the price" do
+      opts = [credentials: %{api_key: "k", api_secret: "cw=="}]
+
+      assert {:ok, %Types.TopOfBook{} = top} = Fake.get_top_of_book("BTC-USD", opts)
+      refute Decimal.equal?(top.bid, top.ask)
+    end
+
+    test "an unlisted symbol is refused as :not_listed, credentials notwithstanding" do
+      opts = [credentials: %{api_key: "k", api_secret: "cw=="}]
+      assert {:refused, :not_listed} = Fake.get_top_of_book("NOPE-USD", opts)
+    end
+  end
+
   describe "candles" do
     test "the fake returns bars, not quotes" do
       # It returned `get_price/2`'s Quote here, which agreed with the real package's own

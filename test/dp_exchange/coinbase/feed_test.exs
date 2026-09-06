@@ -41,6 +41,17 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
   end
 
+  # Deterministic instead of `spawn(fn -> :ok end)` plus a guessed sleep: a monitor's
+  # `:DOWN` message only arrives once the process has genuinely exited, so a "dead
+  # socket"/"dead subscriber" test never races a scheduler slower than whatever fixed
+  # delay was guessed.
+  defp dead_pid do
+    pid = spawn(fn -> :ok end)
+    ref = Process.monitor(pid)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 500
+    pid
+  end
+
   defp order_book_for(symbol) do
     %Types.OrderBook{
       symbol: symbol,
@@ -173,8 +184,10 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed = start_feed()
 
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
-      Process.sleep(20)
 
+      # No sleep needed: `Feed.coverage/1` is a `GenServer.call`, so it queues behind the
+      # raw `send/2` above in the same mailbox and cannot be answered until that message
+      # has already been handled.
       assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
     end
 
@@ -188,8 +201,8 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
       send(feed, {:dp_exchange, :coinbase, quote_for("ETH-USD")})
-      Process.sleep(20)
 
+      # `Feed.update_symbols/2` is itself a call, so it already queues behind both sends.
       assert :ok = Feed.update_symbols(feed, ~w(ETH-USD))
 
       coverage = Feed.coverage(feed)
@@ -202,7 +215,6 @@ defmodule DpExchange.Coinbase.FeedTest do
       # is a WebSocket is package-internal.
       feed = start_feed()
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
-      Process.sleep(20)
 
       assert %{"BTC-USD" => :stream} = Feed.coverage(feed)
     end
@@ -213,7 +225,6 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed = start_feed()
 
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
-      Process.sleep(20)
 
       by_kind = Feed.coverage_by_kind(feed)
 
@@ -227,7 +238,6 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed = start_feed()
 
       send(feed, {:dp_exchange, :coinbase, order_book_for("XLM-USD")})
-      Process.sleep(20)
 
       by_kind = Feed.coverage_by_kind(feed)
 
@@ -245,7 +255,6 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(feed, {:dp_exchange, :coinbase, quote_for("ETH-USD")})
       send(feed, {:dp_exchange, :coinbase, order_book_for("ETH-USD")})
-      Process.sleep(20)
 
       by_kind = Feed.coverage_by_kind(feed)
       assert by_kind[:quotes] == %{"ETH-USD" => :stream}
@@ -260,7 +269,6 @@ defmodule DpExchange.Coinbase.FeedTest do
       send(feed, {:dp_exchange, :coinbase, order_book_for("XLM-USD")})
       send(feed, {:dp_exchange, :coinbase, quote_for("ETH-USD")})
       send(feed, {:dp_exchange, :coinbase, order_book_for("ETH-USD")})
-      Process.sleep(20)
 
       coverage_symbols = feed |> Feed.coverage() |> Map.keys() |> MapSet.new()
 
@@ -280,7 +288,6 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
       send(feed, {:dp_exchange, :coinbase, order_book_for("XLM-USD")})
-      Process.sleep(20)
 
       declared = MapSet.new(DpExchange.Coinbase.capabilities().streamable)
       reported = feed |> Feed.coverage_by_kind() |> Map.keys() |> MapSet.new()
@@ -302,7 +309,6 @@ defmodule DpExchange.Coinbase.FeedTest do
       # A subscriber is registered by `subscribe/3`; simulate one having been registered
       # by sending through the feed's own inbound path.
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
-      Process.sleep(20)
 
       assert %{"BTC-USD" => :stream} = Feed.coverage(feed)
     end
@@ -320,14 +326,15 @@ defmodule DpExchange.Coinbase.FeedTest do
       # The venue must not hold events for a process that no longer exists.
       feed = start_feed()
 
-      dead = spawn(fn -> :ok end)
-      Process.sleep(10)
-      refute Process.alive?(dead)
+      dead = dead_pid()
 
       Feed.subscribe_notices(feed, to: dead)
       send(feed, {:dp_exchange, :coinbase, Notice.new(:link_up, :coinbase)})
-      Process.sleep(20)
 
+      # `:sys.get_state/1` is a call, so it queues behind the raw `send/2` above and is
+      # only answered once that message has been handled — a deterministic stand-in for
+      # "give the feed a moment", not a guessed duration.
+      :sys.get_state(feed)
       assert Process.alive?(feed)
     end
 
@@ -356,8 +363,8 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       Feed.subscribe_notices(feed, to: name)
       send(feed, {:dp_exchange, :coinbase, Notice.new(:link_up, :coinbase)})
-      Process.sleep(20)
 
+      :sys.get_state(feed)
       assert Process.alive?(feed)
     end
   end
@@ -371,7 +378,7 @@ defmodule DpExchange.Coinbase.FeedTest do
     test "an unknown info is ignored" do
       feed = start_feed()
       send(feed, :nonsense)
-      Process.sleep(20)
+      :sys.get_state(feed)
       assert Process.alive?(feed)
     end
   end
@@ -380,7 +387,6 @@ defmodule DpExchange.Coinbase.FeedTest do
     test "succeeds and drops the symbols" do
       feed = start_feed()
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
-      Process.sleep(20)
 
       assert :ok = Feed.unsubscribe(feed, ~w(BTC-USD))
       assert Feed.coverage(feed) == %{}
@@ -454,8 +460,13 @@ defmodule DpExchange.Coinbase.FeedTest do
       Feed.subscribe_notices(feed, to: self())
 
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
-      Process.sleep(20)
 
+      # `refute_received/1` only inspects THIS process's mailbox as it stands right now,
+      # so the feed must have already finished handling the send above before it runs —
+      # otherwise the assertion would pass whether or not the code under test is correct.
+      # `:sys.get_state/1` is the deterministic way to know that: it queues behind the
+      # send in the feed's own mailbox and only answers once that message is handled.
+      :sys.get_state(feed)
       refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
     end
   end
@@ -466,7 +477,6 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
       send(feed, {:dp_exchange, :coinbase, quote_for("ETH-USD")})
-      Process.sleep(20)
 
       assert :ok = Feed.update_symbols(feed, ~w(BTC-USD SOL-USD))
 
@@ -505,13 +515,22 @@ defmodule DpExchange.Coinbase.FeedTest do
       # own requested name regardless — exactly as the pre-existing "subscribe with a
       # socket that will not connect" tests already establish.
       Feed.subscribe(feed, ~w(XLM-USDC), to: self())
-      Process.sleep(20)
+
+      # `subscribe/3` returning does NOT mean the alias map has arrived: it only
+      # SCHEDULES the fetch (`Process.send_after(self(), :fetch_alias_map, 0)`), a
+      # genuinely separate async message from the timer wheel rather than something
+      # `subscribe/3`'s own call return orders against. Waiting for it directly, rather
+      # than assuming a fixed delay is enough, is what makes the delivery below
+      # deterministic instead of a race between the fetch and the send just after it.
+      wait_until(fn -> :sys.get_state(feed).alias_map_status == :ok end)
 
       # Simulates `Socket` delivering a frame the venue tagged with the canonical id —
       # the live-measured behaviour above — without opening a real connection.
       send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
-      Process.sleep(20)
 
+      # See "notice subscribers do not receive market data" above for why a negative
+      # mailbox assertion needs this sync barrier rather than a sleep.
+      :sys.get_state(feed)
       assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USDC"}}
       refute_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USD"}}
     end
@@ -520,10 +539,10 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed = start_aliased_feed(fn -> {:ok, @alias_map} end)
 
       Feed.subscribe(feed, ~w(XLM-USDC), to: self())
-      Process.sleep(20)
-
+      # See the previous test for why this cannot be assumed complete just because
+      # `subscribe/3` has returned.
+      wait_until(fn -> :sys.get_state(feed).alias_map_status == :ok end)
       send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
-      Process.sleep(20)
 
       assert Feed.coverage(feed) == %{"XLM-USDC" => :stream}
     end
@@ -534,10 +553,9 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed = start_aliased_feed(fn -> {:ok, @alias_map} end)
 
       Feed.subscribe(feed, ~w(XLM-USDC XLM-USD), to: self())
-      Process.sleep(20)
-
+      wait_until(fn -> :sys.get_state(feed).alias_map_status == :ok end)
       send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
-      Process.sleep(20)
+      :sys.get_state(feed)
 
       assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USDC"}}
       assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USD"}}
@@ -551,9 +569,8 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed = start_aliased_feed(fn -> {:ok, @alias_map} end)
 
       Feed.subscribe(feed, ~w(XLM-USDC), to: self())
-      Process.sleep(20)
+      wait_until(fn -> :sys.get_state(feed).alias_map_status == :ok end)
       send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
-      Process.sleep(20)
       assert Feed.coverage(feed) == %{"XLM-USDC" => :stream}
 
       assert :ok = Feed.unsubscribe(feed, ~w(XLM-USDC))
@@ -574,7 +591,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert notice.message =~ "alias catalogue unavailable"
 
       send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
-      Process.sleep(20)
+      :sys.get_state(feed)
 
       # Delivered under the venue's own id — never the caller's requested XLM-USDC —
       # because there is no honest way to know they name the same market without the
@@ -600,10 +617,17 @@ defmodule DpExchange.Coinbase.FeedTest do
       Feed.subscribe(feed, ~w(XLM-USDC), to: self())
       Feed.subscribe(feed, ~w(AVAX-USDC), to: self())
       Feed.update_symbols(feed, ~w(XLM-USDC AVAX-USDC))
-      Process.sleep(20)
 
+      # The three calls above are themselves synchronous, but the fetch they schedule is
+      # NOT — `maybe_schedule_alias_map_fetch/1` only sends itself `:fetch_alias_map`,
+      # it does not run it inline. Waiting for the counter directly, rather than a fixed
+      # sleep, is what actually proves the fetch completed exactly once.
+      wait_until(fn -> :counters.get(counter, 1) == 1 end)
+
+      # None of the raw `send/2` deliveries below go through `subscribe/3` or
+      # `update_symbols/2`, so nothing here can schedule a second fetch — no further
+      # synchronisation is needed before the final assertion.
       for _i <- 1..5, do: send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
-      Process.sleep(20)
 
       assert :counters.get(counter, 1) == 1
     end
@@ -667,7 +691,6 @@ defmodule DpExchange.Coinbase.FeedTest do
       # ever being asked for) has no shard to unsubscribe from, correctly.
       Feed.subscribe(feed, ~w(BTC-USD), to: self())
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
-      Process.sleep(20)
 
       assert {:error, _reason} = Feed.unsubscribe(feed, ~w(BTC-USD))
       assert Feed.coverage(feed) == %{}
@@ -685,8 +708,9 @@ defmodule DpExchange.Coinbase.FeedTest do
       # The whole reason frames go through the guard: a dead socket must not take down
       # the process that would have re-established it.
       {feed, socket} = start_with_socket()
+      ref = Process.monitor(socket)
       Process.exit(socket, :kill)
-      Process.sleep(20)
+      assert_receive {:DOWN, ^ref, :process, ^socket, _reason}, 500
 
       assert {:error, _reason} = Feed.subscribe(feed, ~w(BTC-USD), to: self())
       assert Process.alive?(feed)
@@ -728,13 +752,21 @@ defmodule DpExchange.Coinbase.FeedTest do
            alias_map_source: fn -> {:ok, %{}} end}
         )
 
+      :ok = Feed.subscribe_notices(feed, to: self())
+
       # The first shard is synchronous (this call's own reply); the second is
       # deliberately staggered by @shard_spacing_ms so as not to burst-connect. The
-      # endpoint is unreachable, so both attempts fail — what matters is that BOTH
-      # shards get attempted rather than only the first, and that the process survives
-      # both failures.
+      # endpoint is unreachable, so both attempts fail — proven here by BOTH actually
+      # being observed to fail, not merely by the process surviving a brief pause: the
+      # synchronous first shard's failure is this call's own reply, and the async
+      # second shard's failure now emits a `:coverage_change` Notice (see
+      # `notify_shard_open_failed/3`) once its staggered attempt actually runs, roughly
+      # `@shard_spacing_ms` later.
       assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
-      Process.sleep(50)
+
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :coverage_change, details: %{shard: 1}}},
+                     6_000
 
       assert Process.alive?(feed)
     end
@@ -756,8 +788,19 @@ defmodule DpExchange.Coinbase.FeedTest do
            alias_map_source: fn -> {:ok, %{}} end}
         )
 
+      :ok = Feed.subscribe_notices(feed, to: self())
       assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
-      Process.sleep(50)
+
+      # Shard 1 fails roughly one @shard_spacing_ms out, shard 2 roughly two out — proof
+      # every shard past the first got its own tick rather than all of them bursting
+      # together (DpCryptoManagement's issue #20).
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :coverage_change, details: %{shard: 1}}},
+                     6_000
+
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :coverage_change, details: %{shard: 2}}},
+                     6_000
 
       assert Process.alive?(feed)
     end
@@ -798,6 +841,28 @@ defmodule DpExchange.Coinbase.FeedTest do
       end
 
       fake_socket_loop()
+    end
+
+    # Reports WHEN it received a send, tagged with `label`, to `test_pid` — the proof
+    # `reconcile_shard/7`'s stagger actually works: two sockets' first frames arriving
+    # `@shard_spacing_ms` apart, not proximity in the log or the process staying alive.
+    defp timing_socket(test_pid, label) do
+      pid = spawn(fn -> timing_socket_loop(test_pid, label) end)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp timing_socket_loop(test_pid, label) do
+      receive do
+        {:"$websockex_send", from, _frame} ->
+          send(test_pid, {:frame_at, label, System.monotonic_time(:millisecond)})
+          :gen.reply(from, :ok)
+
+        _other ->
+          :ok
+      end
+
+      timing_socket_loop(test_pid, label)
     end
 
     # Fails `fail_times` sends with `{:error, :send_timeout}`, then answers `:ok` forever
@@ -865,13 +930,20 @@ defmodule DpExchange.Coinbase.FeedTest do
         )
 
       send(feed, {:open_shard, 0, ["BTC-USD"]})
-      Process.sleep(20)
 
+      # `:sys.get_state/1` already queues behind the send above, so it is the sync
+      # barrier as well as the assertion — no separate sleep needed.
       state = :sys.get_state(feed)
       assert %{0 => %{socket: ^socket, symbols: ["BTC-USD"]}} = state.shards
     end
 
-    test "an :open_shard message whose socket cannot open logs and leaves the shard absent" do
+    test "an :open_shard message whose socket cannot open logs, leaves the shard " <>
+           "absent, and emits a :coverage_change Notice — never silent at the facade" do
+      # Before this fix, a shard whose socket never opened at all only logged — a
+      # `Logger.warning` never crosses the facade, and a consumer's only window onto this
+      # feed's health is `coverage/1`, `coverage_by_kind/1` and `subscribe_notices/1`. This
+      # pins the fix: the same `:coverage_change` kind a failed channel subscribe already
+      # uses, so a subscriber listening for one already hears the other.
       feed =
         start_supervised!(
           {Feed,
@@ -880,22 +952,79 @@ defmodule DpExchange.Coinbase.FeedTest do
            alias_map_source: fn -> {:ok, %{}} end}
         )
 
+      :ok = Feed.subscribe_notices(feed, to: self())
       send(feed, {:open_shard, 0, ["BTC-USD"]})
-      Process.sleep(50)
 
-      state = :sys.get_state(feed)
-      assert state.shards == %{}
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :coverage_change, provider: :coinbase} = notice},
+                     500
+
+      assert notice.details.shard == 0
+      assert notice.details.symbol_count == 1
+
       assert Process.alive?(feed)
+      assert :sys.get_state(feed).shards == %{}
+    end
+
+    test "the :resubscribe tick retries a shard that never opened at all" do
+      # Before this fix, a shard whose socket failed on its async `:open_shard` had NO
+      # automatic recovery path — only a fresh `subscribe/3` or `update_symbols/2` call
+      # would ever reconsider it, which may never come for a consumer whose scope is
+      # stable. `state.wanted` still names the shard's symbols even though `state.shards`
+      # never got an entry for it; `retry_missing_shards/1` retries it on the same
+      # unconditional cadence an already-open shard's own subscriptions get re-issued on.
+      socket = fake_socket()
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           socket: socket,
+           alias_map_source: fn -> {:ok, %{}} end}
+        )
+
+      :sys.replace_state(feed, fn state -> %{state | wanted: MapSet.new(["BTC-USD"])} end)
+      assert :sys.get_state(feed).shards == %{}
+
+      send(feed, :resubscribe)
+
+      wait_until(fn ->
+        match?(%{0 => %{socket: ^socket, symbols: ["BTC-USD"]}}, :sys.get_state(feed).shards)
+      end)
+    end
+
+    test "the :resubscribe tick leaves an already-open shard alone" do
+      # A shard already in `state.shards` must not be touched by `retry_missing_shards/1`
+      # — that would be a second, redundant `:open_shard` racing the unconditional
+      # `:resubscribe_shard` this same tick already scheduled for it above.
+      feed = start_feed()
+      existing_socket = fake_socket()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | wanted: MapSet.new(["BTC-USD"]),
+            shards: %{0 => %{socket: existing_socket, symbols: ["BTC-USD"]}}
+        }
+      end)
+
+      send(feed, :resubscribe)
+
+      # `:sys.get_state/1` is a call, so it queues behind the `:resubscribe` info message
+      # and is answered only once that handler has returned — no sleep needed to know the
+      # tick itself has run. `retry_missing_shards/1` schedules nothing further for shard 0
+      # (it is not missing), so there is no later async mutation to race either.
+      assert :sys.get_state(feed).shards == %{
+               0 => %{socket: existing_socket, symbols: ["BTC-USD"]}
+             }
     end
 
     test "a :channel_subscribe message against a dead socket is skipped rather than raising" do
       feed = start_feed()
-      dead = spawn(fn -> :ok end)
-      Process.sleep(10)
-      refute Process.alive?(dead)
+      dead = dead_pid()
 
       send(feed, {:channel_subscribe, dead, "ticker", ["BTC-USD"], nil})
-      Process.sleep(20)
+      :sys.get_state(feed)
 
       assert Process.alive?(feed)
     end
@@ -905,7 +1034,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       socket = fake_socket()
 
       send(feed, {:channel_subscribe, socket, "ticker", ["BTC-USD"], nil})
-      Process.sleep(20)
+      :sys.get_state(feed)
 
       assert Process.alive?(feed)
     end
@@ -1014,14 +1143,12 @@ defmodule DpExchange.Coinbase.FeedTest do
 
     test "a socket that dies between retry attempts stops the chain without crashing" do
       feed = start_feed()
-      dead = spawn(fn -> :ok end)
-      Process.sleep(10)
-      refute Process.alive?(dead)
+      dead = dead_pid()
 
       # Stands in for the scheduled retry message this module sends itself — the socket
       # already died between the attempt that failed and this one.
       send(feed, {:channel_subscribe, dead, "ticker", ["BTC-USD"], nil, 2})
-      Process.sleep(20)
+      :sys.get_state(feed)
 
       assert Process.alive?(feed)
     end
@@ -1031,18 +1158,17 @@ defmodule DpExchange.Coinbase.FeedTest do
       socket = fake_socket()
 
       send(feed, {:channel_unsubscribe, socket, "ticker", ["BTC-USD"]})
-      Process.sleep(20)
+      :sys.get_state(feed)
 
       assert Process.alive?(feed)
     end
 
     test "a :channel_unsubscribe against a dead socket is skipped" do
       feed = start_feed()
-      dead = spawn(fn -> :ok end)
-      Process.sleep(10)
+      dead = dead_pid()
 
       send(feed, {:channel_unsubscribe, dead, "ticker", ["BTC-USD"]})
-      Process.sleep(20)
+      :sys.get_state(feed)
 
       assert Process.alive?(feed)
     end
@@ -1051,10 +1177,8 @@ defmodule DpExchange.Coinbase.FeedTest do
       {feed, socket} = start_with_socket()
 
       Feed.subscribe(feed, ~w(BTC-USD), to: self())
-      Process.sleep(20)
-
       send(feed, :resubscribe)
-      Process.sleep(20)
+      :sys.get_state(feed)
 
       assert Process.alive?(feed)
       assert Process.alive?(socket)
@@ -1063,17 +1187,51 @@ defmodule DpExchange.Coinbase.FeedTest do
     test "the resubscribe timer skips a shard whose socket has died" do
       feed = start_feed()
       state = :sys.get_state(feed)
-      dead = spawn(fn -> :ok end)
-      Process.sleep(10)
+      dead = dead_pid()
 
       :sys.replace_state(feed, fn _s ->
         %{state | shards: %{0 => %{socket: dead, symbols: ["BTC-USD"]}}}
       end)
 
       send(feed, :resubscribe)
-      Process.sleep(20)
+      :sys.get_state(feed)
 
       assert Process.alive?(feed)
+    end
+
+    test "reconciling two ALREADY-OPEN shards in one update_symbols/2 call staggers " <>
+           "them, not only a brand-new shard" do
+      # Before this fix `reconcile_shard/7` received the same `delay` `reshard/1` computes
+      # for a shard beyond the first and dropped it: every already-open shard touched by
+      # one call had its subscribe scheduled at the same instant, regardless of position.
+      # 150 symbols forces two shards (100 + 50 at `@pairs_per_socket`); both start already
+      # open, under placeholder symbol sets that differ from whatever the new 150-symbol
+      # scope resolves to, so BOTH are touched — shard 0 as the synchronous primary, shard
+      # 1 asynchronously and staggered by `@shard_spacing_ms` behind it.
+      socket0 = timing_socket(self(), :shard0)
+      socket1 = timing_socket(self(), :shard1)
+
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | shards: %{
+              0 => %{socket: socket0, symbols: ["PLACEHOLDER-0"]},
+              1 => %{socket: socket1, symbols: ["PLACEHOLDER-1"]}
+            }
+        }
+      end)
+
+      new_symbols = for n <- 1..150, do: "NEW#{n}-USD"
+      assert :ok = Feed.update_symbols(feed, new_symbols)
+
+      assert_receive {:frame_at, :shard0, t0}, 500
+      assert_receive {:frame_at, :shard1, t1}, 6_000
+
+      # `@shard_spacing_ms` is 5_000; allow real scheduler jitter either side rather than
+      # pinning the exact figure.
+      assert t1 - t0 >= 4_000
     end
   end
 
