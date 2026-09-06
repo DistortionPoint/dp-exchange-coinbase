@@ -4,7 +4,7 @@ defmodule DpExchange.Coinbase.FeedTest do
   import ExUnit.CaptureLog
 
   alias DpExchange.Coinbase.Feed
-  alias DpExchange.Core.{Notice, Types}
+  alias DpExchange.Core.{DefaultRateLimiter, Notice, Types}
 
   @moduletag :capture_log
 
@@ -1074,6 +1074,255 @@ defmodule DpExchange.Coinbase.FeedTest do
       Process.sleep(20)
 
       assert Process.alive?(feed)
+    end
+  end
+
+  describe "the alias-map fetch has to wait, not fail — DpCryptoManagement issue #26" do
+    # Every other describe block in this file injects `alias_map_source` — a fast,
+    # hermetic stand-in for the real fetch. That is exactly how this defect went
+    # unnoticed: nothing in this suite exercised the real fetch pipeline's own options.
+    # These tests start `Feed` with NO `alias_map_source` override, so
+    # `default_alias_map_source/2` builds the real closure, and drive it through a real,
+    # named `DefaultRateLimiter` (standing in for "the caller's own limiter is contended
+    # at boot") plus a fake `:plug` response — both forwarded into `Rest.get_alias_map/1`
+    # by `default_alias_map_source/2` reading this module's own `opts`, per the
+    # moduledoc.
+
+    # A single-token bucket with its one token already spent: the next `acquire/3` or
+    # `check/3` against it needs to wait out `per_ms` before proceeding. Mirrors
+    # `dp_exchange_robinhood`'s own `exhausted_limiter/0` (issue #16), which established
+    # this exact technique for proving `rate_limit_blocking` reaches `Core.HttpClient`
+    # without reaching into a different process's `Config` override — a separately
+    # supervised `Feed` would never see one anyway.
+    defp exhausted_limiter do
+      name = :"limiter_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid} =
+        DefaultRateLimiter.start_link(
+          name: name,
+          limits: %{default: %{limit: 1, per_ms: 200, burst: 0}}
+        )
+
+      :ok = DefaultRateLimiter.record(:coinbase, 1, limiter: name)
+      name
+    end
+
+    defp responding(body) do
+      fn conn -> Req.Test.json(conn, body) end
+    end
+
+    test "the fetch waits out the caller's own exhausted rate limiter instead of giving up permanently" do
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           url: "ws://127.0.0.1:1/nowhere",
+           limiter: exhausted_limiter(),
+           plug: responding(%{"products" => []})}
+        )
+
+      Feed.subscribe(feed, ~w(BTC-USD), to: self())
+
+      # Without `rate_limit_blocking: true` this venue's own limiter refuses the fetch
+      # immediately (fail-fast `check/3`), `transient_alias_map_failure?/1` does not
+      # treat that refusal as transient (it is not — nothing about the request changes by
+      # retrying it instantly), and the fetch gives up for good within milliseconds. With
+      # `rate_limit_blocking: true` reaching `Core.HttpClient`, `acquire/3` waits out the
+      # ~200ms the exhausted bucket needs to refill and the identical fetch then
+      # succeeds — proving the option actually reached the request, not merely that it
+      # survived being typed into an allowlist.
+      wait_until(fn -> :sys.get_state(feed).alias_map_status != :pending end)
+
+      assert :sys.get_state(feed).alias_map_status == :ok
+    end
+  end
+
+  describe "the alias-map fetch is classified and retried — DpCryptoManagement issue #26" do
+    # `alias_map_source` fails `fail_times` times with `reason`, then succeeds forever —
+    # mirrors `flaky_socket/2` above for the channel-subscribe retry chain. `counter`
+    # records every attempt actually made, which is how a test proves a retry happened
+    # rather than inferring it from timing.
+    defp flaky_alias_map_source(fail_times, counter, reason) do
+      fn ->
+        :counters.add(counter, 1, 1)
+
+        if :counters.get(counter, 1) <= fail_times do
+          {:error, reason}
+        else
+          {:ok, %{}}
+        end
+      end
+    end
+
+    # Never recovers — mirrors `always_fails_socket/1` above. `counter` is how the
+    # exhaustion test proves the retry chain is bounded: the count stops rising once the
+    # code gives up.
+    defp always_fails_alias_map_source(counter, reason) do
+      fn ->
+        :counters.add(counter, 1, 1)
+        {:error, reason}
+      end
+    end
+
+    test "a transient failure (the rate limiter's own bounded wait timing out) is retried and succeeds on a later attempt" do
+      counter = :counters.new(1, [])
+
+      source =
+        flaky_alias_map_source(1, counter, {:exchange_error, :coinbase, :rate_limit_timeout})
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: source,
+           alias_map_retry_delay_ms: 5}
+        )
+
+      log =
+        capture_log(fn ->
+          Feed.subscribe(feed, ~w(BTC-USD), to: self())
+
+          # Wait for the retry to actually land rather than sleeping a guessed duration —
+          # see `wait_until/1`.
+          wait_until(fn -> :counters.get(counter, 1) == 2 end)
+        end)
+
+      # Two calls reached the source: the failed first attempt and the retry that
+      # succeeded. Never exhausted, never gave up.
+      assert :counters.get(counter, 1) == 2
+      assert :sys.get_state(feed).alias_map_status == :ok
+      assert log =~ "attempt 1/3 — retrying in 5ms"
+      refute log =~ "giving up"
+    end
+
+    test "a permanent failure is not retried and fails loudly" do
+      counter = :counters.new(1, [])
+      source = always_fails_alias_map_source(counter, :boom)
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: source,
+           alias_map_retry_delay_ms: 5}
+        )
+
+      Feed.subscribe_notices(feed, to: self())
+
+      log =
+        capture_log(fn ->
+          Feed.subscribe(feed, ~w(BTC-USD), to: self())
+
+          # The notice is the completion signal — waiting on it, rather than on a clock,
+          # guarantees the permanent-failure branch has actually run before it is
+          # asserted against.
+          assert_receive {:dp_exchange, :coinbase,
+                          %Notice{kind: :data_quality, details: %{reason: reason}}},
+                         2_000
+
+          assert reason =~ "boom"
+        end)
+
+      assert log =~ "failed permanently"
+      assert log =~ "not retrying"
+      refute log =~ "retrying in"
+
+      # Exactly one call, ever — the notice above only fires after the decision is made,
+      # so nothing further could have been scheduled by the time it arrives.
+      assert :counters.get(counter, 1) == 1
+      assert :sys.get_state(feed).alias_map_status == :unavailable
+    end
+
+    test "retries are bounded, and exhausting them still reports degraded attribution" do
+      counter = :counters.new(1, [])
+      reason = {:exchange_error, :coinbase, :rate_limit_timeout}
+      source = always_fails_alias_map_source(counter, reason)
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: source,
+           alias_map_retry_delay_ms: 5}
+        )
+
+      Feed.subscribe_notices(feed, to: self())
+
+      log =
+        capture_log(fn ->
+          Feed.subscribe(feed, ~w(BTC-USD), to: self())
+          assert_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 2_000
+        end)
+
+      assert log =~ "giving up"
+
+      # One initial attempt plus @max_alias_map_retries (2) retries — three calls, and
+      # never a fourth, proving the chain is bounded rather than open-ended.
+      assert :counters.get(counter, 1) == 3
+      assert :sys.get_state(feed).alias_map_status == :unavailable
+    end
+  end
+
+  describe "a late notice subscriber still learns attribution is degraded — DpCryptoManagement issue #26" do
+    test "subscribe_notices/1 called after subscribe/2 still receives the degraded-attribution notice" do
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: fn -> {:error, :simulated_catalog_failure} end}
+        )
+
+      # The ordinary sequence a real consumer follows: subscribe first — which is what
+      # schedules the alias-map fetch, see the moduledoc — notices second. Waiting for
+      # the fetch to have actually failed before registering proves the notice genuinely
+      # fired with zero notice_subscribers before this test ever calls
+      # `subscribe_notices/1`; this is not merely "moved the emission a few lines
+      # earlier".
+      Feed.subscribe(feed, ~w(BTC-USD), to: self())
+      wait_until(fn -> :sys.get_state(feed).alias_map_status == :unavailable end)
+
+      assert :ok = Feed.subscribe_notices(feed, to: self())
+
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :data_quality, details: %{reason: reason}} = notice},
+                     500
+
+      assert reason =~ "simulated_catalog_failure"
+      assert notice.message =~ "alias catalogue unavailable"
+    end
+
+    test "nothing is replayed once attribution is healthy" do
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: fn -> {:ok, %{}} end}
+        )
+
+      Feed.subscribe(feed, ~w(BTC-USD), to: self())
+      wait_until(fn -> :sys.get_state(feed).alias_map_status == :ok end)
+
+      assert :ok = Feed.subscribe_notices(feed, to: self())
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 200
+    end
+
+    test "an already-registered subscriber is not replayed the notice a second time" do
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: fn -> {:error, :simulated_catalog_failure} end}
+        )
+
+      Feed.subscribe_notices(feed, to: self())
+      Feed.subscribe(feed, ~w(BTC-USD), to: self())
+
+      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 500
+
+      # Registering again must not re-fire it — the replay is keyed to a NEW
+      # registration, not to every call this consumer happens to make.
+      assert :ok = Feed.subscribe_notices(feed, to: self())
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 200
     end
   end
 end

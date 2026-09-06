@@ -74,6 +74,68 @@ acceptable changelog line.
 
 ### Fixed
 
+- **The alias-map fetch added for issue #22 was throttled by the caller's OWN rate
+  limiter at boot and never retried, disabling attribution for the life of the process —
+  DpCryptoManagement's issue #26, a regression in a fix this package shipped.**
+  `Feed`'s default `alias_map_source` called `Rest.get_alias_map/1` without
+  `rate_limit_blocking: true`, so it went through fail-fast `check/3` instead of blocking
+  `acquire/3`. The fetch is scheduled off the first `subscribe/3`, which for any real
+  consumer **is** boot — the single most contended moment for their own limiter
+  (universe discovery, catalogue reads and market overviews all landing at once) — so it
+  was scheduled into exactly the window most likely to throttle it. One throttled call
+  there, on code that never retried, was permanent: `state.alias_map` stayed `%{}` for
+  the life of the process. Measured live: 406 pairs requested as `-USDC`, delivered as
+  `-USD`, overlap 5 — `coverage_by_kind/1` and the consumer's own tracker each reporting
+  a truthful, and wildly different, count, precisely the situation the issue #22 fix
+  existed to end.
+
+  **This is the third instance of one family-wide pattern** — `dp_exchange_robinhood`'s
+  issue #16, this package's own issue #23 sweep, and now this: a background call with
+  nothing waiting on it, failing instead of waiting, while `Core.HttpClient`'s own error
+  message names the fix in its text ("callers that can wait should set
+  `rate_limit_blocking: true`"). The issue #23 sweep audited every REST call site in this
+  package and missed this one, because the alias-map fetch's own HTTP path was mistaken
+  for its sibling WebSocket resubscribe path, which genuinely has no rate-limited replay
+  to default. That recurrence is worth more than any one of the three individual fixes:
+  the same shape of gap keeps landing at the one call site nobody thought to re-check.
+
+  Three changes, all in `Feed`:
+
+  1. `rate_limit_blocking: true` is now set unconditionally on the fetch, by a new
+     `default_alias_map_source/2` that also forwards `:limiter`, `:plug`, `:timeout`,
+     `:retry_attempts`, `:retry_delay` and `:weight` from `start_link/1`'s own `opts` —
+     the same allowlist shape `Rest`'s own request pipeline uses.
+  2. Blocking removes the self-throttle as a failure mode but not every failure: the
+     limiter's own bounded wait can still time out. `transient_alias_map_failure?/1`
+     classifies that one case as worth retrying — the identical request can reasonably
+     succeed once the bucket has drained further — and treats everything else (an
+     unrecognised response shape, a refused request, an unclassified reason) as
+     permanent, matching `transient_subscribe_failure?/1`'s own default-to-permanent
+     stance one section up. Retries are bounded (`@max_alias_map_retries`, backed off by
+     `@alias_map_retry_delay_ms`, both overridable for a test's benefit) rather than
+     looped forever.
+  3. **The degraded-attribution notice was unreceivable by construction, also part of
+     issue #26.** The fetch is scheduled from `subscribe/3`; a consumer calling
+     `subscribe_notices/1` afterward — the ordinary sequence — could register only after
+     the fetch had already failed and fanned out to zero subscribers. A notice
+     announcing a *persistent* degraded state that can only ever fire in the one window
+     before anyone could be listening is worse than no signal: it looks like a working
+     alarm that never rings. Fixed by replay, not by moving the emission earlier (this
+     file already learned that moving-the-window lesson once, with
+     `next_resubscribe_delay/1`'s per-tick storm): `alias_map_status` and the reason that
+     produced it now persist in state, and `subscribe_notices/1` replays the identical
+     notice to a newly-registered subscriber whenever it finds the state already
+     `:unavailable` — once per new registration, never on a timer, and never re-sent to a
+     subscriber who already has it.
+
+  New tests in `feed_test.exs` drive the real fetch pipeline end-to-end for the first
+  fix — a real, named `Core.DefaultRateLimiter` with its sole token already spent, behind
+  a fake `:plug` response, proving `rate_limit_blocking: true` actually reaches
+  `Core.HttpClient` rather than merely surviving being typed into an allowlist — plus the
+  transient-retries-and-succeeds, permanent-fails-once, bounded-exhaustion and
+  late-notice-subscriber cases, all against the default `alias_map_source` codepath or a
+  controlled stand-in, none against a guessed `Process.sleep/1` duration.
+
 - **An empty `pricebooks` array from `/best_bid_ask` was read as the venue naming a
   product not listed, and there is no evidence this venue has ever said that this way —
   audited alongside DpCryptoManagement's issue #25 (`dp_exchange_robinhood`'s confirmed

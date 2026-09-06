@@ -168,26 +168,103 @@ defmodule DpExchange.Coinbase.Feed do
   the "nearby substitute" this family forbids, and would be wrong for any pair the venue
   does not alias — nothing here assumes the suffix relationship holds in general.
 
-  It is fetched **once**, asynchronously, the first time `subscribe/3` or
+  It is scheduled **once**, asynchronously, the first time `subscribe/3` or
   `update_symbols/2` is called (`maybe_schedule_alias_map_fetch/1`, gated on
   `alias_map_status: :unfetched` so a second call never re-schedules it) — not from
   `init/1`, so a `Feed` that is merely supervised and never asked to stream anything never
   makes a network call, and not synchronously inside the triggering `handle_call/3`, so it
-  never competes with `@call_timeout`'s socket-connect budget. Until it resolves, and
-  forever if it fails, `state.alias_map` is simply `%{}` — indistinguishable, by design,
-  from "the venue aliases nothing here", which resolves to the same safe fallback below.
-  A failed fetch is never retried: this mirrors the file's other "decide once, unconditionally"
-  choices (the resubscribe timer, the shard stagger) rather than adding a second kind of
-  recovery logic, and a `Feed` that needs to try again is restarted, same as any other
-  stuck state a supervisor exists to clear.
+  never competes with `@call_timeout`'s socket-connect budget. Until it resolves,
+  `state.alias_map` is simply `%{}` — indistinguishable, by design, from "the venue
+  aliases nothing here", which resolves to the same safe fallback below.
 
-  A failed fetch also reports itself exactly once, as a `:data_quality` notice to
-  `notice_subscribers` — "attribution is degraded and here is why" — never a silently
-  guessed mapping. `attribution_targets/2` is the single fallback for every case where no
-  wanted name resolves — unfetched, failed, legitimately alias-free, or a frame arriving
-  for a symbol outside `wanted` altogether (in-flight just after an unsubscribe, or a raw
-  test `send/2`): deliver under whatever the venue actually sent, exactly the pre-fix
+  ### The fetch has to wait, not fail — DpCryptoManagement's issue #26
+
+  `Rest.get_alias_map/1` reached `Core.HttpClient` without `rate_limit_blocking: true`,
+  so it went through fail-fast `check/3` rather than blocking `acquire/3` — and this fetch
+  is scheduled off the first `subscribe/3`, which for any real consumer **is** boot, the
+  single most contended moment for their own rate limiter (universe discovery, catalogue
+  reads and market overviews all landing at once). It is scheduled into exactly the window
+  most likely to throttle it. One throttled call at that moment, on code that never
+  retried (see below, before this fix), disabled attribution for the life of the process.
+  Measured live: 406 pairs requested as `-USDC`, delivered as `-USD`, overlap 5 —
+  `coverage_by_kind/1` and the consumer's own tracker each reporting a truthful, and
+  wildly different, count.
+
+  This is the third instance of one family-wide pattern — `dp_exchange_robinhood`'s issue
+  #16, this package's own issue #23 sweep (which fixed every other REST call site in this
+  package and missed this one, because the alias-map fetch did not exist to audit when
+  that comment was written), and now this: a background call with nothing waiting on it,
+  failing instead of waiting, while `Core.HttpClient`'s own error message names the fix in
+  its text ("callers that can wait should set `rate_limit_blocking: true`"). This call
+  site is exactly the caller that can: it runs off `Process.send_after`, nothing blocks on
+  its result, and its only job is to populate a cache before frames arrive. Waiting a
+  second here is free; failing is total. `rate_limit_blocking: true` is now set
+  unconditionally by `default_alias_map_source/2`, which also forwards `:limiter`,
+  `:plug`, `:timeout`, `:retry_attempts`, `:retry_delay` and `:weight` from this module's
+  own `opts` — the same allowlist shape `Rest`'s own request pipeline uses — so a test can
+  exercise the real fetch pipeline end-to-end (a fake `:plug` response behind a real,
+  deterministic `:limiter`) rather than only ever exercising the `alias_map_source`
+  injection seam.
+
+  ### Classified and retried, the same way a channel subscribe already is
+
+  Blocking removes the *self*-throttle as a failure mode, but does not remove every
+  failure: the limiter's own bounded wait can still time out
+  (`{:exchange_error, _venue, :rate_limit_timeout}` — the wait itself ran out, not a
+  refusal), and the fetch can still fail for reasons no amount of waiting fixes.
+  `transient_alias_map_failure?/1` classifies it exactly the way
+  `transient_subscribe_failure?/1` classifies a channel subscribe, and for the same
+  reason: not every failure can be fixed by retrying, so retrying one that can't only
+  delays an honest "this failed" and spends a retry budget a genuinely transient failure
+  needs.
+
+  A timed-out wait for the caller's own rate limiter is the one case treated as
+  transient — the identical request can reasonably succeed once the limiter's bucket has
+  drained further, which is the whole reason `rate_limit_blocking: true` exists here.
+  Everything else — an unrecognised response shape, a refused request, a raw or
+  unclassified reason (including whatever a test's own stand-in returns) — is treated as
+  permanent, matching `transient_subscribe_failure?/1`'s own default-to-permanent stance
+  for anything not explicitly known to clear on its own. Retries are bounded
+  (`@max_alias_map_retries`, backed off by `@alias_map_retry_delay_ms` — both overridable
+  via opts for a test's benefit, the same shape as `subscribe_retry_delay_ms` above)
+  rather than looped forever, so a fetch that genuinely cannot succeed still gives up and
+  reports itself rather than retrying silently without end.
+
+  Exhausting the retries, or failing permanently on the first attempt, both leave
+  `state.alias_map` at `%{}` and `alias_map_status: :unavailable` — the same safe
+  fallback as before this fix, just reached only after a transient failure has been given
+  its fair chance to clear.
+
+  ### A failed fetch reports itself — and a late notice subscriber has to be able to hear it
+
+  A failed fetch reports itself, as a `:data_quality` notice to `notice_subscribers` —
+  "attribution is degraded and here is why" — never a silently guessed mapping.
+  `attribution_targets/2` is the single fallback for every case where no wanted name
+  resolves — unfetched, failed, legitimately alias-free, or a frame arriving for a symbol
+  outside `wanted` altogether (in-flight just after an unsubscribe, or a raw test
+  `send/2`): deliver under whatever the venue actually sent, exactly the pre-fix
   behaviour, rather than inventing a name.
+
+  **The notice used to be unreceivable by construction — also DpCryptoManagement's issue
+  #26.** The fetch is scheduled from `subscribe/3`; a consumer that calls
+  `subscribe_notices/1` afterward — the ordinary sequence, since notices are naturally the
+  second thing a caller registers once it already knows it wants data — could register
+  only after the fetch had already failed and fanned out to zero subscribers. A notice
+  announcing a *persistent* degraded state that can only ever fire in the one window
+  before anyone could be listening for it is worse than no signal: it looks like a
+  working alarm that never rings.
+
+  Fixed by replay, not by moving the emission earlier — narrowing the window does not
+  close it, and this file already learned that lesson once with
+  `next_resubscribe_delay/1`'s per-tick storm. `state.alias_map_status` and the reason
+  that produced it (`state.alias_map_failure_reason`) already persist for as long as the
+  condition holds, so `{:subscribe_notices, subscriber}` replays the identical notice to
+  that one newly-registered subscriber whenever it finds the state already `:unavailable`
+  — once per registration, never on a timer, and never re-sent to a subscriber who
+  already has it, so it cannot become the per-tick storm `next_resubscribe_delay/1` was
+  already fixed for once. A consumer that registers before the fetch resolves sees the
+  ordinary fan-out, exactly as before; one that registers after sees the same notice,
+  late but not lost.
 
   ### Both caller-facing names, when both are wanted
 
@@ -286,6 +363,28 @@ defmodule DpExchange.Coinbase.Feed do
   # never shortens it).
   @max_subscribe_retries 2
 
+  # Backoff for a retried alias-map fetch — see the moduledoc's "the fetch has to wait,
+  # not fail" and "classified and retried" sections (DpCryptoManagement's issue #26). Not
+  # borrowed from `@subscribe_retry_delay_ms`: that number waits out a busy WebSocket
+  # decoding a snapshot burst, an unrelated condition to this REST fetch's own rate
+  # limiter draining its bucket, so reusing it would be the same "second, independently
+  # guessed number for the same wait" mistake in reverse — a number that happens to be
+  # borrowed FROM the wrong condition rather than invented for the right one. Two seconds
+  # is long enough for a boot-time contention spike to ease without stalling attribution
+  # noticeably longer than the blocking wait itself already costs.
+  #
+  # Overridable via `:alias_map_retry_delay_ms`, the same shape as
+  # `:subscribe_retry_delay_ms`: a test proving a retry actually happens and succeeds must
+  # not wait out the real, multi-second production delay to do it.
+  @alias_map_retry_delay_ms 2_000
+
+  # One initial attempt plus this many retries — the same bound and the same reasoning as
+  # `@max_subscribe_retries`: not every failure can be fixed by waiting, so retrying stays
+  # finite rather than open-ended. Nothing here competes with a resubscribe cycle the way
+  # the channel-subscribe retry chain does, since this fetch runs once at boot rather than
+  # on every re-issue tick, so there is no shared-budget arithmetic to repeat.
+  @max_alias_map_retries 2
+
   # Re-issue every shard's current subscriptions on this cadence, unconditionally — see
   # the moduledoc on reconnects.
   #
@@ -375,7 +474,7 @@ defmodule DpExchange.Coinbase.Feed do
     # section. Production supplies none, so this default runs: the venue's own public
     # catalogue, reusing `Rest`'s existing products fetch rather than a second way to ask.
     alias_map_source =
-      Keyword.get(opts, :alias_map_source, fn -> Rest.get_alias_map(credentials: credentials) end)
+      Keyword.get(opts, :alias_map_source, default_alias_map_source(opts, credentials))
 
     {:ok,
      %{
@@ -404,13 +503,23 @@ defmodule DpExchange.Coinbase.Feed do
        # as `resubscribe_interval_ms` above, for a test's benefit rather than a consumer's.
        subscribe_retry_delay_ms:
          Keyword.get(opts, :subscribe_retry_delay_ms) || @subscribe_retry_delay_ms,
+       # See `@alias_map_retry_delay_ms` — same shape, same reason: a test proving the
+       # alias-map fetch's own retry actually happens must not wait out the real delay.
+       alias_map_retry_delay_ms:
+         Keyword.get(opts, :alias_map_retry_delay_ms) || @alias_map_retry_delay_ms,
        # The venue's own declared alias relationships — see the moduledoc's "the venue
        # rewrites an aliased product id on delivery" section. `%{}` until fetched (or
-       # forever, if the fetch fails), which is deliberately indistinguishable from "the
-       # venue aliases nothing here": both resolve through the same safe fallback in
-       # `attribution_targets/2`.
+       # forever, if every retry is exhausted), which is deliberately indistinguishable
+       # from "the venue aliases nothing here": both resolve through the same safe
+       # fallback in `attribution_targets/2`.
        alias_map: %{},
        alias_map_status: :unfetched,
+       # The reason the fetch last gave up, if it ever did — `nil` while `alias_map_status`
+       # is anything but `:unavailable`. Persisted so a notice subscriber that registers
+       # after the fact (see `handle_call({:subscribe_notices, _}, _, _)` below and the
+       # moduledoc's "a late notice subscriber has to be able to hear it" section) can be
+       # replayed the same notice a subscriber present at the time already received.
+       alias_map_failure_reason: nil,
        alias_map_source: alias_map_source
      }}
   end
@@ -471,7 +580,24 @@ defmodule DpExchange.Coinbase.Feed do
   end
 
   def handle_call({:subscribe_notices, subscriber}, _from, state) do
-    {:reply, :ok, %{state | notice_subscribers: MapSet.put(state.notice_subscribers, subscriber)}}
+    # Read before the set is updated below: a subscriber calling this a second time is
+    # already registered, and must not be replayed the notice again just for asking twice
+    # — see the moduledoc's "a late notice subscriber has to be able to hear it" section.
+    already_registered? = MapSet.member?(state.notice_subscribers, subscriber)
+    state = %{state | notice_subscribers: MapSet.put(state.notice_subscribers, subscriber)}
+
+    # (DpCryptoManagement's issue #26): the degraded-attribution notice fires once, when
+    # the fetch first gives up, which is typically *before* a consumer following the
+    # ordinary `subscribe/2` then `subscribe_notices/1` sequence has registered at all.
+    # Replayed here, to this one newly-registered subscriber only — never to a subscriber
+    # already registered, who already has it — and only while the condition still holds,
+    # so this cannot become a per-tick notice storm; it fires at most once per NEW
+    # registration, an event, not a timer.
+    if not already_registered? and state.alias_map_status == :unavailable do
+      notify_one(subscriber, degraded_attribution_notice(state.alias_map_failure_reason))
+    end
+
+    {:reply, :ok, state}
   end
 
   def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}
@@ -504,14 +630,15 @@ defmodule DpExchange.Coinbase.Feed do
   end
 
   def handle_info(:fetch_alias_map, state) do
-    case state.alias_map_source.() do
-      {:ok, map} when is_map(map) ->
-        {:noreply, %{state | alias_map: map, alias_map_status: :ok}}
+    attempt_alias_map_fetch(1, state)
+  end
 
-      {:error, reason} ->
-        notify_degraded_attribution(state, reason)
-        {:noreply, %{state | alias_map: %{}, alias_map_status: :unavailable}}
-    end
+  # The retry this module schedules on a transient failure — see the moduledoc's "the
+  # fetch has to wait, not fail" and "classified and retried" sections. `attempt` starts
+  # at `2` here; the first attempt is always the bare `:fetch_alias_map` clause above,
+  # mirroring `handle_info({:channel_subscribe, ...})`'s own two-clause shape.
+  def handle_info({:fetch_alias_map, attempt}, state) do
+    attempt_alias_map_fetch(attempt, state)
   end
 
   def handle_info({:open_shard, index, symbols}, state) do
@@ -951,6 +1078,94 @@ defmodule DpExchange.Coinbase.Feed do
 
   defp maybe_schedule_alias_map_fetch(state), do: state
 
+  # The production default for `alias_map_source` — see the moduledoc's "the fetch has to
+  # wait, not fail" section (DpCryptoManagement's issue #26). Forwards the same options
+  # `Rest`'s own request pipeline understands, so a caller of `start_link/1` can tune the
+  # alias fetch's HTTP behaviour exactly as it would any other `Rest` call, and so a test
+  # can drive the real fetch end-to-end with a fake `:plug` behind a real, named
+  # `:limiter` rather than only ever exercising the `alias_map_source` injection seam.
+  #
+  # `rate_limit_blocking: true` is the fix: this is the one caller that can wait, by
+  # construction — it runs off `Process.send_after`, nothing blocks on its result, and its
+  # only job is to populate a cache before frames arrive. `Keyword.put_new/3` rather than
+  # `Keyword.put/3` so an explicit override survives, matching every other opt here.
+  defp default_alias_map_source(opts, credentials) do
+    rest_opts =
+      opts
+      |> Keyword.take([:limiter, :plug, :timeout, :retry_attempts, :retry_delay, :weight])
+      |> Keyword.put(:credentials, credentials)
+      |> Keyword.put_new(:rate_limit_blocking, true)
+
+    fn -> Rest.get_alias_map(rest_opts) end
+  end
+
+  # One attempt of the alias-map fetch, whichever attempt number this is — see the
+  # moduledoc's "classified and retried" section.
+  defp attempt_alias_map_fetch(attempt, state) do
+    case state.alias_map_source.() do
+      {:ok, map} when is_map(map) ->
+        {:noreply,
+         %{state | alias_map: map, alias_map_status: :ok, alias_map_failure_reason: nil}}
+
+      {:error, reason} ->
+        handle_alias_map_fetch_failure(attempt, reason, state)
+    end
+  end
+
+  # Transient: the caller's own rate limiter made this fetch wait, and the wait itself ran
+  # out before capacity freed up (`rate_limit_blocking: true` chooses `acquire/3`, whose
+  # own bounded wait times out this way — see `Core.DefaultRateLimiter.acquire/3`) — the
+  # identical request can reasonably succeed once the limiter's bucket has drained
+  # further. Everything else — an unrecognised response shape, a refused request, a raw or
+  # unclassified reason (including whatever a test's own stand-in returns) — is a fact
+  # about the request or the venue that no amount of waiting changes, so it is not
+  # retried, matching `transient_subscribe_failure?/1`'s own default-to-permanent stance.
+  defp transient_alias_map_failure?({:exchange_error, _venue, :rate_limit_timeout}), do: true
+  defp transient_alias_map_failure?(_reason), do: false
+
+  defp handle_alias_map_fetch_failure(attempt, reason, state) do
+    cond do
+      not transient_alias_map_failure?(reason) ->
+        Logger.warning(
+          "[Coinbase Feed] alias catalogue fetch failed permanently (#{inspect(reason)}) — " <>
+            "not retrying; delivering under the venue's own product id until restarted"
+        )
+
+        give_up_on_alias_map(state, reason)
+
+      attempt > @max_alias_map_retries ->
+        Logger.warning(
+          "[Coinbase Feed] alias catalogue fetch failed after #{attempt} attempt(s) " <>
+            "(#{inspect(reason)}) — giving up; delivering under the venue's own product " <>
+            "id until restarted"
+        )
+
+        give_up_on_alias_map(state, reason)
+
+      true ->
+        Logger.warning(
+          "[Coinbase Feed] alias catalogue fetch failed (#{inspect(reason)}), attempt " <>
+            "#{attempt}/#{@max_alias_map_retries + 1} — retrying in " <>
+            "#{state.alias_map_retry_delay_ms}ms"
+        )
+
+        Process.send_after(
+          self(),
+          {:fetch_alias_map, attempt + 1},
+          state.alias_map_retry_delay_ms
+        )
+
+        {:noreply, state}
+    end
+  end
+
+  defp give_up_on_alias_map(state, reason) do
+    notify_degraded_attribution(state, reason)
+
+    {:noreply,
+     %{state | alias_map: %{}, alias_map_status: :unavailable, alias_map_failure_reason: reason}}
+  end
+
   # See the moduledoc's "the venue rewrites an aliased product id on delivery" section.
   # `delivered` is whatever the venue actually tagged this frame with; `equivalent` is its
   # alias under the venue's own declared relationship, if the catalogue named one. A
@@ -976,19 +1191,27 @@ defmodule DpExchange.Coinbase.Feed do
     if targets == [], do: [delivered], else: targets
   end
 
-  # Fired once, only on a failed fetch — see `handle_info(:fetch_alias_map, _)`. Never
-  # retried and never on every delivered frame: a notice is a condition to act on, not
-  # per-message noise, and this condition does not change once the fetch has failed.
+  # Fired once, when the alias-map fetch gives up for good (permanently, or after
+  # exhausting its retries) — see `handle_alias_map_fetch_failure/3`. Never on every
+  # delivered frame: a notice is a condition to act on, not per-message noise, and this
+  # condition does not change again once the fetch has given up. `degraded_attribution_notice/1`
+  # is factored out so a subscriber that registers late (see
+  # `handle_call({:subscribe_notices, _}, _, _)` above and the moduledoc's "a late notice
+  # subscriber has to be able to hear it" section) can be replayed the exact same notice.
   defp notify_degraded_attribution(state, reason) do
-    notice =
-      Notice.new(:data_quality, :coinbase,
-        message:
-          "alias catalogue unavailable — delivering under the venue's own product id " <>
-            "rather than the caller's requested symbol",
-        details: %{reason: inspect(reason)}
-      )
+    fan_out(
+      state.notice_subscribers,
+      {:dp_exchange, :coinbase, degraded_attribution_notice(reason)}
+    )
+  end
 
-    fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})
+  defp degraded_attribution_notice(reason) do
+    Notice.new(:data_quality, :coinbase,
+      message:
+        "alias catalogue unavailable — delivering under the venue's own product id " <>
+          "rather than the caller's requested symbol",
+      details: %{reason: inspect(reason)}
+    )
   end
 
   # A dead subscriber stops delivery. The venue must not accumulate events for a process
@@ -1015,4 +1238,15 @@ defmodule DpExchange.Coinbase.Feed do
   end
 
   defp resolve_subscriber(name) when is_atom(name), do: Process.whereis(name)
+
+  # `fan_out/2` restricted to exactly one subscriber — see
+  # `handle_call({:subscribe_notices, _}, _, _)`'s notice-replay above. A `MapSet` of one
+  # would work too, but this says directly what it does: tell this one subscriber, not
+  # "everyone in a set that happens to have one member".
+  defp notify_one(subscriber, message) do
+    case resolve_subscriber(subscriber) do
+      pid when is_pid(pid) -> send(pid, {:dp_exchange, :coinbase, message})
+      nil -> :ok
+    end
+  end
 end
