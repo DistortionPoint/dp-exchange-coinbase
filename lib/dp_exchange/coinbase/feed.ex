@@ -53,36 +53,59 @@ defmodule DpExchange.Coinbase.Feed do
   alias fix, the resubscribe cadence — explains a number that lines up precisely with one
   shard's population and no other.
 
-  **No documentation states the real ceiling.** Re-read 2026-09-06 specifically looking
-  for a per-session `level2` stream count: the Advanced Trade channels reference, the
-  connection overview, and the Advanced Trade rate-limits page ("WebSocket connections
-  and unauthenticated messages are each limited to 8 per second per IP" — a connect-rate
-  ceiling, not a per-session subscription count) all say nothing about how many products
-  one session may carry on `level2`. The older Exchange product's own separate
-  rate-limits page states a different number entirely — 10 subscriptions per *product*
-  per channel, meaning duplicate subscriptions to the same product, not the count of
-  distinct products — and this package speaks Advanced Trade (`Socket`'s `@endpoint`),
-  not Exchange, so that number would not transfer even if it were on point. The prior
-  investigation that first shipped `@pairs_per_socket` found the docs silent on this; they
-  still are.
+  **No Coinbase document states the real ceiling.** Re-read 2026-09-06 specifically
+  looking for a per-session `level2` stream count: the Advanced Trade channels reference,
+  the connection overview, and the Advanced Trade rate-limits page ("WebSocket
+  connections and unauthenticated messages are each limited to 8 per second per IP" — a
+  connect-rate ceiling, not a per-session subscription count) all say nothing about how
+  many products one session may carry on `level2`. The older Exchange product's own
+  separate rate-limits page states a different number entirely — 10 subscriptions per
+  *product* per channel, meaning duplicate subscriptions to the same product, not the
+  count of distinct products — and this package speaks Advanced Trade (`Socket`'s
+  `@endpoint`), not Exchange, so that number would not transfer even if it were on point.
+  The prior investigation that first shipped `@pairs_per_socket` found the docs silent on
+  this; they still are. This does not stop being true just because the number below is now
+  measured — it is measured *behaviour*, never a documented figure.
 
-  **This package cannot narrow it by probing the venue itself, either.** `level2` is on
+  **This package still cannot narrow it by probing the venue itself.** `level2` is on
   `@authenticated_channels`, and this repo's own testing strategy draws the line at
   exactly that boundary: tier 2 (live public endpoints, by hand) is fair game, tier 3
-  (authenticated) "needs credentials this repo must never hold." Finding the exact
-  ceiling would mean bisecting a real session's `level2` subscription size against the
-  live venue with a real credential — precisely tier 3. That is not merely inconvenient;
-  it is a line this repo does not cross for any endpoint, `level2` included.
+  (authenticated) "needs credentials this repo must never hold." Bisecting a real
+  session's `level2` subscription size against the live venue with a real credential is
+  precisely tier 3, and remains a line this repo does not cross for any endpoint,
+  `level2` included. What changed is that a *consumer* — who holds the credential this
+  repo structurally cannot — did the bisection, in production, and reported the result
+  back as tier-3 evidence. That is a different thing from this package probing itself,
+  and the distinction is why the number below is attributed to them rather than to any
+  measurement this repo ran.
 
-  **`@level2_pairs_per_socket` is `6`.** Not a rediscovered venue limit — the largest
-  `level2` subscription size this package has any positive evidence the venue accepts,
-  taken directly from the production numbers above: 100 was refused four times out of
-  four, 6 succeeded once out of one. Anything strictly between those two is exactly the
-  unverified guess this family forbids presenting as measured; 6 is the one figure
-  actually in evidence. It is deliberately conservative — the true ceiling may be well
-  above it — and that headroom is traded away on purpose rather than spent on a number
-  with nothing behind it but a guess at where between a known failure and a known success
-  the line falls.
+  **`@level2_pairs_per_socket` is `30`.** Measured 2026-09-06 by DpCryptoManagement
+  (issue #22) against the live venue with real credentials, not by this package and not
+  from documentation:
+
+  | requested (`n`) | 6 | 12 | 25 | 30 | 31 | 35 | 50 | 100 |
+  |---|---|---|---|---|---|---|---|---|
+  | verdict | accepted | accepted | accepted | accepted | REFUSED | REFUSED | REFUSED | REFUSED |
+
+  **Method, because a measured number is only worth its method.** One fresh
+  `Socket.start_link/1` per attempt, never reused — cumulative session state was
+  explicitly the thing under test, which is exactly the question this file's own
+  "cumulative vs. concurrent" section below could not otherwise answer. 3s to establish
+  the connection; `subscribe(socket, "level2", symbols, creds)`; then 20 seconds draining
+  the mailbox *continuously* while tallying. Every symbol came from the consumer's real,
+  live 406-symbol scope, so silence means refusal rather than an idle book. Verdict
+  `refused` on a `rate_limited` notice, `accepted` on `OrderBook`/`OrderBookDelta`
+  payloads. The boundary was confirmed by interleaving two full runs back to back:
+  `n=30 accepted, n=31 REFUSED, n=30 accepted, n=31 REFUSED`. A contamination check ran
+  too — immediately after a run where `n=31`–`34` refused, `n=6` and `n=30` were re-run
+  and both accepted, which is what rules out the refusals being saturation from the
+  probing itself rather than a genuine per-session ceiling.
+
+  Same evidentiary standard as the `6` this replaces, just with the boundary actually
+  located rather than merely bounded far below a known failure: `30` is the largest value
+  with positive evidence of acceptance, `31` the smallest with positive evidence of
+  refusal. Nothing between them needed to be guessed this time, unlike `6` versus the old
+  `100`.
 
   **The two channels no longer share a shard slice.** `ticker` keeps `@pairs_per_socket`
   (100) — it has no known ceiling, and shrinking it to match `level2` would multiply
@@ -90,12 +113,13 @@ defmodule DpExchange.Coinbase.Feed do
   needs. `level2` is chunked separately, at `@level2_pairs_per_socket`, and every chunk of
   either channel opens its own dedicated, single-channel socket: there is no longer a
   shard that carries both. For the 406-symbol universe above that is 5 `ticker` sockets
-  (unchanged) plus 68 `level2` sockets (`ceil(406 / 6)`) — 73 total against 5 before.
-  `Socket`'s own moduledoc records why more sockets is affordable now in a way it would
-  not have been before 2026-09-06: removing in-package `level2` book maintenance cut
-  per-frame decode cost roughly tenfold (65–110 ms to 6.6 ms, at the `BTC-USD` book size
-  DpCryptoManagement measured live) — decode cost, not socket count, was the resource
-  actually in short supply.
+  (unchanged) plus 14 `level2` sockets (`ceil(406 / 30)`) — 19 total against 73 under the
+  `6`-sized grouping this replaces, and 5 before `level2` needed its own grouping at all.
+  `Socket`'s own moduledoc records why more sockets than the original single-socket design
+  is affordable now in a way it would not have been before 2026-09-06: removing
+  in-package `level2` book maintenance cut per-frame decode cost roughly tenfold
+  (65–110 ms to 6.6 ms, at the `BTC-USD` book size DpCryptoManagement measured live) —
+  decode cost, not socket count, was the resource actually in short supply.
 
   **Connects are staggered across both groups on one sequence, `ticker` first.** Every new
   socket this module opens — whichever channel it carries — takes the next tick of
@@ -103,13 +127,14 @@ defmodule DpExchange.Coinbase.Feed do
   touched `level2` shard. This is what keeps `ticker`'s own boot-time coverage exactly as
   fast as the section above describes: a 406-symbol subscribe still resolves its
   synchronous reply and its remaining `ticker` shards inside the same handful of seconds
-  as before this fix, with `level2`'s 68 shards ramping in behind them. For that universe
-  the last `level2` shard's tick lands roughly six minutes after boot — materially slower
-  than `ticker`'s own coverage, and an accepted, stated cost: `order_book` coverage was
-  permanently `6 / 406` before this fix, climbing by 5,099 refusals and counting; ramping
-  to `406 / 406` over several minutes is strictly better than a ceiling that never moves,
-  and nothing about `level2` streaming is boot-latency-sensitive the way `ticker`'s
-  starvation was.
+  as before this fix, with `level2`'s 14 shards ramping in behind them. For that universe
+  the last `level2` shard's tick lands roughly 70 seconds after boot (`(14 - 1) *
+  @shard_spacing_ms`) — materially slower than `ticker`'s own coverage, and an accepted,
+  stated cost, now roughly a fifth of what the `6`-sized grouping cost (about six
+  minutes): `order_book` coverage was permanently `6 / 406` before `level2` got its own
+  grouping at all, climbing by 5,099 refusals and counting; ramping to `406 / 406` in
+  around a minute is strictly better than a ceiling that never moves, and nothing about
+  `level2` streaming is boot-latency-sensitive the way `ticker`'s starvation was.
 
   **`level2` no longer needs to go first on a shared socket, because there is no longer a
   shared socket.** What used to be this section — "`level2` before `ticker`, spaced by
@@ -117,10 +142,10 @@ defmodule DpExchange.Coinbase.Feed do
   stall the other's `send_frame` on the *same* connection. With every socket now carrying
   exactly one channel, that specific hazard cannot occur, and `@channel_spacing_ms` is
   gone. A subscribe can still hit `:send_timeout` against its own socket's own burst — a
-  `level2` socket decoding its own six-symbol snapshot, say — so the retry chain below is
-  unchanged in kind; `@subscribe_retry_delay_ms` keeps its previous value (`8_000`ms) but
-  is no longer *borrowed* from a channel-spacing constant, because that constant no longer
-  exists to borrow it from — see its own comment.
+  `level2` socket decoding its own thirty-symbol snapshot, say — so the retry chain below
+  is unchanged in kind; `@subscribe_retry_delay_ms` keeps its previous value (`8_000`ms)
+  but is no longer *borrowed* from a channel-spacing constant, because that constant no
+  longer exists to borrow it from — see its own comment.
 
   **An adaptive, self-shrinking shard size was considered and rejected — for now.** The
   venue's own refusal could in principle drive `@level2_pairs_per_socket` down further at
@@ -131,17 +156,130 @@ defmodule DpExchange.Coinbase.Feed do
   apart from a stale one whose symbols the venue already dropped when it refused and
   closed the connection — and getting that race wrong risks silently under- or
   double-subscribing a shard, which is a worse failure mode than the loud, honest one this
-  module otherwise insists on everywhere else. Given `6` is not a guess but the one number
-  already proven safe, a correct runtime resize's complexity did not clear its bar against
-  a fixed, evidence-grounded constant plus the safety net that already exists:
-  `Socket`'s own `error_kind/1` already classifies "too many" as `:rate_limited` and
-  reports it as a `Core.Notice` on every occurrence (see `Socket`'s moduledoc), and
-  `coverage_by_kind/1` already never marks a symbol covered for `:order_book` on intent
-  alone — both pre-existing, verified unchanged by this fix, not new mechanism built for
-  it. If `6` is ever also refused, a consumer with `subscribe_notices/1` wired up hears
-  about it exactly as loudly as every other refusal in this file, and lowering the
-  constant is a one-line, reviewable change rather than a runtime decision this module
-  made silently on its own.
+  module otherwise insists on everywhere else. Given `30` is not a guess but the boundary
+  itself, now located rather than merely approached from below, a correct runtime resize's
+  complexity did not clear its bar against a fixed, evidence-grounded constant plus the
+  safety net that already exists: `Socket`'s own `error_kind/1` already classifies "too
+  many" as `:rate_limited` and reports it as a `Core.Notice` on every occurrence (see
+  `Socket`'s moduledoc), and `coverage_by_kind/1` already never marks a symbol covered for
+  `:order_book` on intent alone — both pre-existing, verified unchanged by this fix, not
+  new mechanism built for it. If `30` is ever also refused, a consumer with
+  `subscribe_notices/1` wired up hears about it exactly as loudly as every other refusal
+  in this file, and lowering the constant is a one-line, reviewable change rather than a
+  runtime decision this module made silently on its own.
+
+  ## Cumulative vs. concurrent — the ceiling this package cannot rule out by itself
+
+  The consumer's own harness used a fresh `Socket.start_link/1` for every attempt **on
+  purpose**, "because cumulative session state is the thing under test." That control
+  buys their measurement precision it would not otherwise have — but it also means their
+  406-symbol, `n=6..100` result above proves the ceiling on *concurrently held* `level2`
+  products. It cannot, by its own design, say whether Coinbase's real ceiling counts
+  concurrent subscriptions or **cumulative** ones — every distinct product this package's
+  own `level2` shards have ever asked one session to carry, whether or not all of them are
+  still wanted now. This module's own long-lived sockets are exactly the case that
+  distinction matters for, and it does not get to assume the answer is the convenient one.
+
+  **The code was checked, not guessed.** `reconcile_shard/7` — reached from `reshard/1`
+  whenever `subscribe/3`, `unsubscribe/2` or `update_symbols/2` changes a shard `Feed`
+  already has a socket open for — computed `added = wanted -- current` and, before this
+  fix, sent exactly those newly-added symbols to `Socket.subscribe/4` **on the same
+  already-open socket**, never a fresh one. `wanted_symbols` per shard is always
+  `≤ @level2_pairs_per_socket` by construction (`level2_shards/1` chunks to it), so no
+  single subscribe call this module ever sent asked one socket for more than the shard
+  ceiling *at that instant*. Nothing stopped the same socket's own subscription history
+  from growing past it over time, one `added` batch at a time.
+
+  **This is not a rare edge case; it is what ordinary universe churn does.** `wanted` is a
+  `MapSet`, and `MapSet.to_list/1`'s enumeration order is a function of the *current* key
+  set, not of insertion history — proven directly, not assumed: chunking a 406-member
+  synthetic set into groups of 30, then adding one more member and rechunking, moves 8 of
+  the original 406 symbols to a different chunk index; removing one member instead moves
+  3. A consumer whose universe gains or loses even a single symbol — exactly what
+  `DpCryptoManagement`'s own universe promotion/demotion does routinely — can therefore
+  hand an already-open `level2` shard several symbols it has never carried before, not
+  only when a caller explicitly asks to add one. At `@level2_pairs_per_socket` = `6` this
+  had enormous headroom: a shard would need to churn past six *net new* symbols before its
+  lifetime total could exceed even the old `100` ceiling nobody had located yet. At `30`,
+  aimed at a boundary now known exactly, there is no headroom at all — the very first
+  reshard that adds even one symbol to a shard already carrying its full 30 can, if
+  Coinbase's ceiling is cumulative, push that one socket's lifetime `level2` subscription
+  count to 31.
+
+  **Fixed by replacing the socket, not by learning the venue's real semantics** — this
+  package still cannot ask the venue that question (see above). `reconcile_shard/7`'s
+  `"level2"` clause now checks whether a reshard would add anything to an already-open
+  shard; if so, it opens a brand-new socket, subscribes it fresh with the shard's whole
+  target set, and only then discards the old one (`replace_level2_shard/7`,
+  `terminate_socket/1`) — the old socket is never asked to carry a product it did not
+  already have. A shard that only *loses* symbols keeps mutating its existing socket in
+  place, since removal cannot grow a cumulative count. `ticker` is untouched: it has no
+  known ceiling, so there is nothing for it to cumulatively exceed, and mutating its own
+  socket in place is unchanged. This makes the earlier "should never be over the ceiling"
+  reasoning true unconditionally — concurrently *and* cumulatively, per socket — rather
+  than only for the single request currently in flight, regardless of what Coinbase's
+  actual counting semantics turn out to be.
+
+  **One axis remains genuinely open, and this package does not get to guess it either.**
+  The unconditional 60-second resubscribe (`handle_info(:resubscribe, _)`, see below)
+  re-issues a shard's *unchanged* current symbols to its *already-subscribed* socket,
+  forever, for as long as that socket lives — the resilience this file's own reconnect
+  section depends on. If Coinbase's ceiling counts *attempts* — every subscribe frame a
+  session ever sent, distinct products or not — rather than distinct products, this timer
+  feeds that counter on every tick, and no shard size fixes that: even a single symbol,
+  resubscribed enough times on one long-lived socket, would eventually cross an
+  attempt-counted ceiling. This was already an open question before this change (see
+  `@default_resubscribe_interval_ms`'s own comment); this investigation did not close it,
+  and this package has no way to close it that does not require exactly the tier-3 access
+  it has just established a consumer can supply and this repo cannot. Two probes would
+  settle it, symmetric to the method above:
+
+  * **Attempt-counting.** One socket, a small fixed `level2` set well under 30 (say 5),
+    held constant, with `resubscribe_interval_ms` set low enough to fire dozens of
+    identical re-subscribes within a few minutes. A refusal despite concurrent membership
+    never exceeding 5 would mean attempts count; none after well over 30 re-issues would
+    be strong evidence only distinct concurrent products do.
+  * **Cumulative distinct-count.** One socket, 25 `level2` symbols, then several rounds of
+    "remove 5, add 5 new ones" — never exceeding 25 concurrently, but accumulating past 30
+    *distinct* products across the session by the second round. A refusal here despite
+    concurrent membership never exceeding 25 would confirm the cumulative-distinct
+    hypothesis this fix was written against; acceptance through several rounds would show
+    the fix above cost nothing but bought a safety margin that was not, in fact, load-
+    bearing.
+
+  ## A refusal is not always a clean gate — observed, not explained
+
+  DpCryptoManagement's bisection above answers "accepted or refused" per `n`, but two of
+  their runs saw something this package has no account of: at `n = 31`–`34` in one run,
+  `books = 0` (a clean refusal); at `n = 35`–`50` in the same run, 1,300–2,000 books
+  delivered *alongside* the `rate_limited` notice — a partially honoured oversized
+  subscription. A later run saw `n = 31` refuse *with* 1,655 books delivered. None of this
+  moves the boundary — every `n ≥ 31` refused and every `n ≤ 30` did not, in both runs —
+  but it means "refused" can apparently be a spectrum rather than a gate. See
+  `docs/reference/coinbase/level2-session-limit.md` for the full, dated account; it is
+  recorded there as an observed venue characteristic with no explanation attached, not
+  rationalised into one.
+
+  **At `@level2_pairs_per_socket` = 30 this package should never itself trigger a
+  partial refusal, and that reasoning was checked, not assumed:** every subscribe this
+  module sends for a `level2` shard carries at most 30 symbols — `wanted_symbols` per
+  shard is `≤ @level2_pairs_per_socket` by construction, and the fix above now also
+  bounds every socket's lifetime subscription count the same way. Nothing in this
+  package's own behaviour asks for 31 or more at once. Should the venue nonetheless
+  answer a `rate_limited` notice while some of that same shard's symbols are genuinely
+  delivering — the exact shape DpCryptoManagement observed — `coverage/1` and
+  `coverage_by_kind/1` need no special case to stay honest: both are built entirely from
+  `state.delivering`, which is populated only by `handle_info({:dp_exchange, :coinbase,
+  payload}, state)` when an actual `Types.Quote`, `Types.OrderBook` or
+  `Types.OrderBookDelta` arrives, tagged with whichever symbol it carries.
+  `handle_info({:dp_exchange, :coinbase, %Notice{}}, state)` — the clause a
+  `:rate_limited` notice takes — never touches `state.delivering` at all. A symbol that
+  delivered a book is covered for `:order_book` whether or not its shard's subscribe was
+  also, separately, answered with a refusal notice; a symbol that delivered nothing stays
+  `:not_covered` regardless. The two facts were never coupled in the first place, which is
+  the same "coverage is observed, never intended" guarantee this moduledoc opens with,
+  just exercised by a venue behaviour this package did not anticipate rather than one it
+  designed for.
 
   ## A timed-out subscribe used to be thrown away — now it is retried
 
@@ -444,14 +582,16 @@ defmodule DpExchange.Coinbase.Feed do
   # sockets" section.
   @pairs_per_socket 100
 
-  # `level2`'s own shard size — deliberately NOT `@pairs_per_socket`. Not a rediscovered
-  # venue limit either: no Coinbase documentation states one (re-checked 2026-09-06), and
-  # this repo cannot probe an authenticated channel live to find one (see the moduledoc).
-  # `6` is the largest `level2` subscription size this package has direct evidence the
-  # venue accepts — DpCryptoManagement's own production report: 100 refused four times out
-  # of four, 6 accepted once out of one. See the moduledoc for why a number strictly
-  # between those two was rejected as an unlabelled guess.
-  @level2_pairs_per_socket 6
+  # `level2`'s own shard size — deliberately NOT `@pairs_per_socket`. Not read from
+  # documentation: no Coinbase document states a per-session `level2` product ceiling
+  # (re-checked 2026-09-06), and this repo cannot probe an authenticated channel live to
+  # find one itself (see the moduledoc). `30` is a live bisection DpCryptoManagement ran
+  # against the real venue with real credentials — tier 3, structurally unavailable to
+  # this repo — on 2026-09-06 (issue #22): 6/12/25/30 accepted, 31/35/50/100 refused,
+  # boundary confirmed by interleaving and by a contamination check. See the moduledoc's
+  # "why 30" section for the method and the "cumulative vs. concurrent" section for what
+  # this number does and does not prove about a long-lived socket's own history.
+  @level2_pairs_per_socket 30
 
   # Between opening each new socket, whichever channel it will carry. Opening several
   # connections in the same instant is a connect burst the venue answers with resets.
@@ -514,7 +654,11 @@ defmodule DpExchange.Coinbase.Feed do
   # the assumption that "subscribes are idempotent on every venue in this family, so a
   # duplicate is harmless". If a venue counted *attempted* L2 stream requests per session
   # rather than established streams, that assumption would be false here and this timer
-  # would be feeding the counter — the open question in DpCryptoManagement's issue #22.
+  # would be feeding the counter — the open question in DpCryptoManagement's issue #22,
+  # STILL open after the `6` -> `30` bisection: that bisection used a fresh socket per
+  # attempt specifically to keep this question out of its own result (see the moduledoc's
+  # "cumulative vs. concurrent" section) and answers only the concurrent ceiling, not
+  # whether repeated identical resubscribes on ONE socket ever count against anything.
   # Settling it needs a short interval against a symbol count too small to exhaust any
   # plausible stream limit, which is not something a consumer could arrange while this was
   # a hardcoded constant.
@@ -841,6 +985,43 @@ defmodule DpExchange.Coinbase.Feed do
     {:noreply, state}
   end
 
+  # The deferred half of `replace_level2_shard/7`'s async clause — see the moduledoc's
+  # "cumulative vs. concurrent" section. `expected_current` is what this shard carried
+  # when the replace was scheduled; if `state.shards[key]` no longer matches it, something
+  # else already touched this shard (a later reshard, an unsubscribe that dropped it, a
+  # resubscribe cycle) and that change is authoritative — acting on this stale intent now
+  # would clobber it, so it is dropped instead.
+  def handle_info({:replace_shard_socket, channel, index, expected_current, wanted}, state) do
+    key = {channel, index}
+
+    case get_in(state.shards[key]) do
+      %{socket: old_socket, symbols: ^expected_current} ->
+        case get_socket(state) do
+          {:ok, new_socket, state} ->
+            terminate_socket(old_socket)
+            state = put_in(state.shards[key], %{socket: new_socket, symbols: wanted})
+            attempt_channel_subscribe(new_socket, channel, wanted, state.credentials, 1, state)
+
+          {:error, reason} ->
+            # The old socket is untouched and keeps serving `expected_current` — only the
+            # symbols this replace would have ADDED are what stays absent from coverage,
+            # so that (not the shard's whole target) is what gets reported missing here.
+            Logger.warning(
+              "[Coinbase Feed] #{channel} shard #{index} replacement socket did not open " <>
+                "(#{inspect(reason)}) — its existing socket keeps its current symbols; " <>
+                "the newly added ones stay on the internal poll until the next resubscribe " <>
+                "cycle retries this shard"
+            )
+
+            notify_shard_open_failed(state, channel, index, wanted -- expected_current, reason)
+            {:noreply, state}
+        end
+
+      _stale_or_gone ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info(:resubscribe, state) do
     Process.send_after(self(), :resubscribe, next_resubscribe_delay(state))
 
@@ -908,10 +1089,11 @@ defmodule DpExchange.Coinbase.Feed do
   # DpCryptoManagement hit this in issue #22 by setting `resubscribe_interval_ms: 5_000`,
   # well below even one shard's own send window, and lost the run to it. But the same
   # failure is reachable with NO option set: the 60s default is shorter than the cycle span
-  # from 13 shards upward — reachable well inside a single, wide `level2` grouping alone
-  # now that it is sized at `@level2_pairs_per_socket` rather than `@pairs_per_socket` (a
-  # 406-symbol universe alone needs 68 `level2` shards), so a large enough consumer walks
-  # into this far sooner than before.
+  # from 13 shards upward — reachable from a single `level2` grouping alone once a universe
+  # passes 360 symbols (`ceil(360 / 30)` is 12; 361 needs 13), a scope this package now
+  # sizes at `@level2_pairs_per_socket` rather than the far larger `@pairs_per_socket` (a
+  # 406-symbol universe needs 14 `level2` shards on its own), so a large enough consumer
+  # can still walk into this without `ticker` needing any shards of its own at all.
   #
   # The delay is therefore derived from the shard count that actually exists right now,
   # never from the configured value alone, and the extension is logged rather than applied
@@ -1100,7 +1282,28 @@ defmodule DpExchange.Coinbase.Feed do
     {:ok, state}
   end
 
-  defp reconcile_shard(state, {channel, _index} = key, socket, current, wanted, true, _delay) do
+  # `level2` gets its own clause — see the moduledoc's "cumulative vs. concurrent"
+  # section. `added` is computed here, once, purely to decide which path this shard takes:
+  # growing an already-open `level2` shard replaces the socket instead of mutating it, so
+  # no `level2` socket this module opens is ever asked, over its whole lifetime, to carry
+  # more distinct products than one shard's worth. A shard that only loses symbols cannot
+  # grow that count, so it keeps mutating its existing socket in place exactly as before.
+  defp reconcile_shard(state, {"level2", _index} = key, socket, current, wanted, sync?, delay) do
+    if wanted -- current == [] do
+      reconcile_shard_in_place(state, key, "level2", socket, current, wanted, sync?, delay)
+    else
+      replace_level2_shard(state, key, socket, current, wanted, sync?, delay)
+    end
+  end
+
+  # `ticker` has no known per-session ceiling (see the moduledoc), so there is nothing for
+  # it to cumulatively exceed — it keeps mutating its own already-open socket in place,
+  # exactly as every channel did before `level2` needed this distinction.
+  defp reconcile_shard(state, {"ticker", _index} = key, socket, current, wanted, sync?, delay) do
+    reconcile_shard_in_place(state, key, "ticker", socket, current, wanted, sync?, delay)
+  end
+
+  defp reconcile_shard_in_place(state, key, channel, socket, current, wanted, true, _delay) do
     added = wanted -- current
     removed = current -- wanted
 
@@ -1137,7 +1340,7 @@ defmodule DpExchange.Coinbase.Feed do
   # it in the SAME mailbox, taking `coverage/1`, `subscribe/3` and every other call to this
   # `Feed` down with it for as long as the stall lasts. Staggering by `delay` spreads that
   # risk out exactly as it already is for a newly-opened shard.
-  defp reconcile_shard(state, {channel, _index} = key, socket, current, wanted, false, delay) do
+  defp reconcile_shard_in_place(state, key, channel, socket, current, wanted, false, delay) do
     added = wanted -- current
     removed = current -- wanted
 
@@ -1154,6 +1357,45 @@ defmodule DpExchange.Coinbase.Feed do
     end
 
     {:ok, put_in(state.shards[key], %{socket: socket, symbols: wanted})}
+  end
+
+  # Replaces rather than mutates — see the moduledoc's "cumulative vs. concurrent"
+  # section. Synchronous only for the one shard `reshard/1` touches inline (`sync?:
+  # true`); a caller's reply must reflect whether the replacement actually landed.
+  # `state.shards[key]` is left untouched on failure, at either step, so a still-working
+  # old socket's symbols are never dropped for a replacement that never took — the caller
+  # sees `{:error, reason}`, exactly as any other failed synchronous subscribe, and can
+  # retry the same way.
+  defp replace_level2_shard(state, key, old_socket, _current, wanted, true, _delay) do
+    case get_socket(state) do
+      {:ok, new_socket, state} ->
+        case Socket.subscribe(new_socket, "level2", wanted, state.credentials) do
+          :ok ->
+            terminate_socket(old_socket)
+            {:ok, put_in(state.shards[key], %{socket: new_socket, symbols: wanted})}
+
+          {:error, reason} ->
+            terminate_socket(new_socket)
+            {{:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {{:error, reason}, state}
+    end
+  end
+
+  # Deferred the same way `open_shard/5`'s async clause defers opening a brand-new socket
+  # — see `reshard/1`'s staggering. `current` travels in the `{:replace_shard_socket, ...}`
+  # message so the handler can tell whether anything else touched this shard since this
+  # was scheduled; if so, that later change is authoritative and this stale replace is
+  # dropped. `state.shards[key]` is deliberately left pointing at `old_socket` with its
+  # ACTUAL (not yet grown) symbol set until the replacement lands — recording `wanted`
+  # here early would tell a second, interleaved reshard call that the old socket already
+  # carries symbols it does not, which is exactly the false belief that let this module
+  # mutate a live `level2` session past its shard size in the first place.
+  defp replace_level2_shard(state, {channel, index}, _old_socket, current, wanted, false, delay) do
+    Process.send_after(self(), {:replace_shard_socket, channel, index, current, wanted}, delay)
+    {:ok, state}
   end
 
   # See the moduledoc's "a timed-out subscribe used to be thrown away" section. Re-checks
@@ -1283,6 +1525,16 @@ defmodule DpExchange.Coinbase.Feed do
       {:ok, socket} -> {:ok, socket, state}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # Forces an old session closed rather than leaving it running unmanaged — see
+  # `replace_level2_shard/7` and `reconcile_shard/7`'s `"level2"` clause in the
+  # moduledoc's "cumulative vs. concurrent" section. WebSockex exposes no public graceful
+  # close, and `:kill` is the one exit reason no process can trap or ignore, so this is
+  # the one way to guarantee the old connection actually drops rather than lingering,
+  # still subscribed under a symbol set this module has already stopped tracking.
+  defp terminate_socket(socket) do
+    if Process.alive?(socket), do: Process.exit(socket, :kill)
   end
 
   # `Types.Quote`, `Types.OrderBook` and `Types.OrderBookDelta` all carry `:symbol`;

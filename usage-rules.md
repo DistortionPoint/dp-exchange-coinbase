@@ -179,10 +179,10 @@ happened both from an explicit `resubscribe_interval_ms: 5_000` and from the 60s
 *default* past thirteen shards. There is no way to make this package re-issue faster than
 that floor — only a log line explaining why it didn't.
 
-**Shard count now counts `level2` and `ticker` separately, and `level2` needs far more of
-them** — see the next section. Thirteen shards is trivially reachable from `level2` alone
-on a universe of well under a hundred symbols; it no longer takes 1,101 symbols the way it
-did when both channels shared one 100-per-socket grouping.
+**Shard count now counts `level2` and `ticker` separately, and `level2` needs more of
+them than `ticker` does** — see the next section. Thirteen shards is reachable from
+`level2` alone once your universe passes 360 symbols; it no longer takes 1,101 symbols the
+way it did when both channels shared one 100-per-socket grouping.
 
 **A shard whose socket never opened at all is retried on this same cadence, and it says
 so.** A transient connect failure on a shard beyond the first (a brief DNS blip, a refused
@@ -198,27 +198,53 @@ symbol that quietly never joined `coverage/1`.
 
 `level2` has a per-session product ceiling `ticker` does not; Coinbase names the failure
 (`"too many L2 streams requested in a single session"`) but documents no number, and this
-package cannot bisect a live authenticated session to find one — see this file's own
-"Do not point tests at the live venue" rule, which applies to this package's own
-development as much as to yours. Measured against a real 406-symbol production universe:
-every `level2` subscribe on a 100-symbol shard was refused, 5,099 times across sixteen
-otherwise-healthy boots; a six-symbol shard's was not.
+package cannot bisect a live authenticated session to find one itself — see this file's
+own "Do not point tests at the live venue" rule, which applies to this package's own
+development as much as to yours.
 
-So `level2` groups symbols at **6 per socket**, independent of and far smaller than
-`ticker`'s 100 — the largest size this package has direct evidence Coinbase accepts, not
-a rediscovered limit. A universe that needs 5 `ticker` sockets needs on the order of 68
-`level2` sockets for the same scope, and every one of them — either channel — is
-staggered onto the same connect sequence `@shard_spacing_ms` already describes above,
-with every `ticker` shard ordered ahead of every `level2` shard so `ticker`'s own
-boot-time coverage is unaffected. For a 406-symbol universe, that means `level2` coverage
-ramps in over several minutes rather than seconds — materially slower than `ticker`, and
-an accepted cost against the alternative: `order_book` coverage that never moved off
-`6 / 406` at all before this package sized the two channels apart.
+**The ceiling is now measured, not merely bounded from below.** A consumer holding real
+credentials — this repo structurally never does — bisected it live on 2026-09-06:
+`n = 6/12/25/30` accepted, `n = 31/35/50/100` refused, the boundary confirmed by
+interleaving two runs back to back and by a contamination check ruling out the refusals
+being an artefact of rapid probing rather than a genuine per-session ceiling. `30` is the
+largest value with positive evidence of acceptance; `31` is the smallest with positive
+evidence of refusal. No Coinbase document states this number even now — it is measured
+venue behaviour, not a documented figure.
+
+So `level2` groups symbols at **30 per socket**, independent of and smaller than
+`ticker`'s 100. A universe that needs 5 `ticker` sockets needs 14 `level2` sockets for the
+same 406-symbol scope (19 total), and every one of them — either channel — is staggered
+onto the same connect sequence `@shard_spacing_ms` already describes above, with every
+`ticker` shard ordered ahead of every `level2` shard so `ticker`'s own boot-time coverage
+is unaffected. For a 406-symbol universe, that means `level2` coverage ramps in over
+roughly 70 seconds rather than seconds — materially slower than `ticker`, and an accepted
+cost against the alternative: `order_book` coverage that never moved off a handful of
+symbols at all before this package sized the two channels apart.
 
 A symbol whose `level2` subscribe the venue refuses is never marked covered for
 `:order_book` — `coverage/1` and `coverage_by_kind/1` report only what actually arrived,
 never what was merely asked for — and a refusal reaches `subscribe_notices/1` as a
-`:rate_limited` `Core.Notice` every time the venue sends one.
+`:rate_limited` `Core.Notice` every time the venue sends one. The venue has also been
+observed answering a refusal while still delivering books for part of the same oversized
+request — an unexplained, dated venue characteristic recorded in
+`docs/reference/coinbase/level2-session-limit.md` — and `coverage/1` /
+`coverage_by_kind/1` need no special handling for it: both report only symbols that
+actually delivered a payload, entirely independent of whatever notice accompanied them.
+
+**A `level2` shard whose membership grows gets a new socket, not a bigger subscription on
+the old one.** If your universe changes over time — symbols added, removed, or rotated —
+an already-open `level2` shard that would gain a symbol is moved to a freshly opened
+socket carrying its whole new set, rather than asking the existing session to subscribe
+one more product on top of what it already has. This package cannot ask Coinbase whether
+its ceiling counts concurrently-held products or every distinct product a session has ever
+carried, so it does not get to assume the cheaper answer: replacing the socket keeps every
+`level2` session's lifetime subscription count at or under 30 regardless of which answer
+is true. A shard that only loses symbols is unaffected — removal cannot grow that count,
+so it keeps its existing socket. This is an internal mechanism, not a new call you make,
+but it can mean a very brief coverage gap for the newly-added symbols on a shard mid-churn
+while the new socket comes up, reported the same way any other failed-to-open shard is:
+`subscribe_notices/1` receives a `:coverage_change` notice, and `coverage/1` simply does
+not show them covered yet.
 
 ## Testing against this package
 

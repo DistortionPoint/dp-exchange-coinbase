@@ -615,6 +615,75 @@ acceptable changelog line.
   13-shard one, and its expected numbers drop the deleted `@channel_spacing_ms` term —
   both mechanical consequences of this change, not new behaviour of their own.
 
+- **`@level2_pairs_per_socket` was `6` — a conservative lower bound, correctly labelled as
+  one — and the real boundary is now measured: `30`. Same issue #22, continuing.** `6` was
+  never a rediscovered venue limit; it was the largest size this package had any positive
+  evidence for at the time, with `100` (refused) as the nearest known failure and nothing
+  in between actually tried. This package still cannot bisect a live, authenticated
+  `level2` session itself — that is tier 3, a line this repo does not cross for any
+  endpoint. **DpCryptoManagement can, and did**, on 2026-09-06 (issue #22): a fresh
+  socket per attempt, never reused, against their real 406-symbol scope —
+  `n = 6/12/25/30` accepted, `n = 31/35/50/100` refused, confirmed by interleaving two
+  runs back to back and by a contamination check (re-running `n=6` and `n=30` immediately
+  after a refusal run, both still accepted, ruling out probe-induced saturation as the
+  cause). `30` is the largest value with positive evidence of acceptance, `31` the
+  smallest with positive evidence of refusal — the boundary itself, not merely a
+  known-good far below a known-bad. See `docs/reference/coinbase/level2-session-limit.md`
+  for the full method and attribution.
+
+  For DpCryptoManagement's 406-symbol universe this is 14 `level2` sockets instead of 68
+  (19 total instead of 73) and roughly 70 seconds to full `order_book` coverage instead of
+  about six minutes — the same staggered, `ticker`-first connect sequence as before, just
+  markedly shorter because far fewer sockets need it.
+
+  **A second question this raises got checked directly, not left open by omission.** The
+  consumer's harness used a fresh socket per attempt *specifically* to keep cumulative
+  session state out of its own result, which means it cannot say whether Coinbase's
+  ceiling counts concurrently-held products or every distinct product a session has ever
+  carried. Checked against this package's own code: `reconcile_shard/7` used to subscribe
+  a shard's newly-added symbols onto whatever socket that shard already had open, and a
+  `MapSet`'s enumeration order being a function of its current keys (not insertion order)
+  means ordinary universe churn — not only a caller literally adding a symbol — routinely
+  hands an already-open `level2` shard products it has never carried before. At `6` this
+  had enormous headroom; at `30`, aimed at a now-exact boundary, it had none: the very
+  first churn past a full shard could have pushed one socket's *lifetime* subscription
+  count to 31 even though its concurrent membership never left 30. Fixed by replacing the
+  socket instead of mutating it whenever a `level2` shard's membership would grow
+  (`reconcile_shard/7`'s `"level2"` clause, `replace_level2_shard/7`,
+  `terminate_socket/1`) — a shard that only loses symbols keeps its existing socket, since
+  removal cannot grow that count, and `ticker` is unaffected, since it has no known
+  ceiling to protect. This makes "should never be over the ceiling" hold unconditionally,
+  concurrently and cumulatively, per socket, regardless of which of Coinbase's two
+  possible countings turns out to be real.
+
+  **One axis is still genuinely open and was not fixed here.** The unconditional
+  60-second resubscribe re-issues a shard's unchanged symbols to its already-subscribed
+  socket forever, which would feed an *attempt-counted* ceiling if Coinbase has one — this
+  is the same open question `Feed`'s `@default_resubscribe_interval_ms` comment already
+  named before this investigation, and this investigation did not close it. Two specific
+  probes that would are recorded in `docs/reference/coinbase/level2-session-limit.md`,
+  for whichever party next holds the credential to run them.
+
+  **DpCryptoManagement also reported a refusal that was not always a clean gate** — some
+  oversized subscribes delivered 1,300+ books alongside their `rate_limited` notice rather
+  than refusing outright, once even at `n=31`, the smallest over-the-boundary value. This
+  does not move the boundary (every `n ≥ 31` refused, every `n ≤ 30` did not) and has no
+  explanation from either party; it is recorded, dated and attributed, as an unexplained
+  venue characteristic in `docs/reference/coinbase/level2-session-limit.md`, not
+  rationalised into a theory neither party has evidence for. This package should never
+  itself trigger it — every `level2` subscribe it sends carries at most 30 symbols by
+  construction, before and after this fix — and `coverage/1` / `coverage_by_kind/1` need
+  no change to stay honest if it ever does: both are built entirely from symbols that
+  actually delivered a payload, and a `Core.Notice` never touches that bookkeeping.
+
+  New tests in `feed_test.exs` pin both the number and the fix: `35` symbols (rather than
+  `10`) now produces two `level2` shards at `30`/socket; a `level2` shard engineered to be
+  missing symbols its own fresh chunking would include is replaced — old socket killed,
+  new one recorded, target set intact — while one only losing symbols keeps its existing
+  socket; `ticker` given the identical setup keeps mutating in place; the deferred
+  (non-primary-shard) replace path is driven directly, including the stale-message guard
+  and a replacement socket that fails to open.
+
 ### Documentation
 
 - **CLAUDE.md claimed this package parses Coinbase's `cb-after` / `cb-before`

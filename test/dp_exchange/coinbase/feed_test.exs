@@ -139,8 +139,8 @@ defmodule DpExchange.Coinbase.FeedTest do
     test "the 60s DEFAULT is itself too short past 13 shards, and is extended too" do
       # Reachable with no option set at all: a cycle spans (shards - 1) * 5_000, which
       # passes 60s at 13 shards — trivially reachable from `level2` alone, sized at
-      # `@level2_pairs_per_socket` rather than `@pairs_per_socket` (78 symbols already
-      # needs 13 shards at 6/socket). The consumer's diagnostic knob merely exposed a
+      # `@level2_pairs_per_socket` rather than `@pairs_per_socket` (361 symbols already
+      # needs 13 shards at 30/socket). The consumer's diagnostic knob merely exposed a
       # limit the default already had.
 
       shards =
@@ -852,11 +852,11 @@ defmodule DpExchange.Coinbase.FeedTest do
     # fast as it was — its shard is still the call's synchronous primary.
     @credentials %{api_key: "k", api_secret: "s"}
 
-    test "10 symbols is one ticker shard and two level2 shards, ticker first" do
-      # 10 symbols: one `ticker` shard (`shards/1` at 100/socket never splits it) against
-      # two `level2` shards (`chunk_every(10, 6)` is `[6, 4]`) — proof the two channels
+    test "35 symbols is one ticker shard and two level2 shards, ticker first" do
+      # 35 symbols: one `ticker` shard (`shards/1` at 100/socket never splits it) against
+      # two `level2` shards (`chunk_every(35, 30)` is `[30, 5]`) — proof the two channels
       # are sized independently rather than sharing one grouping's boundaries.
-      symbols = for n <- 1..10, do: "SYM#{n}-USD"
+      symbols = for n <- 1..35, do: "SYM#{n}-USD"
 
       feed =
         start_supervised!(
@@ -1338,6 +1338,223 @@ defmodule DpExchange.Coinbase.FeedTest do
       # `@shard_spacing_ms` is 5_000; allow real scheduler jitter either side rather than
       # pinning the exact figure.
       assert t1 - t0 >= 4_000
+    end
+  end
+
+  describe "level2 replaces its socket rather than mutating it — cumulative vs. concurrent" do
+    # See `feed.ex`'s moduledoc, "cumulative vs. concurrent" section. `reconcile_shard/7`
+    # used to send only the newly-added symbols to `Socket.subscribe/4` on whatever socket
+    # a `level2` shard already had open — fine for the CONCURRENT ceiling `n <= 30` always
+    # respects by construction, but nothing stopped that same socket's own subscription
+    # HISTORY from growing past 30 distinct products over its lifetime as `wanted` churned.
+    # These tests exercise the fix directly: a shard whose membership would GROW gets a
+    # fresh socket instead, so no `level2` socket this module opens is ever asked, over its
+    # whole lifetime, to carry more than one shard's worth of distinct products.
+    #
+    # A real, JWT-signing credential — not the connect-failure-only `%{api_key: "k",
+    # api_secret: "s"}` used elsewhere in this file — because these tests exercise an
+    # actual successful `Socket.subscribe/4` call, which builds a real Ed25519 JWT (see
+    # `Auth.jwt/1`) rather than failing before it gets that far.
+    defp valid_credentials do
+      %{api_key: "k", api_secret: :crypto.strong_rand_bytes(32) |> Base.encode64()}
+    end
+
+    # Sets up a feed whose `state.wanted` and `state.shards` already agree with each other
+    # everywhere EXCEPT the one `level2` shard under test, so `reshard/1` touches exactly
+    # that one shard and nothing else — no sort-order contest with `ticker` (which always
+    # sorts first — see `shard_key_order/2`) to reason about. `wanted_list` is computed the
+    # same way `reshard/1` computes it (`MapSet.to_list/1` of the same symbols), which is
+    # safe to precompute here because a `MapSet`'s enumeration order is a function of its
+    # current key set only, never of insertion history — see the moduledoc's own proof of
+    # that fact.
+    defp feed_with_stale_level2_shard(stale_symbols_fun) do
+      symbols = for n <- 1..35, do: "SYM#{n}-USD"
+      wanted_list = symbols |> MapSet.new() |> MapSet.to_list()
+      [level2_shard0, level2_shard1] = Enum.chunk_every(wanted_list, 30)
+
+      old_socket = fake_socket()
+      ticker_socket = fake_socket()
+      level2_socket1 = fake_socket()
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: fn -> {:ok, %{}} end}
+        )
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | credentials: valid_credentials(),
+            wanted: MapSet.new(symbols),
+            shards: %{
+              {"ticker", 0} => %{socket: ticker_socket, symbols: wanted_list},
+              {"level2", 0} => %{socket: old_socket, symbols: stale_symbols_fun.(level2_shard0)},
+              {"level2", 1} => %{socket: level2_socket1, symbols: level2_shard1}
+            }
+        }
+      end)
+
+      %{feed: feed, old_socket: old_socket, target: level2_shard0}
+    end
+
+    test "a shard that would GAIN symbols is replaced: old socket killed, new one carries " <>
+           "the full target set" do
+      %{feed: feed, old_socket: old_socket, target: target} =
+        feed_with_stale_level2_shard(&Enum.take(&1, 25))
+
+      ref = Process.monitor(old_socket)
+      new_socket = fake_socket()
+      :sys.replace_state(feed, fn state -> %{state | injected_socket: new_socket} end)
+
+      assert :ok = Feed.subscribe(feed, [], to: self())
+
+      # The old session is force-closed, not left running under a symbol set this module
+      # has already stopped tracking — see `terminate_socket/1`.
+      assert_receive {:DOWN, ^ref, :process, ^old_socket, :killed}, 500
+
+      assert %{{"level2", 0} => %{socket: ^new_socket, symbols: ^target}} =
+               Map.take(:sys.get_state(feed).shards, [{"level2", 0}])
+    end
+
+    test "a shard that only LOSES symbols keeps mutating its existing socket" do
+      %{feed: feed, old_socket: old_socket, target: target} =
+        feed_with_stale_level2_shard(&(&1 ++ ["EXTRA-USD"]))
+
+      assert :ok = Feed.subscribe(feed, [], to: self())
+
+      # No replacement needed — removal alone can never grow a socket's lifetime
+      # subscription count, so the socket that was already open keeps carrying this shard.
+      assert Process.alive?(old_socket)
+
+      assert %{{"level2", 0} => %{socket: ^old_socket, symbols: ^target}} =
+               Map.take(:sys.get_state(feed).shards, [{"level2", 0}])
+    end
+
+    test "ticker keeps mutating its own socket in place even when it gains symbols — it " <>
+           "has no known ceiling to protect" do
+      ticker_socket = fake_socket()
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | wanted: MapSet.new(["BTC-USD"]),
+            shards: %{{"ticker", 0} => %{socket: ticker_socket, symbols: []}}
+        }
+      end)
+
+      assert :ok = Feed.subscribe(feed, [], to: self())
+
+      # Same socket, now carrying the symbol — never replaced, because `ticker` has no
+      # cumulative ceiling this module protects it against.
+      assert %{{"ticker", 0} => %{socket: ^ticker_socket, symbols: ["BTC-USD"]}} =
+               :sys.get_state(feed).shards
+
+      assert Process.alive?(ticker_socket)
+    end
+
+    test "a deferred replace lands cleanly when nothing else touched the shard since" do
+      feed = start_feed()
+      old_socket = fake_socket()
+      new_socket = fake_socket()
+      ref = Process.monitor(old_socket)
+      current = ~w(SYM1-USD SYM2-USD)
+      wanted = current ++ ~w(SYM3-USD)
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | credentials: valid_credentials(),
+            injected_socket: new_socket,
+            shards: %{{"level2", 0} => %{socket: old_socket, symbols: current}}
+        }
+      end)
+
+      send(feed, {:replace_shard_socket, "level2", 0, current, wanted})
+      :sys.get_state(feed)
+
+      assert_receive {:DOWN, ^ref, :process, ^old_socket, :killed}, 500
+
+      assert %{{"level2", 0} => %{socket: ^new_socket, symbols: ^wanted}} =
+               :sys.get_state(feed).shards
+    end
+
+    test "a deferred replace is dropped when the shard's symbols changed since it was " <>
+           "scheduled" do
+      feed = start_feed()
+      socket = fake_socket()
+      scheduled_against = ~w(SYM1-USD SYM2-USD)
+      actual_current = ~w(SYM1-USD SYM2-USD SYM3-USD)
+
+      :sys.replace_state(feed, fn state ->
+        %{state | shards: %{{"level2", 0} => %{socket: socket, symbols: actual_current}}}
+      end)
+
+      send(feed, {:replace_shard_socket, "level2", 0, scheduled_against, ~w(SYM1-USD SYM4-USD)})
+      :sys.get_state(feed)
+
+      # The later change (whatever set `actual_current`) is authoritative — this stale
+      # intent must not clobber it, and the socket that later change chose stays untouched.
+      assert %{{"level2", 0} => %{socket: ^socket, symbols: ^actual_current}} =
+               :sys.get_state(feed).shards
+
+      assert Process.alive?(socket)
+    end
+
+    test "a deferred replace is dropped when the shard was dropped entirely since it was " <>
+           "scheduled" do
+      feed = start_feed()
+
+      send(feed, {:replace_shard_socket, "level2", 0, ~w(SYM1-USD), ~w(SYM1-USD SYM2-USD)})
+      :sys.get_state(feed)
+
+      assert :sys.get_state(feed).shards == %{}
+      assert Process.alive?(feed)
+    end
+
+    test "when the replacement socket cannot open, the old socket and its symbols are " <>
+           "left untouched, and the gap is reported" do
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           url: "ws://127.0.0.1:1/nowhere",
+           alias_map_source: fn -> {:ok, %{}} end}
+        )
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      old_socket = fake_socket()
+      current = ~w(SYM1-USD)
+      wanted = current ++ ~w(SYM2-USD)
+
+      :sys.replace_state(feed, fn state ->
+        %{state | shards: %{{"level2", 0} => %{socket: old_socket, symbols: current}}}
+      end)
+
+      log =
+        capture_log(fn ->
+          send(feed, {:replace_shard_socket, "level2", 0, current, wanted})
+
+          assert_receive {:dp_exchange, :coinbase,
+                          %Notice{kind: :coverage_change, details: %{channel: "level2", shard: 0}} =
+                            notice},
+                         2_000
+
+          # Only the symbol the replacement would have ADDED is reported missing — the
+          # shard's already-working symbol is still on the old, untouched socket.
+          assert notice.details.symbol_count == 1
+        end)
+
+      assert log =~ "replacement socket did not open"
+
+      assert %{{"level2", 0} => %{socket: ^old_socket, symbols: ^current}} =
+               :sys.get_state(feed).shards
+
+      assert Process.alive?(old_socket)
+      assert Process.alive?(feed)
     end
   end
 
