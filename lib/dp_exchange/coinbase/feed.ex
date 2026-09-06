@@ -47,6 +47,60 @@ defmodule DpExchange.Coinbase.Feed do
   into a socket still decoding that arrives as a `send_timeout` and can take the
   connection down with it.
 
+  ## A timed-out subscribe used to be thrown away — now it is retried
+
+  `FrameSender`'s own moduledoc says the whole point of turning a `send_frame` exit into
+  `{:error, :send_timeout}` is that "a slow socket becomes a failed batch, which a caller
+  can report and retry, rather than a dead connection", and that subscribes are idempotent
+  on every venue in this family, so a duplicate is harmless. This module used to log that
+  error and drop it — the retry half of the design was never wired, so a `channel_subscribe`
+  that lost the race against a `level2` snapshot burst simply stayed unsubscribed until the
+  next unconditional resubscribe tick, which reproduces the identical busy-socket condition
+  and fails identically.
+
+  This is not hypothetical. A consumer running against a real ~400-symbol universe measured
+  the exact inversion this predicts, across five boots over roughly 5.5 hours:
+
+  | state | quotes (`ticker`) | order_book (`level2`) |
+  |---|---|---|
+  | broken (4 boots) | ~5 / 406 | ~406 / 406, 11,000+ frames |
+  | healthy (1 boot) | 400 / 406 | 6 / 406 |
+
+  When `level2` gets through broadly, its opening snapshot burst is what starves `ticker`;
+  when the venue refused most `level2` subscriptions outright (its own per-session stream
+  limit — see above), `ticker` had the socket to itself and got everything. A lone
+  `:send_timeout` on a `ticker` subscribe was also observed directly in an earlier run.
+  Both are DpCryptoManagement's issue #22.
+
+  ### Classify before retrying — not every failure can be fixed by waiting
+
+  `{:error, :send_timeout}` and `{:error, {:send_exit, reason}}` are **transient**: the
+  socket was busy decoding a burst, or briefly gone, and the identical request can
+  reasonably succeed once it catches up. `{:error, {:credentials_required, channel}}` (see
+  `Socket`'s `subscription_message/3`) is **permanent** — no amount of waiting supplies a
+  credential that was never given, and retrying it would only loop, so it fails loudly on
+  the first attempt and is never rescheduled.
+
+  ### The backoff borrows a number this module already trusts, rather than inventing one
+
+  A retry needs to wait out the same busy-socket condition `@channel_spacing_ms` already
+  exists to wait out between `level2` and `ticker` on the same socket — so
+  `@subscribe_retry_delay_ms` **is** `@channel_spacing_ms`, not a second, independently
+  guessed number for the same underlying wait. `@max_subscribe_retries` is `2`: one initial
+  attempt plus two retries is enough to survive one snapshot burst without turning a stuck
+  socket into an unbounded loop. See the constants' own comments for the arithmetic that
+  keeps the whole retry chain well inside a resubscribe cycle, so it can never stack frames
+  against the unconditional re-issue documented above.
+
+  ### Exhaustion is loud
+
+  A channel that never subscribed is exactly the invisible half-dead feed this whole issue
+  is about, and it used to surface as a `Logger.warning` a consumer had no facade-level way
+  to see. Giving up — whether because the failure was permanent or because retries ran out
+  — now also emits a `Core.Notice` of kind `:coverage_change`: those symbols will not
+  deliver this kind of data, which is exactly the fact `coverage/1` and `coverage_by_kind/1`
+  need a consumer to go re-check rather than discover from a quiet chart.
+
   ## A reconnect that does not resubscribe is a coverage collapse with no error
 
   WebSockex reconnects a dropped socket on its own, and a bare reconnect leaves it
@@ -206,6 +260,32 @@ defmodule DpExchange.Coinbase.Feed do
   # `ticker` on top of that arrives as a `send_timeout`.
   @channel_spacing_ms 8_000
 
+  # A retry waits out the same busy-socket condition `@channel_spacing_ms` already exists
+  # to wait out — see the moduledoc's "a timed-out subscribe used to be thrown away"
+  # section. Reusing it rather than a second, independently guessed number for the same
+  # underlying wait: the thing that caused the timeout was a socket still decoding a
+  # `level2` snapshot burst, and this is already the duration this module trusts to be
+  # enough for that.
+  #
+  # Overridable via `:subscribe_retry_delay_ms`, for the same reason
+  # `:resubscribe_interval_ms` is: a test proving a retry actually happens and succeeds
+  # must not wait out the real, multi-second production delay to do it.
+  @subscribe_retry_delay_ms @channel_spacing_ms
+
+  # One initial attempt plus this many retries. Bounded deliberately — see "not every
+  # failure can be fixed by waiting" in the moduledoc.
+  #
+  # The whole retry chain for one channel subscribe must finish well inside a resubscribe
+  # cycle, or its tail would stack fresh frames onto a socket the next unconditional
+  # re-issue is about to hit again (see `next_resubscribe_delay/1`). Worst case: the
+  # channel itself can start up to `@channel_spacing_ms` after its shard's tick (there are
+  # only two channels, so at most one channel-spacing delay ahead of the first), plus
+  # `@max_subscribe_retries * @subscribe_retry_delay_ms` for the retries themselves —
+  # 8_000 + 2 * 8_000 = 24_000ms, comfortably inside the 60s default and inside any
+  # interval `next_resubscribe_delay/1` computes (which only ever extends the interval,
+  # never shortens it).
+  @max_subscribe_retries 2
+
   # Re-issue every shard's current subscriptions on this cadence, unconditionally — see
   # the moduledoc on reconnects.
   #
@@ -320,6 +400,10 @@ defmodule DpExchange.Coinbase.Feed do
        # map rather than the bare timestamp it used to be.
        delivering: %{},
        resubscribe_interval_ms: resubscribe_interval_ms,
+       # See `@subscribe_retry_delay_ms` — the same "diagnostic knob, real default" shape
+       # as `resubscribe_interval_ms` above, for a test's benefit rather than a consumer's.
+       subscribe_retry_delay_ms:
+         Keyword.get(opts, :subscribe_retry_delay_ms) || @subscribe_retry_delay_ms,
        # The venue's own declared alias relationships — see the moduledoc's "the venue
        # rewrites an aliased product id on delivery" section. `%{}` until fetched (or
        # forever, if the fetch fails), which is deliberately indistinguishable from "the
@@ -451,20 +535,14 @@ defmodule DpExchange.Coinbase.Feed do
   end
 
   def handle_info({:channel_subscribe, socket, channel, symbols, credentials}, state) do
-    if Process.alive?(socket) do
-      case Socket.subscribe(socket, channel, symbols, credentials) do
-        :ok ->
-          :ok
+    attempt_channel_subscribe(socket, channel, symbols, credentials, 1, state)
+  end
 
-        {:error, reason} ->
-          Logger.warning(
-            "[Coinbase Feed] #{channel} subscribe for #{length(symbols)} symbol(s) " <>
-              "failed: #{inspect(reason)}"
-          )
-      end
-    end
-
-    {:noreply, state}
+  # The retry this module schedules on a transient failure — see the moduledoc's "a
+  # timed-out subscribe used to be thrown away" section. `attempt` starts at `2` here;
+  # the first attempt is always the 5-tuple clause above.
+  def handle_info({:channel_subscribe, socket, channel, symbols, credentials, attempt}, state) do
+    attempt_channel_subscribe(socket, channel, symbols, credentials, attempt, state)
   end
 
   def handle_info({:channel_unsubscribe, socket, channel, symbols}, state) do
@@ -745,6 +823,97 @@ defmodule DpExchange.Coinbase.Feed do
   # cost a wire round trip to learn what the credential's absence already answers.
   defp channels_for(nil), do: ["ticker"]
   defp channels_for(_credentials), do: @channels
+
+  # See the moduledoc's "a timed-out subscribe used to be thrown away" section. Re-checks
+  # `Process.alive?/1` on every attempt, not just the first — the socket this closure
+  # closed over can die between a failed attempt and its scheduled retry, and sending
+  # into a dead pid here would be exactly the crash `FrameSender` exists to prevent
+  # elsewhere. A dead socket simply stops the chain: nothing subscribes it, and nothing
+  # re-attempts against a corpse, matching every other dead-socket branch in this module.
+  defp attempt_channel_subscribe(socket, channel, symbols, credentials, attempt, state) do
+    if Process.alive?(socket) do
+      case Socket.subscribe(socket, channel, symbols, credentials) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          handle_subscribe_failure(socket, channel, symbols, credentials, attempt, reason, state)
+      end
+    end
+
+    {:noreply, state}
+  end
+
+  # Transient: the socket was busy decoding a burst or briefly unreachable, and the
+  # identical request can reasonably succeed once it catches up — worth retrying.
+  # Everything else (chiefly `{:credentials_required, channel}`) is a fact about the
+  # request itself that no amount of waiting changes — retrying it would only loop.
+  defp transient_subscribe_failure?(:send_timeout), do: true
+  defp transient_subscribe_failure?({:send_exit, _reason}), do: true
+  defp transient_subscribe_failure?(_reason), do: false
+
+  defp handle_subscribe_failure(socket, channel, symbols, credentials, attempt, reason, state) do
+    cond do
+      not transient_subscribe_failure?(reason) ->
+        Logger.warning(
+          "[Coinbase Feed] #{channel} subscribe for #{length(symbols)} symbol(s) failed " <>
+            "permanently (#{inspect(reason)}) — not retrying"
+        )
+
+        notify_subscribe_failed(
+          state,
+          channel,
+          symbols,
+          reason,
+          "this will keep failing every cycle until it is corrected"
+        )
+
+      attempt > @max_subscribe_retries ->
+        Logger.warning(
+          "[Coinbase Feed] #{channel} subscribe for #{length(symbols)} symbol(s) failed " <>
+            "after #{attempt} attempt(s) (#{inspect(reason)}) — giving up until the next " <>
+            "resubscribe cycle"
+        )
+
+        notify_subscribe_failed(
+          state,
+          channel,
+          symbols,
+          reason,
+          "it may recover at the next unconditional resubscribe cycle"
+        )
+
+      true ->
+        Logger.warning(
+          "[Coinbase Feed] #{channel} subscribe for #{length(symbols)} symbol(s) failed " <>
+            "(#{inspect(reason)}), attempt #{attempt}/#{@max_subscribe_retries + 1} — " <>
+            "retrying in #{state.subscribe_retry_delay_ms}ms"
+        )
+
+        Process.send_after(
+          self(),
+          {:channel_subscribe, socket, channel, symbols, credentials, attempt + 1},
+          state.subscribe_retry_delay_ms
+        )
+    end
+  end
+
+  # Loud on purpose — see the moduledoc's "exhaustion is loud" section. A channel that
+  # never subscribed is exactly the invisible half-dead feed DpCryptoManagement's issue
+  # #22 is about, and a `Logger.warning` alone gave a consumer no facade-level way to see
+  # it. `:coverage_change` is Core's kind for exactly this shape of fact: subscribed
+  # intent that did not become delivery, which is what should send a consumer back to
+  # `coverage/1` or `coverage_by_kind/1` rather than trusting a quiet chart.
+  defp notify_subscribe_failed(state, channel, symbols, reason, outlook) do
+    notice =
+      Notice.new(:coverage_change, :coinbase,
+        severity: :warning,
+        message: "#{channel} subscribe for #{length(symbols)} symbol(s) never took — #{outlook}",
+        details: %{channel: channel, symbol_count: length(symbols), reason: inspect(reason)}
+      )
+
+    fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})
+  end
 
   defp get_socket(%{injected_socket: socket} = state) when is_pid(socket) do
     {:ok, socket, %{state | injected_socket: nil}}

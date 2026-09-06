@@ -74,6 +74,51 @@ acceptable changelog line.
 
 ### Fixed
 
+- **A timed-out channel subscribe was logged and thrown away — no retry until the next
+  60s tick reproduced the identical failure, DpCryptoManagement's issue #22.**
+  `FrameSender`'s own moduledoc says the whole point of turning a `send_frame` exit into
+  `{:error, :send_timeout}` is that a slow socket becomes "a failed batch, which a caller
+  can report and retry" — the retry half of that design was never wired into `Feed`. A
+  `level2` subscribe triggers a full per-symbol book snapshot; the socket is
+  single-threaded and cannot service the next `send_frame` while decoding it, so firing
+  `ticker`'s subscribe `@channel_spacing_ms` later still landed inside that window on a
+  100-symbol shard and blew the hardcoded 5s send window. Dropped, forever, since nothing
+  re-attempted it before the next resubscribe cycle recreated the same busy socket.
+
+  Measured live across a real ~400-symbol consumer, five boots over roughly 5.5 hours —
+  the exact inversion this predicts:
+
+  | state | quotes (`ticker`) | order_book (`level2`) |
+  |---|---|---|
+  | broken (4 boots) | ~5 / 406 | ~406 / 406, 11,000+ frames |
+  | healthy (1 boot) | 400 / 406 | 6 / 406 |
+
+  When `level2` got through broadly, its opening snapshot burst starved `ticker`; when
+  the venue refused most `level2` subscriptions outright (its own per-session stream
+  limit — see the "sharded" section above), `ticker` had the socket to itself and got
+  everything. A lone `:send_timeout` on a `ticker` subscribe was also observed directly
+  in an earlier run.
+
+  `{:error, :send_timeout}` and `{:error, {:send_exit, reason}}` are now retried —
+  transient, since the identical request can reasonably succeed once a busy or briefly
+  gone socket catches up. `{:error, {:credentials_required, channel}}` is not: no amount
+  of waiting supplies a credential that was never given, and it fails loudly on the first
+  attempt instead of looping. The backoff reuses `@channel_spacing_ms` rather than a
+  second, independently guessed number for the same busy-socket wait, bounded to two
+  retries (three attempts total) — the whole chain resolves in at most 24s, well inside
+  even the 60s default resubscribe cycle, so it can never stack fresh frames against the
+  unconditional re-issue. Exhausting the retries, and the permanent-error path, both now
+  emit a `Core.Notice` of kind `:coverage_change` in addition to the existing log — a
+  channel that never subscribed is exactly the invisible half-dead feed this issue is
+  about, and a `Logger.warning` alone gave a consumer no facade-level way to see it. A
+  socket that dies between attempts is re-checked, not assumed alive, and simply stops
+  the chain rather than sending into a corpse.
+
+  Deliberately unchanged: `@channels` order (`level2` before `ticker`) and
+  `@channel_spacing_ms` itself. Subscribing the lighter channel first is a plausible
+  additional fix, but it is unmeasured and changing two things at once would make the
+  next measurement uninterpretable — raised separately with the consumer instead.
+
 - **`:rate_limit_blocking` was unreachable on every REST call this package makes —
   family-wide gap, DpCryptoManagement's issue #23.** `Core.HttpClient.check_rate_limits/1`
   reads this option to choose `acquire/3` (wait for capacity) over fail-fast `check/3`,

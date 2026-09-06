@@ -785,6 +785,56 @@ defmodule DpExchange.Coinbase.FeedTest do
       fake_socket_loop()
     end
 
+    # Fails `fail_times` sends with `{:error, :send_timeout}`, then answers `:ok` forever
+    # after — a socket that was busy decoding a burst and then caught up. `counter`
+    # records every send it actually received, which is how a test proves a retry was
+    # sent rather than merely inferring it from timing.
+    defp flaky_socket(fail_times, counter) do
+      pid = spawn(fn -> flaky_socket_loop(fail_times, counter) end)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp flaky_socket_loop(remaining, counter) do
+      receive do
+        {:"$websockex_send", from, _frame} ->
+          :counters.add(counter, 1, 1)
+
+          if remaining > 0 do
+            :gen.reply(from, {:error, :send_timeout})
+            flaky_socket_loop(remaining - 1, counter)
+          else
+            :gen.reply(from, :ok)
+            flaky_socket_loop(0, counter)
+          end
+
+        _other ->
+          flaky_socket_loop(remaining, counter)
+      end
+    end
+
+    # Never recovers — every send gets `{:error, :send_timeout}`. `counter` is how the
+    # exhaustion test proves the retry chain is bounded: the count stops rising once the
+    # code gives up, rather than climbing forever.
+    defp always_fails_socket(counter) do
+      pid = spawn(fn -> always_fails_loop(counter) end)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp always_fails_loop(counter) do
+      receive do
+        {:"$websockex_send", from, _frame} ->
+          :counters.add(counter, 1, 1)
+          :gen.reply(from, {:error, :send_timeout})
+
+        _other ->
+          :ok
+      end
+
+      always_fails_loop(counter)
+    end
+
     test "an :open_shard message that succeeds opens the socket and subscribes" do
       # `socket:` pre-supplies the connection the same way `start_with_socket/0` does
       # for the top-level subscribe tests — a `feed_test.exs` running this against the
@@ -840,6 +890,108 @@ defmodule DpExchange.Coinbase.FeedTest do
       socket = fake_socket()
 
       send(feed, {:channel_subscribe, socket, "ticker", ["BTC-USD"], nil})
+      Process.sleep(20)
+
+      assert Process.alive?(feed)
+    end
+
+    # DpCryptoManagement's issue #22: this file's own moduledoc records the measured
+    # inversion (level2 flooding, ticker starved by `send_timeout`) that these four tests
+    # exist to close — a timed-out subscribe used to be logged and thrown away, with no
+    # retry until the next 60s tick reproduced the identical failure.
+
+    test "a transient :send_timeout is retried and succeeds on a later attempt" do
+      counter = :counters.new(1, [])
+      socket = flaky_socket(1, counter)
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: fn -> {:ok, %{}} end,
+           subscribe_retry_delay_ms: 5}
+        )
+
+      log =
+        capture_log(fn ->
+          send(feed, {:channel_subscribe, socket, "ticker", ["BTC-USD"], nil})
+          Process.sleep(50)
+        end)
+
+      # Two sends reached the socket: the failed first attempt and the retry that
+      # succeeded. Never exhausted, never gave up.
+      assert :counters.get(counter, 1) == 2
+      assert log =~ "attempt 1/3 — retrying in 5ms"
+      refute log =~ "giving up"
+      assert Process.alive?(feed)
+    end
+
+    test "a permanent error (credentials_required) is not retried and fails loudly" do
+      feed = start_feed()
+      Feed.subscribe_notices(feed, to: self())
+      socket = fake_socket()
+
+      # `level2` is authenticated and no credentials were supplied — see
+      # `Socket.subscription_message/3`. This can NEVER succeed on retry.
+      log =
+        capture_log(fn ->
+          send(feed, {:channel_subscribe, socket, "level2", ["BTC-USD"], nil})
+          Process.sleep(20)
+        end)
+
+      assert log =~ "failed permanently"
+      assert log =~ "not retrying"
+      refute log =~ "retrying in"
+
+      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change} = notice}
+      assert notice.severity == :warning
+      assert notice.details.channel == "level2"
+      assert notice.details.reason =~ "credentials_required"
+      assert Process.alive?(feed)
+    end
+
+    test "retries are bounded, and exhausting them emits a Core.Notice, not just a log" do
+      counter = :counters.new(1, [])
+      socket = always_fails_socket(counter)
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: fn -> {:ok, %{}} end,
+           subscribe_retry_delay_ms: 5}
+        )
+
+      Feed.subscribe_notices(feed, to: self())
+
+      log =
+        capture_log(fn ->
+          send(feed, {:channel_subscribe, socket, "ticker", ["BTC-USD"], nil})
+          Process.sleep(100)
+        end)
+
+      assert log =~ "giving up until the next resubscribe cycle"
+
+      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change} = notice}
+      assert notice.severity == :warning
+      assert notice.details.channel == "ticker"
+      assert notice.details.reason =~ "send_timeout"
+
+      # One initial attempt plus @max_subscribe_retries (2) retries — three sends, and
+      # never a fourth, proving the chain is bounded rather than open-ended.
+      assert :counters.get(counter, 1) == 3
+      assert Process.alive?(feed)
+    end
+
+    test "a socket that dies between retry attempts stops the chain without crashing" do
+      feed = start_feed()
+      dead = spawn(fn -> :ok end)
+      Process.sleep(10)
+      refute Process.alive?(dead)
+
+      # Stands in for the scheduled retry message this module sends itself — the socket
+      # already died between the attempt that failed and this one.
+      send(feed, {:channel_subscribe, dead, "ticker", ["BTC-USD"], nil, 2})
       Process.sleep(20)
 
       assert Process.alive?(feed)
