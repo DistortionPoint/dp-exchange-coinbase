@@ -125,11 +125,32 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       assert top.observed_at
     end
 
-    test "no pricebook for the product is a refusal, not an empty book" do
-      assert {:refused, :not_listed} =
+    test "an empty pricebooks array is retryable, NOT a permanent refusal" do
+      # `/best_bid_ask` is a batch endpoint: it answers "nothing for this one" by omitting
+      # the product from the array rather than failing the request, which a genuine 404
+      # from this venue's own convention (see `Rest.get_top_of_book/2`'s moduledoc,
+      # measured against the sibling `/product_book` endpoint) never does. Reading that
+      # silence as `not_listed` would be the same substitution `dp_exchange_robinhood`'s
+      # issue #25 made of an empty `results` page.
+      assert {:error, :empty_result} =
                Rest.get_top_of_book("NOPE-USD",
                  credentials: credentials(),
                  plug: responding(%{"pricebooks" => []}),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a genuine 404 from the venue is still a refusal" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(404, Jason.encode!(%{"error" => "NOT_FOUND"}))
+      end
+
+      assert {:refused, :not_listed} =
+               Rest.get_top_of_book("NOPE-USD",
+                 credentials: credentials(),
+                 plug: plug,
                  retry_attempts: 0
                )
     end

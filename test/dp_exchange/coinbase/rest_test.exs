@@ -107,7 +107,7 @@ defmodule DpExchange.Coinbase.RestTest do
         Req.Test.json(conn, %{"pricebooks" => []})
       end
 
-      assert {:refused, :not_listed} =
+      assert {:error, :empty_result} =
                Rest.get_top_of_book("BTC-USD",
                  credentials: credentials(),
                  plug: plug,

@@ -1527,6 +1527,29 @@ defmodule DpExchange.Coinbase.Rest do
   Without credentials this returns `{:refused, :missing_credentials}` before sending
   anything. Sending the request anyway would come back as an opaque 401 that reads like a
   venue outage rather than what it is — a call that needed a credential it was not given.
+
+  ## An empty `pricebooks` array is silence, not a statement — DpCryptoManagement issue #25
+
+  This used to read a 200 with an empty `pricebooks` array as the venue naming this
+  product not listed. Probed live 2026-09-06 against the closely related, unauthenticated
+  `/market/product_book` (same "pricebook" data, one product per call instead of a batch):
+  a product this venue has never listed answers `404 {"error":"NOT_FOUND","error_details":
+  "valid product_id is required"}`, and a product it delisted but still recognises
+  (`/market/products/{id}` still answers 200) answers a DIFFERENT `404
+  {"error":"NOT_FOUND","error_details":"no pricebook found"}` — never a 200 with an empty
+  array, for either case, across every product checked. This venue's own convention for "no
+  book" is a distinguishable non-2xx statement, not a quietly empty array inside a 200.
+
+  `/best_bid_ask` takes a *list* of `product_ids` and returns one pricebook per product it
+  can answer for — a batch endpoint answering "nothing for this one" by omitting it from the
+  array, rather than failing the whole request, is an entirely ordinary batch-API shape, and
+  it collapses at least the two states above (never listed; listed but delisted) into one
+  indistinguishable silence. Nothing here has ever measured that silence against a genuinely
+  live, momentarily bookless product either — the two live-verifiable classes both show
+  either a real book or the errors above. Reading that silence as `not_listed` is the same
+  substitution `dp_exchange_robinhood`'s issue #25 made of an empty `results` page: an
+  unverified negative, standing in for a venue statement that this endpoint has no
+  evidence of ever sending.
   """
   @spec get_top_of_book(String.t(), keyword()) ::
           {:ok, Types.TopOfBook.t()} | {:error, term()} | {:refused, term()}
@@ -1543,10 +1566,15 @@ defmodule DpExchange.Coinbase.Rest do
         {:ok, %{body: %{"pricebooks" => [pricebook | _rest]}}} ->
           build_top_of_book(native, pricebook, observed_at)
 
-        # The venue answered and named no book for this product. Not an error, and not an
-        # empty book either — there is nothing to quote.
+        # NOT a refusal — see the moduledoc's "An empty `pricebooks` array is silence, not
+        # a statement". This batch endpoint answers "nothing for this one" by omitting the
+        # product from the array rather than failing the request, which is silence a retry
+        # can resolve, not the venue naming the product unlisted. A genuine venue statement
+        # (this venue's own convention, measured on the sibling `/product_book` endpoint,
+        # is a distinguishable 404) still reaches `{:refused, :not_listed}` below through
+        # `classify/1`.
         {:ok, %{body: %{"pricebooks" => []}}} ->
-          {:refused, :not_listed}
+          {:error, :empty_result}
 
         {:ok, _unexpected} ->
           {:error, :unexpected_response_shape}

@@ -74,6 +74,34 @@ acceptable changelog line.
 
 ### Fixed
 
+- **An empty `pricebooks` array from `/best_bid_ask` was read as the venue naming a
+  product not listed, and there is no evidence this venue has ever said that this way —
+  audited alongside DpCryptoManagement's issue #25 (`dp_exchange_robinhood`'s confirmed
+  instance of the same substitution).** `get_top_of_book/2`'s `{"pricebooks" => []}` clause
+  turned a 200 with an empty array into a permanent `{:refused, :not_listed}` — permanent
+  because `Core.PollingFeed` reports a refusal once and never retries it.
+
+  Probed live 2026-09-06 against the closely related, unauthenticated
+  `/market/product_book` (same pricebook data, one product per call instead of a batch): a
+  product this venue has never listed answers `404 {"error":"NOT_FOUND","error_details":
+  "valid product_id is required"}`; a product it delisted but still recognises
+  (`/market/products/{id}` still answers 200) answers a *different* `404
+  {"error":"NOT_FOUND","error_details":"no pricebook found"}`. Neither is a 200 with an
+  empty array, and no online product checked (923 listed, spanning the lowest-volume
+  pairs) ever returned one either. This venue's own convention for "no book" is a
+  distinguishable non-2xx statement. `/best_bid_ask` takes a *list* of `product_ids` and
+  answers one pricebook per product it can — an ordinary batch-API shape is to omit an
+  entry it cannot answer rather than fail the whole request, which collapses "never
+  listed" and "listed but delisted" (two states the sibling endpoint tells apart) into one
+  indistinguishable silence, and says nothing about a real, momentarily bookless product
+  either.
+
+  The empty-array clause now returns `{:error, :empty_result}` — retryable, the same shape
+  a 500 already produces. A genuine venue statement (a 404, this venue's own convention)
+  still reaches `{:refused, :not_listed}` through the existing `classify/1` path, which
+  this change does not touch. New tests in `rest_test.exs` and `order_book_test.exs` cover
+  both: an empty array is retried, and a genuine 404 is still refused.
+
 - **A timed-out channel subscribe was logged and thrown away — no retry until the next
   60s tick reproduced the identical failure, DpCryptoManagement's issue #22.**
   `FrameSender`'s own moduledoc says the whole point of turning a `send_frame` exit into
