@@ -32,20 +32,116 @@ defmodule DpExchange.Coinbase.Feed do
   refusals were logged in one window. The measurement about one socket being enough was
   honest when it was taken; it stopped being true the moment the venue's own limit did.
 
-  `@pairs_per_socket` is **100**, carried over from the reference fix this replaces
-  rather than re-derived — the number came from a real production incident, not this
-  package's own probing, and is recorded as such rather than presented as freshly
-  measured.
+  `@pairs_per_socket` is **100** — carried over from the reference fix this replaces
+  rather than re-derived, the number came from a real production incident, not this
+  package's own probing. It sizes `ticker`'s own sockets, and only `ticker`'s: the next
+  section is why `level2` stopped sharing it.
 
-  ## `level2` before `ticker`, on the same socket
+  ## `level2` gets its own, smaller sockets — the two channels stopped sharing a shard
 
-  Each shard's socket carries both channels for its own slice of symbols, `level2`
-  subscribed first: it is what takes a shard from partial to full coverage, and
-  subscribing it before the lighter channel means the book is already flowing by the
-  time `ticker` adds its own load. The two are spaced apart on the wire — a `level2`
-  subscribe triggers a full per-symbol book snapshot, and firing `ticker`'s subscribe
-  into a socket still decoding that arrives as a `send_timeout` and can take the
-  connection down with it.
+  **This stopped being true again, on a different axis, measured against
+  DpCryptoManagement's own 406-symbol production universe (issue #22 continuing, not
+  reopening — `ticker`'s starvation above is a separate, already-fixed incident in the
+  same file).** At `@pairs_per_socket` (100), `shards/1` splits 406 symbols into
+  `[100, 100, 100, 100, 6]` — four full shards and a six-symbol remainder. Every `level2`
+  subscribe on the four full shards was refused with `"too many L2 streams requested in a
+  single session"`; the six-symbol shard's was not. 5,099 refusals were logged across
+  sixteen otherwise-healthy boots, and `coverage_by_kind/1` answered `order_book: 6`
+  throughout — exactly the tail shard's own symbol count, which is the arithmetic that
+  pins the cause on the shard size: `ticker` has no such ceiling and answered
+  `quotes: 406` on the same boots, so nothing else about those boots — the connection, the
+  alias fix, the resubscribe cadence — explains a number that lines up precisely with one
+  shard's population and no other.
+
+  **No documentation states the real ceiling.** Re-read 2026-09-06 specifically looking
+  for a per-session `level2` stream count: the Advanced Trade channels reference, the
+  connection overview, and the Advanced Trade rate-limits page ("WebSocket connections
+  and unauthenticated messages are each limited to 8 per second per IP" — a connect-rate
+  ceiling, not a per-session subscription count) all say nothing about how many products
+  one session may carry on `level2`. The older Exchange product's own separate
+  rate-limits page states a different number entirely — 10 subscriptions per *product*
+  per channel, meaning duplicate subscriptions to the same product, not the count of
+  distinct products — and this package speaks Advanced Trade (`Socket`'s `@endpoint`),
+  not Exchange, so that number would not transfer even if it were on point. The prior
+  investigation that first shipped `@pairs_per_socket` found the docs silent on this; they
+  still are.
+
+  **This package cannot narrow it by probing the venue itself, either.** `level2` is on
+  `@authenticated_channels`, and this repo's own testing strategy draws the line at
+  exactly that boundary: tier 2 (live public endpoints, by hand) is fair game, tier 3
+  (authenticated) "needs credentials this repo must never hold." Finding the exact
+  ceiling would mean bisecting a real session's `level2` subscription size against the
+  live venue with a real credential — precisely tier 3. That is not merely inconvenient;
+  it is a line this repo does not cross for any endpoint, `level2` included.
+
+  **`@level2_pairs_per_socket` is `6`.** Not a rediscovered venue limit — the largest
+  `level2` subscription size this package has any positive evidence the venue accepts,
+  taken directly from the production numbers above: 100 was refused four times out of
+  four, 6 succeeded once out of one. Anything strictly between those two is exactly the
+  unverified guess this family forbids presenting as measured; 6 is the one figure
+  actually in evidence. It is deliberately conservative — the true ceiling may be well
+  above it — and that headroom is traded away on purpose rather than spent on a number
+  with nothing behind it but a guess at where between a known failure and a known success
+  the line falls.
+
+  **The two channels no longer share a shard slice.** `ticker` keeps `@pairs_per_socket`
+  (100) — it has no known ceiling, and shrinking it to match `level2` would multiply
+  connection count for the channel that was never the problem, for no benefit `ticker`
+  needs. `level2` is chunked separately, at `@level2_pairs_per_socket`, and every chunk of
+  either channel opens its own dedicated, single-channel socket: there is no longer a
+  shard that carries both. For the 406-symbol universe above that is 5 `ticker` sockets
+  (unchanged) plus 68 `level2` sockets (`ceil(406 / 6)`) — 73 total against 5 before.
+  `Socket`'s own moduledoc records why more sockets is affordable now in a way it would
+  not have been before 2026-09-06: removing in-package `level2` book maintenance cut
+  per-frame decode cost roughly tenfold (65–110 ms to 6.6 ms, at the `BTC-USD` book size
+  DpCryptoManagement measured live) — decode cost, not socket count, was the resource
+  actually in short supply.
+
+  **Connects are staggered across both groups on one sequence, `ticker` first.** Every new
+  socket this module opens — whichever channel it carries — takes the next tick of
+  `@shard_spacing_ms`, in an order that places every touched `ticker` shard ahead of every
+  touched `level2` shard. This is what keeps `ticker`'s own boot-time coverage exactly as
+  fast as the section above describes: a 406-symbol subscribe still resolves its
+  synchronous reply and its remaining `ticker` shards inside the same handful of seconds
+  as before this fix, with `level2`'s 68 shards ramping in behind them. For that universe
+  the last `level2` shard's tick lands roughly six minutes after boot — materially slower
+  than `ticker`'s own coverage, and an accepted, stated cost: `order_book` coverage was
+  permanently `6 / 406` before this fix, climbing by 5,099 refusals and counting; ramping
+  to `406 / 406` over several minutes is strictly better than a ceiling that never moves,
+  and nothing about `level2` streaming is boot-latency-sensitive the way `ticker`'s
+  starvation was.
+
+  **`level2` no longer needs to go first on a shared socket, because there is no longer a
+  shared socket.** What used to be this section — "`level2` before `ticker`, spaced by
+  `@channel_spacing_ms`" — existed only because a subscribe burst on one channel could
+  stall the other's `send_frame` on the *same* connection. With every socket now carrying
+  exactly one channel, that specific hazard cannot occur, and `@channel_spacing_ms` is
+  gone. A subscribe can still hit `:send_timeout` against its own socket's own burst — a
+  `level2` socket decoding its own six-symbol snapshot, say — so the retry chain below is
+  unchanged in kind; `@subscribe_retry_delay_ms` keeps its previous value (`8_000`ms) but
+  is no longer *borrowed* from a channel-spacing constant, because that constant no longer
+  exists to borrow it from — see its own comment.
+
+  **An adaptive, self-shrinking shard size was considered and rejected — for now.** The
+  venue's own refusal could in principle drive `@level2_pairs_per_socket` down further at
+  runtime, so a wrong constant could never be silently wrong forever — the option the
+  architect's own brief for this fix raised directly. It was not built: correctly
+  reconciling a shard *resize*, as opposed to the shard *membership change* `reshard/1`
+  already handles, needs this module to tell a live, still-subscribed shard's bookkeeping
+  apart from a stale one whose symbols the venue already dropped when it refused and
+  closed the connection — and getting that race wrong risks silently under- or
+  double-subscribing a shard, which is a worse failure mode than the loud, honest one this
+  module otherwise insists on everywhere else. Given `6` is not a guess but the one number
+  already proven safe, a correct runtime resize's complexity did not clear its bar against
+  a fixed, evidence-grounded constant plus the safety net that already exists:
+  `Socket`'s own `error_kind/1` already classifies "too many" as `:rate_limited` and
+  reports it as a `Core.Notice` on every occurrence (see `Socket`'s moduledoc), and
+  `coverage_by_kind/1` already never marks a symbol covered for `:order_book` on intent
+  alone — both pre-existing, verified unchanged by this fix, not new mechanism built for
+  it. If `6` is ever also refused, a consumer with `subscribe_notices/1` wired up hears
+  about it exactly as loudly as every other refusal in this file, and lowering the
+  constant is a one-line, reviewable change rather than a runtime decision this module
+  made silently on its own.
 
   ## A timed-out subscribe used to be thrown away — now it is retried
 
@@ -81,16 +177,21 @@ defmodule DpExchange.Coinbase.Feed do
   credential that was never given, and retrying it would only loop, so it fails loudly on
   the first attempt and is never rescheduled.
 
-  ### The backoff borrows a number this module already trusts, rather than inventing one
+  ### The backoff waits out a socket's own burst, not another channel's
 
-  A retry needs to wait out the same busy-socket condition `@channel_spacing_ms` already
-  exists to wait out between `level2` and `ticker` on the same socket — so
-  `@subscribe_retry_delay_ms` **is** `@channel_spacing_ms`, not a second, independently
-  guessed number for the same underlying wait. `@max_subscribe_retries` is `2`: one initial
-  attempt plus two retries is enough to survive one snapshot burst without turning a stuck
-  socket into an unbounded loop. See the constants' own comments for the arithmetic that
-  keeps the whole retry chain well inside a resubscribe cycle, so it can never stack frames
-  against the unconditional re-issue documented above.
+  At the time this was written, a retry waited out the same busy-socket condition
+  `@channel_spacing_ms` existed to wait out between `level2` and `ticker` sharing one
+  socket, so `@subscribe_retry_delay_ms` borrowed that value rather than guessing a second
+  number for the same underlying wait. `@channel_spacing_ms` is gone now that no socket
+  carries two channels — see "`level2` gets its own, smaller sockets" above —
+  `@subscribe_retry_delay_ms` keeps its value (`8_000`ms) but stands on its own reasoning:
+  a socket can still be busy decoding *its own* just-subscribed burst (a `level2` socket's
+  own snapshot, however small its shard), and the identical request can reasonably succeed
+  once that clears. `@max_subscribe_retries` is `2`: one initial attempt plus two retries
+  is enough to survive one snapshot burst without turning a stuck socket into an unbounded
+  loop. See the constants' own comments for the arithmetic that keeps the whole retry
+  chain well inside a resubscribe cycle, so it can never stack frames against the
+  unconditional re-issue documented below.
 
   ### Exhaustion is loud
 
@@ -337,44 +438,49 @@ defmodule DpExchange.Coinbase.Feed do
 
   require Logger
 
-  @channels ["level2", "ticker"]
-
-  # See the moduledoc: measured on the venue this package replaces, not on this one.
+  # `ticker`'s own shard size — see the moduledoc: measured on the venue this package
+  # replaces, not on this one. `level2` no longer shares it; see
+  # `@level2_pairs_per_socket` below and the moduledoc's "`level2` gets its own, smaller
+  # sockets" section.
   @pairs_per_socket 100
 
-  # Between opening each shard's socket. Opening several connections in the same instant
-  # is a connect burst the venue answers with resets.
+  # `level2`'s own shard size — deliberately NOT `@pairs_per_socket`. Not a rediscovered
+  # venue limit either: no Coinbase documentation states one (re-checked 2026-09-06), and
+  # this repo cannot probe an authenticated channel live to find one (see the moduledoc).
+  # `6` is the largest `level2` subscription size this package has direct evidence the
+  # venue accepts — DpCryptoManagement's own production report: 100 refused four times out
+  # of four, 6 accepted once out of one. See the moduledoc for why a number strictly
+  # between those two was rejected as an unlabelled guess.
+  @level2_pairs_per_socket 6
+
+  # Between opening each new socket, whichever channel it will carry. Opening several
+  # connections in the same instant is a connect burst the venue answers with resets.
   @shard_spacing_ms 5_000
 
-  # Between a shard's `level2` and `ticker` subscribes on the same socket. `level2`
-  # triggers a full snapshot per symbol and the connection is busy decoding it; firing
-  # `ticker` on top of that arrives as a `send_timeout`.
-  @channel_spacing_ms 8_000
-
-  # A retry waits out the same busy-socket condition `@channel_spacing_ms` already exists
-  # to wait out — see the moduledoc's "a timed-out subscribe used to be thrown away"
-  # section. Reusing it rather than a second, independently guessed number for the same
-  # underlying wait: the thing that caused the timeout was a socket still decoding a
-  # `level2` snapshot burst, and this is already the duration this module trusts to be
-  # enough for that.
+  # How long to wait before retrying a subscribe that timed out — see the moduledoc's "a
+  # timed-out subscribe used to be thrown away" section. At the time this was chosen it was
+  # borrowed from `@channel_spacing_ms`, the wait between two channels sharing one socket;
+  # that constant is gone now that no socket carries two channels (see "`level2` gets its
+  # own, smaller sockets" in the moduledoc), so this stands on its own reasoning: a socket
+  # can still be busy decoding its own just-subscribed burst, and the identical request can
+  # reasonably succeed once that clears. The value is unchanged.
   #
   # Overridable via `:subscribe_retry_delay_ms`, for the same reason
   # `:resubscribe_interval_ms` is: a test proving a retry actually happens and succeeds
   # must not wait out the real, multi-second production delay to do it.
-  @subscribe_retry_delay_ms @channel_spacing_ms
+  @subscribe_retry_delay_ms 8_000
 
   # One initial attempt plus this many retries. Bounded deliberately — see "not every
   # failure can be fixed by waiting" in the moduledoc.
   #
   # The whole retry chain for one channel subscribe must finish well inside a resubscribe
   # cycle, or its tail would stack fresh frames onto a socket the next unconditional
-  # re-issue is about to hit again (see `next_resubscribe_delay/1`). Worst case: the
-  # channel itself can start up to `@channel_spacing_ms` after its shard's tick (there are
-  # only two channels, so at most one channel-spacing delay ahead of the first), plus
-  # `@max_subscribe_retries * @subscribe_retry_delay_ms` for the retries themselves —
-  # 8_000 + 2 * 8_000 = 24_000ms, comfortably inside the 60s default and inside any
-  # interval `next_resubscribe_delay/1` computes (which only ever extends the interval,
-  # never shortens it).
+  # re-issue is about to hit again (see `next_resubscribe_delay/1`). Worst case:
+  # `@max_subscribe_retries * @subscribe_retry_delay_ms` = 16_000ms — comfortably inside
+  # the 60s default and inside any interval `next_resubscribe_delay/1` computes (which
+  # only ever extends the interval, never shortens it). No per-shard channel offset to add
+  # any more: each socket carries exactly one channel now, so there is no "second channel
+  # on this socket" delay to stack on top.
   @max_subscribe_retries 2
 
   # Backoff for a retried alias-map fetch — see the moduledoc's "the fetch has to wait,
@@ -430,10 +536,46 @@ defmodule DpExchange.Coinbase.Feed do
   # on each of a symbol's affected shards, so a single call can wait out several windows.
   @call_timeout @frame_window_ms * 3
 
-  @doc "The scope split into one list per socket."
+  @doc """
+  The scope split into one list per `ticker` socket. `level2` is chunked separately, at
+  its own, smaller size — see the moduledoc's "`level2` gets its own, smaller sockets"
+  section — and has no public function of its own, the same way it has no public
+  visibility anywhere else in this module.
+  """
   @spec shards([String.t()]) :: [[String.t()]]
   def shards([]), do: []
   def shards(symbols), do: Enum.chunk_every(symbols, @pairs_per_socket)
+
+  # `level2`'s own grouping — never exposed, for the same reason `shards/1` documents
+  # itself as `ticker`-only above: this module's whole point is that a consumer cannot
+  # tell how data arrives, and per-channel shard sizes are exactly that.
+  defp level2_shards([]), do: []
+  defp level2_shards(symbols), do: Enum.chunk_every(symbols, @level2_pairs_per_socket)
+
+  # Which channels this feed carries at all, given whether it has credentials — see
+  # `Socket`'s `@authenticated_channels`. A credential-less caller only ever wanted the
+  # public `ticker` channel; sending a doomed `level2` subscribe would either report a
+  # `credentials_required` error as a call's synchronous result (masking that `ticker`
+  # works fine) or cost a wire round trip to learn what the credential's absence already
+  # answers.
+  defp active_channels(nil), do: ["ticker"]
+  defp active_channels(_credentials), do: ["ticker", "level2"]
+
+  # Each channel's own grouping, at its own size — see `shards/1` and `level2_shards/1`.
+  defp shards_for(symbols, "ticker"), do: shards(symbols)
+  defp shards_for(symbols, "level2"), do: level2_shards(symbols)
+
+  # `ticker` sorts ahead of `level2` wherever shard keys are ordered, so a call touching
+  # both keeps its synchronous reply — and the front of any stagger sequence — on `ticker`,
+  # preserving that channel's boot-time coverage exactly as before `level2` got its own,
+  # far more numerous shards. See the moduledoc's "connects are staggered across both
+  # groups on one sequence" section.
+  defp channel_priority("ticker"), do: 0
+  defp channel_priority("level2"), do: 1
+
+  defp shard_key_order({channel_a, index_a}, {channel_b, index_b}) do
+    {channel_priority(channel_a), index_a} <= {channel_priority(channel_b), index_b}
+  end
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -652,12 +794,11 @@ defmodule DpExchange.Coinbase.Feed do
     attempt_alias_map_fetch(attempt, state)
   end
 
-  def handle_info({:open_shard, index, symbols}, state) do
+  def handle_info({:open_shard, channel, index, symbols}, state) do
     case get_socket(state) do
       {:ok, socket, state} ->
-        state = put_in(state.shards[index], %{socket: socket, symbols: symbols})
-        schedule_channel_subscribes(socket, symbols, state.credentials)
-        {:noreply, state}
+        state = put_in(state.shards[{channel, index}], %{socket: socket, symbols: symbols})
+        attempt_channel_subscribe(socket, channel, symbols, state.credentials, 1, state)
 
       {:error, reason} ->
         # Never silent: this shard's symbols keep arriving over whatever REST poll runs
@@ -670,16 +811,16 @@ defmodule DpExchange.Coinbase.Feed do
         # the async path every shard past the first (or a resharded existing shard) takes
         # — left its symbols silently absent from coverage with no `Core.Notice` telling a
         # consumer why, the exact "silent half-dead feed" this module's own moduledoc is
-        # about. `notify_shard_open_failed/3` closes that gap with the same
+        # about. `notify_shard_open_failed/4` closes that gap with the same
         # `:coverage_change` kind `notify_subscribe_failed/5` already uses for a channel
         # that never subscribed — both are "subscribed intent that did not become
         # delivery".
         Logger.warning(
-          "[Coinbase Feed] shard #{index} did not open (#{inspect(reason)}) — " <>
+          "[Coinbase Feed] #{channel} shard #{index} did not open (#{inspect(reason)}) — " <>
             "its #{length(symbols)} symbol(s) stay on the internal poll only"
         )
 
-        notify_shard_open_failed(state, index, symbols, reason)
+        notify_shard_open_failed(state, channel, index, symbols, reason)
         {:noreply, state}
     end
   end
@@ -704,16 +845,22 @@ defmodule DpExchange.Coinbase.Feed do
     Process.send_after(self(), :resubscribe, next_resubscribe_delay(state))
 
     # Staggered the same way `reshard/1` staggers opening several new shards: re-issuing
-    # every shard's `level2` subscribe in the same instant is the identical connect/subscribe
-    # burst the moduledoc warns about, just recurring every minute instead of once at boot.
+    # every shard's subscribe in the same instant is the identical connect/subscribe
+    # burst the moduledoc warns about, just recurring on this cadence instead of once at
+    # boot. `ticker` shards sort first — see `shard_key_order/2` — so an already-open
+    # `ticker` shard's re-issue is never pushed behind the (likely far more numerous)
+    # `level2` shards'.
     state.shards
-    |> Enum.sort_by(fn {index, _shard} -> index end)
+    |> Map.keys()
+    |> Enum.sort(&shard_key_order/2)
     |> Enum.with_index()
-    |> Enum.each(fn {{_index, %{socket: socket, symbols: symbols}}, position} ->
+    |> Enum.each(fn {{channel, _index} = key, position} ->
+      %{socket: socket, symbols: symbols} = Map.fetch!(state.shards, key)
+
       if Process.alive?(socket) do
         Process.send_after(
           self(),
-          {:resubscribe_shard, socket, symbols, state.credentials},
+          {:resubscribe_shard, socket, channel, symbols, state.credentials},
           position * @shard_spacing_ms
         )
       end
@@ -735,8 +882,11 @@ defmodule DpExchange.Coinbase.Feed do
     {:noreply, state}
   end
 
-  def handle_info({:resubscribe_shard, socket, symbols, credentials}, state) do
-    if Process.alive?(socket), do: schedule_channel_subscribes(socket, symbols, credentials)
+  def handle_info({:resubscribe_shard, socket, channel, symbols, credentials}, state) do
+    if Process.alive?(socket) do
+      Process.send_after(self(), {:channel_subscribe, socket, channel, symbols, credentials}, 0)
+    end
+
     {:noreply, state}
   end
 
@@ -744,11 +894,11 @@ defmodule DpExchange.Coinbase.Feed do
 
   # --- internal ------------------------------------------------------------
 
-  # A re-issue cycle is not instantaneous: shards are staggered `@shard_spacing_ms` apart,
-  # and within each shard the channels are staggered `@channel_spacing_ms` apart, so the
-  # last frame of a cycle goes out roughly
+  # A re-issue cycle is not instantaneous: every shard — `ticker` and `level2` alike, each
+  # on its own socket now — is staggered `@shard_spacing_ms` apart, so the last frame of a
+  # cycle goes out roughly
   #
-  #     (shards - 1) * @shard_spacing_ms + @channel_spacing_ms
+  #     (shards - 1) * @shard_spacing_ms
   #
   # after the tick. If the timer re-fires before that, cycles overlap: frames queue behind
   # each other, `WebSockex.send_frame/2` blows its window, and the `Feed` can stop
@@ -756,17 +906,19 @@ defmodule DpExchange.Coinbase.Feed do
   # a late resubscribe.
   #
   # DpCryptoManagement hit this in issue #22 by setting `resubscribe_interval_ms: 5_000`,
-  # below the 8s channel spacing, and lost the run to it. But the same failure is reachable
-  # with NO option set: the 60s default is shorter than the cycle span from 12 shards
-  # (1,101 symbols at `@pairs_per_socket`) upward, so a large enough consumer would have
-  # walked into it on defaults alone.
+  # well below even one shard's own send window, and lost the run to it. But the same
+  # failure is reachable with NO option set: the 60s default is shorter than the cycle span
+  # from 13 shards upward — reachable well inside a single, wide `level2` grouping alone
+  # now that it is sized at `@level2_pairs_per_socket` rather than `@pairs_per_socket` (a
+  # 406-symbol universe alone needs 68 `level2` shards), so a large enough consumer walks
+  # into this far sooner than before.
   #
   # The delay is therefore derived from the shard count that actually exists right now,
   # never from the configured value alone, and the extension is logged rather than applied
   # silently — a diagnostic knob whose value is quietly ignored is its own trap.
   defp next_resubscribe_delay(state) do
     shard_count = map_size(state.shards)
-    span = max(shard_count - 1, 0) * @shard_spacing_ms + @channel_spacing_ms
+    span = max(shard_count - 1, 0) * @shard_spacing_ms
     floor_ms = span + @frame_window_ms
 
     if state.resubscribe_interval_ms < floor_ms do
@@ -783,11 +935,12 @@ defmodule DpExchange.Coinbase.Feed do
     end
   end
 
-  # Re-attempts opening any shard `state.wanted` implies that is not currently a key in
-  # `state.shards` — see `handle_info(:resubscribe, _)` for why this exists: a shard whose
-  # socket never opened has no other automatic recovery path. Computed the same way
-  # `reshard/1` computes `new_shards`, so the indices agree with whatever a fresh
-  # `subscribe/3` or `update_symbols/2` call would also compute for the same `wanted` set.
+  # Re-attempts opening any shard `state.wanted` implies (for either channel) that is not
+  # currently a key in `state.shards` — see `handle_info(:resubscribe, _)` for why this
+  # exists: a shard whose socket never opened has no other automatic recovery path.
+  # Computed the same way `reshard/1` computes `new_shards`, so the keys agree with
+  # whatever a fresh `subscribe/3` or `update_symbols/2` call would also compute for the
+  # same `wanted` set.
   #
   # Staggered starting one `@shard_spacing_ms` past every already-open shard's own
   # resubscribe slot (`map_size(state.shards)` of them, scheduled just above), so a retry
@@ -795,28 +948,41 @@ defmodule DpExchange.Coinbase.Feed do
   defp retry_missing_shards(state) do
     existing = Map.keys(state.shards)
     base = map_size(state.shards)
+    wanted_list = MapSet.to_list(state.wanted)
 
-    state.wanted
-    |> MapSet.to_list()
-    |> shards()
+    state.credentials
+    |> active_channels()
+    |> Enum.flat_map(fn channel ->
+      wanted_list
+      |> shards_for(channel)
+      |> Enum.with_index()
+      |> Enum.map(fn {symbols, index} -> {{channel, index}, symbols} end)
+    end)
+    |> Enum.reject(fn {key, _symbols} -> key in existing end)
+    |> Enum.sort_by(fn {key, _symbols} -> key end, &shard_key_order/2)
     |> Enum.with_index()
-    |> Enum.reject(fn {_symbols, index} -> index in existing end)
-    |> Enum.with_index()
-    |> Enum.each(fn {{symbols, index}, position} ->
+    |> Enum.each(fn {{{channel, index}, symbols}, position} ->
       Process.send_after(
         self(),
-        {:open_shard, index, symbols},
+        {:open_shard, channel, index, symbols},
         (base + position) * @shard_spacing_ms
       )
     end)
   end
 
-  # Recomputes shards from `state.wanted` and reconciles: a shard whose symbol set
-  # changed gets its socket's subscriptions brought current, a brand-new shard gets a
-  # socket opened, and a shard that no longer has any symbols is dropped — its socket is
-  # left to WebSockex's own lifecycle rather than torn down here, because a shard
-  # reappearing moments later (a common `update_symbols` pattern) should not pay to
+  # Recomputes each active channel's shards from `state.wanted` and reconciles: a shard
+  # whose symbol set changed gets its socket's subscriptions brought current, a brand-new
+  # shard gets a socket opened, and a shard that no longer has any symbols is dropped —
+  # its socket is left to WebSockex's own lifecycle rather than torn down here, because a
+  # shard reappearing moments later (a common `update_symbols` pattern) should not pay to
   # reopen a connection it only just closed.
+  #
+  # `ticker` and `level2` are chunked independently, at their own sizes — see the
+  # moduledoc's "`level2` gets its own, smaller sockets" section — so a shard *key* is now
+  # `{channel, index}`, and every key names exactly one socket carrying exactly one
+  # channel. Nothing below this line treats `ticker` and `level2` shards any differently
+  # from one another; only `shards_for/2` (via `active_channels/1`) knows there are two
+  # groupings with two different sizes at all.
   #
   # ## Why exactly one shard is handled synchronously
   #
@@ -824,45 +990,53 @@ defmodule DpExchange.Coinbase.Feed do
   # reply, whether that connection actually accepted the request — reporting success
   # unconditionally would produce a subscription that never delivers, indistinguishable
   # from a quiet market. A caller whose `update_symbols` spans four hundred symbols
-  # touches four shards, and dialling all four inline would block the reply behind
-  # `@channel_spacing_ms` several times over and risk a connect burst besides.
+  # touches dozens of shards (`level2`'s own grouping alone, at `@level2_pairs_per_socket`,
+  # sees to that), and dialling all of them inline would block the reply behind
+  # `@shard_spacing_ms` many times over and risk a connect burst besides.
   #
-  # So: the FIRST shard this call actually touches — the lowest index among the ones
-  # newly opened or reconciled — runs inline and its outcome is the call's reply, same
-  # as the single-socket design this replaces. Every other shard the same call touches
-  # is staggered, exactly as a shard opened by a later, separate call would be.
+  # So: the FIRST shard this call actually touches — by `shard_key_order/2`, which puts
+  # every `ticker` shard ahead of every `level2` shard and orders each channel by index —
+  # runs inline and its outcome is the call's reply, same as the single-socket design this
+  # replaces. Every other shard the same call touches is staggered, exactly as a shard
+  # opened by a later, separate call would be.
   defp reshard(state) do
-    new_shards =
-      state.wanted
-      |> MapSet.to_list()
-      |> shards()
-      |> Enum.with_index()
-      |> Map.new(fn {symbols, index} -> {index, symbols} end)
+    wanted_list = MapSet.to_list(state.wanted)
 
-    existing_indices = Map.keys(state.shards)
-    wanted_indices = Map.keys(new_shards)
-    new_indices = Enum.sort(wanted_indices -- existing_indices)
+    new_shards =
+      state.credentials
+      |> active_channels()
+      |> Enum.flat_map(fn channel ->
+        wanted_list
+        |> shards_for(channel)
+        |> Enum.with_index()
+        |> Enum.map(fn {symbols, index} -> {{channel, index}, symbols} end)
+      end)
+      |> Map.new()
+
+    existing_keys = Map.keys(state.shards)
+    wanted_keys = Map.keys(new_shards)
+    new_keys = wanted_keys -- existing_keys
 
     # A shard whose whole symbol set was just removed disappears from `new_shards`
     # entirely — nothing above asked for any of its symbols any more. That must still
     # reach the venue as an unsubscribe on every symbol the shard was carrying, or the
     # venue keeps streaming them while this package's own bookkeeping has already
     # forgotten it asked to. Folded into `new_shards` as an explicit empty entry so
-    # `reconcile_shard/6`'s ordinary removed-symbols path handles it — the same
+    # `reconcile_shard/7`'s ordinary removed-symbols path handles it — the same
     # operation, not a special case.
-    vanishing_indices = existing_indices -- wanted_indices
-    new_shards = Enum.reduce(vanishing_indices, new_shards, &Map.put(&2, &1, []))
+    vanishing_keys = existing_keys -- wanted_keys
+    new_shards = Enum.reduce(vanishing_keys, new_shards, &Map.put(&2, &1, []))
 
-    touched_indices =
-      (wanted_indices ++ vanishing_indices)
-      |> Enum.filter(fn index ->
-        index in new_indices or shard_changed?(state, index, new_shards)
+    touched_keys =
+      (wanted_keys ++ vanishing_keys)
+      |> Enum.filter(fn key ->
+        key in new_keys or shard_changed?(state, key, new_shards)
       end)
-      |> Enum.sort()
+      |> Enum.sort(&shard_key_order/2)
 
-    case touched_indices do
+    case touched_keys do
       [] ->
-        state = drop_unwanted_shards(state, existing_indices, wanted_indices)
+        state = drop_unwanted_shards(state, existing_keys, wanted_keys)
         {:ok, state}
 
       [primary | rest] ->
@@ -871,9 +1045,9 @@ defmodule DpExchange.Coinbase.Feed do
         state =
           rest
           |> Enum.with_index(1)
-          |> Enum.reduce(state, fn {index, position}, acc ->
+          |> Enum.reduce(state, fn {key, position}, acc ->
             {_result, acc} =
-              touch_shard(acc, index, new_shards,
+              touch_shard(acc, key, new_shards,
                 sync: false,
                 delay: position * @shard_spacing_ms
               )
@@ -881,40 +1055,39 @@ defmodule DpExchange.Coinbase.Feed do
             acc
           end)
 
-        state = drop_unwanted_shards(state, existing_indices, wanted_indices)
+        state = drop_unwanted_shards(state, existing_keys, wanted_keys)
         {result, state}
     end
   end
 
-  defp shard_changed?(state, index, new_shards) do
-    case get_in(state.shards[index]) do
+  defp shard_changed?(state, key, new_shards) do
+    case get_in(state.shards[key]) do
       nil -> false
-      %{symbols: current} -> current != Map.fetch!(new_shards, index)
+      %{symbols: current} -> current != Map.fetch!(new_shards, key)
     end
   end
 
-  defp drop_unwanted_shards(state, existing_indices, wanted_indices) do
-    %{state | shards: Map.drop(state.shards, existing_indices -- wanted_indices)}
+  defp drop_unwanted_shards(state, existing_keys, wanted_keys) do
+    %{state | shards: Map.drop(state.shards, existing_keys -- wanted_keys)}
   end
 
-  defp touch_shard(state, index, new_shards, sync: sync?, delay: delay) do
-    wanted_symbols = Map.fetch!(new_shards, index)
+  defp touch_shard(state, key, new_shards, sync: sync?, delay: delay) do
+    wanted_symbols = Map.fetch!(new_shards, key)
 
-    case get_in(state.shards[index]) do
+    case get_in(state.shards[key]) do
       nil ->
-        open_shard(state, index, wanted_symbols, sync?, delay)
+        open_shard(state, key, wanted_symbols, sync?, delay)
 
       %{symbols: current, socket: socket} ->
-        reconcile_shard(state, index, socket, current, wanted_symbols, sync?, delay)
+        reconcile_shard(state, key, socket, current, wanted_symbols, sync?, delay)
     end
   end
 
-  defp open_shard(state, index, symbols, true, _delay) do
+  defp open_shard(state, {channel, _index} = key, symbols, true, _delay) do
     case get_socket(state) do
       {:ok, socket, state} ->
-        state = put_in(state.shards[index], %{socket: socket, symbols: symbols})
-        result = subscribe_first_channel(socket, symbols, state.credentials)
-        schedule_remaining_channel_subscribes(socket, symbols, state.credentials)
+        state = put_in(state.shards[key], %{socket: socket, symbols: symbols})
+        result = Socket.subscribe(socket, channel, symbols, state.credentials)
         {result, state}
 
       {:error, reason} ->
@@ -922,12 +1095,12 @@ defmodule DpExchange.Coinbase.Feed do
     end
   end
 
-  defp open_shard(state, index, symbols, false, delay) do
-    Process.send_after(self(), {:open_shard, index, symbols}, delay)
+  defp open_shard(state, {channel, index}, symbols, false, delay) do
+    Process.send_after(self(), {:open_shard, channel, index, symbols}, delay)
     {:ok, state}
   end
 
-  defp reconcile_shard(state, index, socket, current, wanted, true, _delay) do
+  defp reconcile_shard(state, {channel, _index} = key, socket, current, wanted, true, _delay) do
     added = wanted -- current
     removed = current -- wanted
 
@@ -937,25 +1110,18 @@ defmodule DpExchange.Coinbase.Feed do
           :ok
 
         added != [] ->
-          result = subscribe_first_channel(socket, added, state.credentials)
-          schedule_remaining_channel_subscribes(socket, added, state.credentials)
-
-          if removed != [],
-            do:
-              Enum.each(channels_for(state.credentials), &Socket.unsubscribe(socket, &1, removed))
-
+          result = Socket.subscribe(socket, channel, added, state.credentials)
+          if removed != [], do: Socket.unsubscribe(socket, channel, removed)
           result
 
         removed != [] ->
-          channels_for(state.credentials)
-          |> Enum.map(&Socket.unsubscribe(socket, &1, removed))
-          |> List.last()
+          Socket.unsubscribe(socket, channel, removed)
 
         true ->
           :ok
       end
 
-    {result, put_in(state.shards[index], %{socket: socket, symbols: wanted})}
+    {result, put_in(state.shards[key], %{socket: socket, symbols: wanted})}
   end
 
   # `delay` staggers this shard's frames past every OTHER shard `reshard/1` is touching in
@@ -963,73 +1129,32 @@ defmodule DpExchange.Coinbase.Feed do
   # brand-new socket — see `reshard/1`'s "position * @shard_spacing_ms" comment. Before
   # this fix `delay` was computed by `reshard/1` and then silently dropped here: a single
   # `update_symbols/2` that reshuffled several ALREADY-OPEN shards at once scheduled every
-  # one of their `level2` subscribes at the same instant regardless. Because `Socket.
-  # subscribe/4` blocks THIS process (via `FrameSender`, up to `WebSockex.send_frame/2`'s
-  # 5s window) once `attempt_channel_subscribe/6` runs it, several such messages landing on
-  # this GenServer's mailbox together serialise into back-to-back blocking sends — a socket
+  # one of their subscribes at the same instant regardless. Because `Socket.subscribe/4`
+  # blocks THIS process (via `FrameSender`, up to `WebSockex.send_frame/2`'s 5s window)
+  # once `attempt_channel_subscribe/6` runs it, several such messages landing on this
+  # GenServer's mailbox together serialise into back-to-back blocking sends — a socket
   # answering slowly stalls this shard's own subscribe AND every later one queued behind
   # it in the SAME mailbox, taking `coverage/1`, `subscribe/3` and every other call to this
   # `Feed` down with it for as long as the stall lasts. Staggering by `delay` spreads that
   # risk out exactly as it already is for a newly-opened shard.
-  defp reconcile_shard(state, index, socket, current, wanted, false, delay) do
+  defp reconcile_shard(state, {channel, _index} = key, socket, current, wanted, false, delay) do
     added = wanted -- current
     removed = current -- wanted
 
     if removed != [] and Process.alive?(socket) do
-      Enum.each(channels_for(state.credentials), fn channel ->
-        Process.send_after(self(), {:channel_unsubscribe, socket, channel, removed}, delay)
-      end)
+      Process.send_after(self(), {:channel_unsubscribe, socket, channel, removed}, delay)
     end
 
     if added != [] and Process.alive?(socket) do
-      schedule_channel_subscribes(socket, added, state.credentials, delay)
+      Process.send_after(
+        self(),
+        {:channel_subscribe, socket, channel, added, state.credentials},
+        delay
+      )
     end
 
-    {:ok, put_in(state.shards[index], %{socket: socket, symbols: wanted})}
+    {:ok, put_in(state.shards[key], %{socket: socket, symbols: wanted})}
   end
-
-  defp subscribe_first_channel(socket, symbols, credentials) do
-    [first | _rest] = channels_for(credentials)
-    Socket.subscribe(socket, first, symbols, credentials)
-  end
-
-  defp schedule_remaining_channel_subscribes(socket, symbols, credentials) do
-    [_first | rest] = channels_for(credentials)
-
-    rest
-    |> Enum.with_index(1)
-    |> Enum.each(fn {channel, position} ->
-      Process.send_after(
-        self(),
-        {:channel_subscribe, socket, channel, symbols, credentials},
-        position * @channel_spacing_ms
-      )
-    end)
-  end
-
-  # `base_delay` lets a caller stagger this shard's whole channel sequence past another
-  # shard's — see `reconcile_shard/7`'s async clause. Every existing caller passes none,
-  # which is `0` and reproduces the exact scheduling this had before that parameter existed.
-  defp schedule_channel_subscribes(socket, symbols, credentials, base_delay \\ 0) do
-    credentials
-    |> channels_for()
-    |> Enum.with_index()
-    |> Enum.each(fn {channel, channel_index} ->
-      Process.send_after(
-        self(),
-        {:channel_subscribe, socket, channel, symbols, credentials},
-        base_delay + channel_index * @channel_spacing_ms
-      )
-    end)
-  end
-
-  # `level2` requires credentials — see `@authenticated_channels` in `Socket`. A
-  # credential-less caller only ever wanted the public `ticker` channel anyway, and
-  # sending a doomed `level2` subscribe would either report a `credentials_required`
-  # error as this call's synchronous result (masking that `ticker` will work fine) or
-  # cost a wire round trip to learn what the credential's absence already answers.
-  defp channels_for(nil), do: ["ticker"]
-  defp channels_for(_credentials), do: @channels
 
   # See the moduledoc's "a timed-out subscribe used to be thrown away" section. Re-checks
   # `Process.alive?/1` on every attempt, not just the first — the socket this closure
@@ -1129,14 +1254,19 @@ defmodule DpExchange.Coinbase.Feed do
   # `handle_info({:open_shard, _, _}, _)` for why a `Logger.warning` alone was not enough:
   # it never crosses the facade, and this shard's symbols are otherwise silently absent
   # from `coverage/1` with nothing telling a consumer why.
-  defp notify_shard_open_failed(state, index, symbols, reason) do
+  defp notify_shard_open_failed(state, channel, index, symbols, reason) do
     notice =
       Notice.new(:coverage_change, :coinbase,
         severity: :warning,
         message:
-          "shard #{index} (#{length(symbols)} symbol(s)) did not open — " <>
+          "#{channel} shard #{index} (#{length(symbols)} symbol(s)) did not open — " <>
             "staying on the internal poll until the next resubscribe cycle retries it",
-        details: %{shard: index, symbol_count: length(symbols), reason: inspect(reason)}
+        details: %{
+          shard: index,
+          channel: channel,
+          symbol_count: length(symbols),
+          reason: inspect(reason)
+        }
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})

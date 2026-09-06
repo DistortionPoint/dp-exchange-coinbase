@@ -172,12 +172,17 @@ children = [{DpExchange.Coinbase, credentials: my_credentials(), resubscribe_int
 Default is **60,000 ms**, and it is a diagnostic knob, not a way to make coverage catch
 up faster. A value shorter than one full re-issue cycle across your current shard count
 is not honoured: this package derives the floor from the shard count that actually
-exists — `(shards - 1) * 5_000ms + 8_000ms + 5_000ms` — and uses that instead, logging
-the substitution, rather than wedging the feed with overlapping re-issue cycles queued
-behind each other. That is a real, measured incident (DpCryptoManagement's issue #22):
-it happened both from an explicit `resubscribe_interval_ms: 5_000` and from the 60s
-*default* past twelve shards (1,101 symbols at 100/socket). There is no way to make this
-package re-issue faster than that floor — only a log line explaining why it didn't.
+exists — `(shards - 1) * 5_000ms + 5_000ms` — and uses that instead, logging the
+substitution, rather than wedging the feed with overlapping re-issue cycles queued behind
+each other. That is a real, measured incident (DpCryptoManagement's issue #22): it
+happened both from an explicit `resubscribe_interval_ms: 5_000` and from the 60s
+*default* past thirteen shards. There is no way to make this package re-issue faster than
+that floor — only a log line explaining why it didn't.
+
+**Shard count now counts `level2` and `ticker` separately, and `level2` needs far more of
+them** — see the next section. Thirteen shards is trivially reachable from `level2` alone
+on a universe of well under a hundred symbols; it no longer takes 1,101 symbols the way it
+did when both channels shared one 100-per-socket grouping.
 
 **A shard whose socket never opened at all is retried on this same cadence, and it says
 so.** A transient connect failure on a shard beyond the first (a brief DNS blip, a refused
@@ -188,6 +193,32 @@ already-open shards' own resubscribes, and `subscribe_notices/1` receives a
 `:coverage_change` notice the moment the attempt fails — the same kind a channel that
 never subscribed already produces — so you learn about it rather than inferring it from a
 symbol that quietly never joined `coverage/1`.
+
+### `level2` shards far more finely than `ticker`, and ramps in more slowly because of it
+
+`level2` has a per-session product ceiling `ticker` does not; Coinbase names the failure
+(`"too many L2 streams requested in a single session"`) but documents no number, and this
+package cannot bisect a live authenticated session to find one — see this file's own
+"Do not point tests at the live venue" rule, which applies to this package's own
+development as much as to yours. Measured against a real 406-symbol production universe:
+every `level2` subscribe on a 100-symbol shard was refused, 5,099 times across sixteen
+otherwise-healthy boots; a six-symbol shard's was not.
+
+So `level2` groups symbols at **6 per socket**, independent of and far smaller than
+`ticker`'s 100 — the largest size this package has direct evidence Coinbase accepts, not
+a rediscovered limit. A universe that needs 5 `ticker` sockets needs on the order of 68
+`level2` sockets for the same scope, and every one of them — either channel — is
+staggered onto the same connect sequence `@shard_spacing_ms` already describes above,
+with every `ticker` shard ordered ahead of every `level2` shard so `ticker`'s own
+boot-time coverage is unaffected. For a 406-symbol universe, that means `level2` coverage
+ramps in over several minutes rather than seconds — materially slower than `ticker`, and
+an accepted cost against the alternative: `order_book` coverage that never moved off
+`6 / 406` at all before this package sized the two channels apart.
+
+A symbol whose `level2` subscribe the venue refuses is never marked covered for
+`:order_book` — `coverage/1` and `coverage_by_kind/1` report only what actually arrived,
+never what was merely asked for — and a refusal reaches `subscribe_notices/1` as a
+`:rate_limited` `Core.Notice` every time the venue sends one.
 
 ## Testing against this package
 

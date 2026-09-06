@@ -543,6 +543,78 @@ acceptable changelog line.
   `fake_injection_test.exs` (which previously called it with no credentials at all and
   got away with it) cover both branches.
 
+- **`level2` and `ticker` shared one shard size, and the venue's own `level2` ceiling is
+  well under it — DpCryptoManagement's issue #22 continuing, not reopened.** The `ticker`
+  starvation fixed earlier in this file (the timed-out-subscribe retry entry above) is a
+  separate, already-closed incident in the same file; this is a second, independent
+  defect the sharding line above deliberately left unchanged pending a separate
+  measurement ("Deliberately unchanged: `@channels` order... raised separately with the
+  consumer instead"). That measurement is this entry.
+
+  A consumer's real 406-symbol universe, on sixteen otherwise-healthy boots (0
+  `send_timeout`, 406/406 `quotes` coverage): `shards/1` at the old shared
+  `@pairs_per_socket` (100) split it `[100, 100, 100, 100, 6]`, and `level2`'s subscribe
+  was refused on every 100-symbol shard — `"too many L2 streams requested in a single
+  session"`, 5,099 times — while the six-symbol shard's was not.
+  `coverage_by_kind/1` answered `order_book: 6` throughout: exactly the tail shard's own
+  count, pinning the cause on shard size rather than the connection, the alias fix, or
+  `ticker` (which has no such ceiling and was unaffected on the same boots).
+
+  No Coinbase documentation states a per-session `level2` product ceiling — re-checked
+  2026-09-06 against the Advanced Trade channels reference, connection overview and
+  rate-limits page (which states an `8`-per-second-per-IP connect/message rate, not a
+  subscription count), and the older Exchange product's separate rate-limits page (which
+  states a different, inapplicable number: 10 duplicate subscriptions to the same
+  product-channel pair, not the count of distinct products, and for a product this
+  package does not speak). This package cannot narrow it by probing the venue either:
+  `level2` is authenticated, and this repo's own testing strategy draws tier 3
+  (authenticated, live) as needing credentials this repo must never hold — the same line
+  that already keeps this repo off order placement.
+
+  `level2` now gets its own shard grouping, at its own, independent size —
+  `@level2_pairs_per_socket`, `6` — rather than sharing `@pairs_per_socket` (100, still
+  `ticker`'s own size, unchanged) with `ticker`. `6` is not a rediscovered venue limit;
+  it is the largest `level2` subscription size this package has direct evidence the venue
+  accepts, taken from the production numbers above (100 refused four times out of four, 6
+  accepted once out of one) rather than guessed at some unverified point between them.
+  Every shard, either channel, now opens its own dedicated, single-channel socket — for
+  the 406-symbol universe above, 5 `ticker` sockets (unchanged) plus 68 `level2` sockets
+  (`ceil(406 / 6)`), 73 total against 5 before, affordable now that removing in-package
+  `level2` book maintenance (the change above this one) cut per-frame decode cost roughly
+  tenfold.
+
+  Every new socket — either channel — is staggered on one `@shard_spacing_ms` sequence
+  with every touched `ticker` shard ordered ahead of every touched `level2` shard, so
+  `ticker`'s own boot-time coverage stays exactly as fast as before this change while
+  `level2`'s far more numerous shards ramp in behind it — for the 406-symbol universe,
+  roughly six minutes for the last `level2` shard, against a ceiling that previously never
+  moved at all. `@channel_spacing_ms` — the wait between `level2` and `ticker` sharing one
+  socket — is deleted along with the shared-socket design it existed for; no socket
+  carries two channels any more, so the busy-decoding hazard it guarded against cannot
+  occur. `@subscribe_retry_delay_ms` keeps its value (still `8_000`ms) on its own
+  reasoning rather than borrowing from a constant that no longer exists.
+
+  An adaptive shard size, driven down at runtime by the venue's own refusal so a wrong
+  constant could never be silently wrong forever, was considered and not built:
+  correctly telling a live shard's bookkeeping apart from a stale one the venue already
+  emptied on refusal is real complexity with its own correctness risk (silently under- or
+  double-subscribing a shard), and did not clear its bar against a fixed,
+  evidence-grounded constant plus the safety net that already existed and needed no
+  change — `Socket`'s `error_kind/1` already classifies "too many" as `:rate_limited` and
+  reports it as a `Core.Notice` on every occurrence, and `coverage_by_kind/1` already
+  never marks a symbol covered for `:order_book` on subscribed intent alone. Both are
+  verified unchanged by this fix. If `6` is ever also refused, a consumer with
+  `subscribe_notices/1` wired up hears about it exactly as loudly as any other refusal in
+  this file, and lowering the constant is a one-line change rather than a runtime
+  decision made silently.
+
+  New tests in `feed_test.exs` pin the structural fix: a credentialed feed given a symbol
+  count that fits in one `ticker` shard splits it into two `level2` shards, with the
+  `ticker` shard chosen as the call's synchronous primary; a credential-less feed never
+  opens a `level2`-keyed shard at all. The 12-shard resubscribe-floor test is now a
+  13-shard one, and its expected numbers drop the deleted `@channel_spacing_ms` term —
+  both mechanical consequences of this change, not new behaviour of their own.
+
 ### Documentation
 
 - **CLAUDE.md claimed this package parses Coinbase's `cb-after` / `cb-before`

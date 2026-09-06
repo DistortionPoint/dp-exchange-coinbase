@@ -106,18 +106,19 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
 
     test "an interval shorter than one re-issue cycle is extended, and says so" do
-      # DpCryptoManagement set 5_000 — below the 8s `@channel_spacing_ms` — and each cycle
-      # re-fired before the previous one's `ticker` subscribe had gone out. Frames queued,
-      # `send_frame` blew its window six times, and the Feed stopped answering
-      # `:sys.get_state/1` entirely. A wedged feed is strictly worse than a late
-      # resubscribe, so the delay is derived from the shards that actually exist.
+      # DpCryptoManagement set 5_000, below the floor even a zero-shard feed carries (the
+      # `@frame_window_ms` send margin) — and each cycle re-fired before the previous
+      # one's subscribes had gone out. Frames queued, `send_frame` blew its window, and the
+      # Feed stopped answering `:sys.get_state/1` entirely. A wedged feed is strictly worse
+      # than a late resubscribe, so the delay is derived from the shards that actually
+      # exist.
 
       name = :"feed_#{System.unique_integer([:positive])}"
 
       pid =
         start_supervised!(
           {Feed,
-           name: name, alias_map_source: fn -> {:ok, %{}} end, resubscribe_interval_ms: 5_000}
+           name: name, alias_map_source: fn -> {:ok, %{}} end, resubscribe_interval_ms: 2_000}
         )
 
       # `send/2` is async — `:sys.get_state/1` is a call, so it queues behind the
@@ -129,21 +130,22 @@ defmodule DpExchange.Coinbase.FeedTest do
           :sys.get_state(pid)
         end)
 
-      # With no shards open the cycle is one channel spacing plus the send window.
-      assert log =~ "resubscribe interval 5000ms is shorter than one re-issue cycle"
-      assert log =~ "13000ms instead"
+      # With no shards open the cycle is zero span plus the send window (5_000ms).
+      assert log =~ "resubscribe interval 2000ms is shorter than one re-issue cycle"
+      assert log =~ "5000ms instead"
       assert Process.alive?(pid)
     end
 
-    test "the 60s DEFAULT is itself too short past 12 shards, and is extended too" do
-      # Reachable with no option set at all: a cycle spans
-      # (shards - 1) * 5_000 + 8_000, which passes 60s at 12 shards — 1,101 symbols at
-      # `@pairs_per_socket`. The consumer's diagnostic knob merely exposed a limit the
-      # default already had.
+    test "the 60s DEFAULT is itself too short past 13 shards, and is extended too" do
+      # Reachable with no option set at all: a cycle spans (shards - 1) * 5_000, which
+      # passes 60s at 13 shards — trivially reachable from `level2` alone, sized at
+      # `@level2_pairs_per_socket` rather than `@pairs_per_socket` (78 symbols already
+      # needs 13 shards at 6/socket). The consumer's diagnostic knob merely exposed a
+      # limit the default already had.
 
       shards =
-        Map.new(0..11, fn index ->
-          {index, %{socket: spawn(fn -> Process.sleep(:infinity) end), symbols: []}}
+        Map.new(0..12, fn index ->
+          {{"ticker", index}, %{socket: spawn(fn -> Process.sleep(:infinity) end), symbols: []}}
         end)
 
       feed = start_feed()
@@ -155,9 +157,9 @@ defmodule DpExchange.Coinbase.FeedTest do
           :sys.get_state(feed)
         end)
 
-      # (12 - 1) * 5_000 + 8_000 = 63_000 span, + 5_000 send window = 68_000.
-      assert log =~ "12 shard(s) (63000ms)"
-      assert log =~ "68000ms instead"
+      # (13 - 1) * 5_000 = 60_000 span, + 5_000 send window = 65_000.
+      assert log =~ "13 shard(s) (60000ms)"
+      assert log =~ "65000ms instead"
       assert Process.alive?(feed)
     end
 
@@ -839,6 +841,73 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
   end
 
+  describe "level2 gets its own, smaller shard grouping when credentials are present" do
+    # DpCryptoManagement's issue #22 continuing: at the old shared shard size, four
+    # 100-symbol shards had their `level2` subscribe refused by the venue's own
+    # per-session stream ceiling while `ticker` sailed through unaffected on the same
+    # shards, 5,099 times over — see `feed.ex`'s moduledoc, "`level2` gets its own,
+    # smaller sockets". These tests pin the structural fix: `ticker` and `level2` no
+    # longer share a shard, `level2`'s grouping is smaller (`@level2_pairs_per_socket`,
+    # not `@pairs_per_socket`), and `ticker`'s own boot-time coverage stays exactly as
+    # fast as it was — its shard is still the call's synchronous primary.
+    @credentials %{api_key: "k", api_secret: "s"}
+
+    test "10 symbols is one ticker shard and two level2 shards, ticker first" do
+      # 10 symbols: one `ticker` shard (`shards/1` at 100/socket never splits it) against
+      # two `level2` shards (`chunk_every(10, 6)` is `[6, 4]`) — proof the two channels
+      # are sized independently rather than sharing one grouping's boundaries.
+      symbols = for n <- 1..10, do: "SYM#{n}-USD"
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           url: "ws://127.0.0.1:1/nowhere",
+           credentials: @credentials,
+           alias_map_source: fn -> {:ok, %{}} end}
+        )
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      # The endpoint is unreachable, so every shard's connect fails — the synchronous
+      # primary's failure is this call's own reply, proving `ticker` (not `level2`) was
+      # chosen as primary: `shard_key_order/2` sorts every `ticker` shard ahead of every
+      # `level2` shard, and there is exactly one `ticker` shard here.
+      assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
+
+      # Both level2 shards eventually fail their own staggered async connect and report
+      # themselves — proof `level2` got TWO shards from a symbol count `ticker` needed
+      # only one for.
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :coverage_change, details: %{channel: "level2", shard: 0}}},
+                     6_000
+
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :coverage_change, details: %{channel: "level2", shard: 1}}},
+                     6_000
+
+      assert Process.alive?(feed)
+    end
+
+    test "without credentials, no level2 shard is ever opened" do
+      symbols = for n <- 1..10, do: "SYM#{n}-USD"
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           url: "ws://127.0.0.1:1/nowhere",
+           alias_map_source: fn -> {:ok, %{}} end}
+        )
+
+      assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
+
+      refute Enum.any?(:sys.get_state(feed).shards, fn {{channel, _index}, _shard} ->
+               channel == "level2"
+             end)
+    end
+  end
+
   describe "internal messages — the staggered async paths" do
     # These are the messages `reshard/1` schedules with `Process.send_after/3` for every
     # shard beyond the first, and for the resubscribe timer. Driven directly rather than
@@ -962,12 +1031,12 @@ defmodule DpExchange.Coinbase.FeedTest do
            alias_map_source: fn -> {:ok, %{}} end}
         )
 
-      send(feed, {:open_shard, 0, ["BTC-USD"]})
+      send(feed, {:open_shard, "ticker", 0, ["BTC-USD"]})
 
       # `:sys.get_state/1` already queues behind the send above, so it is the sync
       # barrier as well as the assertion — no separate sleep needed.
       state = :sys.get_state(feed)
-      assert %{0 => %{socket: ^socket, symbols: ["BTC-USD"]}} = state.shards
+      assert %{{"ticker", 0} => %{socket: ^socket, symbols: ["BTC-USD"]}} = state.shards
     end
 
     test "an :open_shard message whose socket cannot open logs, leaves the shard " <>
@@ -986,13 +1055,14 @@ defmodule DpExchange.Coinbase.FeedTest do
         )
 
       :ok = Feed.subscribe_notices(feed, to: self())
-      send(feed, {:open_shard, 0, ["BTC-USD"]})
+      send(feed, {:open_shard, "ticker", 0, ["BTC-USD"]})
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, provider: :coinbase} = notice},
                      500
 
       assert notice.details.shard == 0
+      assert notice.details.channel == "ticker"
       assert notice.details.symbol_count == 1
 
       assert Process.alive?(feed)
@@ -1022,7 +1092,10 @@ defmodule DpExchange.Coinbase.FeedTest do
       send(feed, :resubscribe)
 
       wait_until(fn ->
-        match?(%{0 => %{socket: ^socket, symbols: ["BTC-USD"]}}, :sys.get_state(feed).shards)
+        match?(
+          %{{"ticker", 0} => %{socket: ^socket, symbols: ["BTC-USD"]}},
+          :sys.get_state(feed).shards
+        )
       end)
     end
 
@@ -1037,7 +1110,7 @@ defmodule DpExchange.Coinbase.FeedTest do
         %{
           state
           | wanted: MapSet.new(["BTC-USD"]),
-            shards: %{0 => %{socket: existing_socket, symbols: ["BTC-USD"]}}
+            shards: %{{"ticker", 0} => %{socket: existing_socket, symbols: ["BTC-USD"]}}
         }
       end)
 
@@ -1048,7 +1121,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       # tick itself has run. `retry_missing_shards/1` schedules nothing further for shard 0
       # (it is not missing), so there is no later async mutation to race either.
       assert :sys.get_state(feed).shards == %{
-               0 => %{socket: existing_socket, symbols: ["BTC-USD"]}
+               {"ticker", 0} => %{socket: existing_socket, symbols: ["BTC-USD"]}
              }
     end
 
@@ -1223,7 +1296,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       dead = dead_pid()
 
       :sys.replace_state(feed, fn _s ->
-        %{state | shards: %{0 => %{socket: dead, symbols: ["BTC-USD"]}}}
+        %{state | shards: %{{"ticker", 0} => %{socket: dead, symbols: ["BTC-USD"]}}}
       end)
 
       send(feed, :resubscribe)
@@ -1250,8 +1323,8 @@ defmodule DpExchange.Coinbase.FeedTest do
         %{
           state
           | shards: %{
-              0 => %{socket: socket0, symbols: ["PLACEHOLDER-0"]},
-              1 => %{socket: socket1, symbols: ["PLACEHOLDER-1"]}
+              {"ticker", 0} => %{socket: socket0, symbols: ["PLACEHOLDER-0"]},
+              {"ticker", 1} => %{socket: socket1, symbols: ["PLACEHOLDER-1"]}
             }
         }
       end)

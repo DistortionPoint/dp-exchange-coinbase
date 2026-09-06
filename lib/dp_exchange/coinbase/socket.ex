@@ -46,7 +46,7 @@ defmodule DpExchange.Coinbase.Socket do
   after it — cost paid on the same single-threaded process responsible for
   `WebSockex.send_frame/2`, so a socket busy rebuilding a book it was never asked to
   keep could not service its own sends, which is the `:send_timeout` behind issue #22.
-  See `dp_exchange_core`'s `docs/design/2026-09-06_stop-maintaining-books-in-packages.md`:
+  See `dp_exchange_core`'s `docs/design/closed/2026-09-06_stop-maintaining-books-in-packages.md`:
   holding market state here was never this socket's job, and making that work cheaper
   was treating the symptom rather than removing the cause.
 
