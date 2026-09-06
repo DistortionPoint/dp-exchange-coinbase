@@ -37,7 +37,8 @@ defmodule DpExchange.Coinbase.Socket do
   Unlike `ticker`, one `l2_data` frame does not carry enough to answer "what does the
   book look like right now" — a `snapshot` event seeds it and `update` events carry only
   the price levels that changed, with `new_quantity: "0"` meaning the level is gone.
-  **This socket holds that state**, one map of price → quantity per side per symbol, and
+  **This socket holds that state**, one ordered structure of price → quantity per side per
+  symbol, and
   every `Core.Types.OrderBook` delivered is built from the maintained state, never from a
   single frame's rows alone — a caller reading one delta as the whole book would see a
   handful of prices and nothing else, which is a book with everything but two levels
@@ -47,6 +48,51 @@ defmodule DpExchange.Coinbase.Socket do
   `handle_disconnect/2` clears every symbol's book, and the next `snapshot` this socket
   receives after resubscribing rebuilds it from what the venue sends fresh. There is no
   way to reconcile a stale local book against a venue that has moved on.
+
+  ## Each side is kept ORDERED, not sorted on the way out
+
+  This used to be a plain `%{Decimal => Decimal}` map per side, and `deliver_book/3`
+  called `Enum.sort_by/3` with a `Decimal` comparator over the whole map on **every**
+  frame — including an `update` touching one price level. Measured at the book size
+  DpCryptoManagement reported live for `BTC-USD` (~22,800 bid levels, issue #22): a
+  full re-sort of both sides cost 91.5 ms per frame, a ceiling of roughly 13 book
+  updates/second on a socket that a shard shares across up to 100 symbols. See
+  `dp_exchange_core`'s `docs/design/2026-09-06_order-book-resort-cost.md` for the full
+  measurement and the causal hypothesis linking this to `ticker` starving in #22.
+
+  Each side is now a `:gb_trees` tree, so delivery is an ordered traversal — no
+  comparison sort at all. Run `mix run bench/order_book_resort.exs` for a repeatable
+  before/after at this book size on whatever machine you are reading this from; the
+  design doc's own run measured a 6.3x reduction on the bids side, and repeat runs in
+  this repo have measured considerably more, likely because `Enum.sort_by/3`'s
+  `Decimal` comparator dominates the "before" cost far more than an O(n log n) sort
+  alone would suggest. The subtle part is the key: `:gb_trees` uses Erlang
+  term ordering, which for a `%Decimal{}` struct compares `sign`, `coef` and `exp` as
+  plain fields, not the number they represent — `Decimal.new("1.5")` and
+  `Decimal.new("1.50")` are numerically equal and structurally different, so keying by
+  the struct directly does not give numeric order. A float is exact-but-fast in the
+  wrong direction: this family refuses lossy prices everywhere, including here.
+
+  The key is an **exactly scaled integer**: the price multiplied by `10^8`. That scale
+  was not assumed — verified 2026-09-06 against Coinbase's own public, unauthenticated
+  `GET https://api.coinbase.com/api/v3/brokerage/market/products` (931 products): the
+  smallest published `quote_increment` across every one of them is `0.00000001` (8
+  decimal places — e.g. `PEPE-USD`, `SHIB-USD`, `BONK-USD`), and no product's own
+  `price` field carries more decimal digits than that either. `10^8` is therefore exact
+  for every real Coinbase price. `price_key/1` does not trust that blindly on every
+  call, though: it checks `Decimal.integer?/1` on the scaled result and refuses —
+  reported through the same `malformed_row/3` path as any other unparseable row —
+  rather than rounding, on the chance the venue ever sends more precision than it
+  currently publishes.
+
+  The original `Decimal` is carried as the tree's value, alongside the quantity, so
+  what a consumer receives is byte-identical to the map-based implementation for every
+  book this venue actually sends. The one behaviour that is NOT identical: two
+  differently-scaled representations of the same numeric price used to become two map
+  entries (two "levels" at one price, since `%Decimal{}` structs compare unequal) and
+  now collapse into one, last-write-wins — which is the correct reading of a price
+  level (identified by its numeric value) and was a latent defect in the map-keyed
+  version, not a behaviour deliberately being changed.
 
   ## The connect timeouts are chosen against `Feed`'s call budget, not inherited by accident
 
@@ -119,9 +165,11 @@ defmodule DpExchange.Coinbase.Socket do
       # Observed delivery, not intended: a symbol enters this set when a payload for it
       # arrives, never when it is subscribed.
       delivering: MapSet.new(),
-      # symbol => %{bids: %{price => quantity}, asks: %{price => quantity}}. Maintained
-      # across `update` frames; wiped on every reconnect, because the venue's session —
-      # and the guarantee that our deltas are contiguous with its book — is gone with it.
+      # symbol => %{bids: gb_trees(), asks: gb_trees()}, each tree keyed by
+      # `price_key/1`'s scaled integer and valued `{price, quantity}` — see the
+      # moduledoc's "Each side is kept ORDERED" section for why. Maintained across
+      # `update` frames; wiped on every reconnect, because the venue's session — and
+      # the guarantee that our deltas are contiguous with its book — is gone with it.
       books: %{}
     }
 
@@ -348,7 +396,7 @@ defmodule DpExchange.Coinbase.Socket do
        )
        when is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(product)
-    book = rows |> Enum.reduce(%{bids: %{}, asks: %{}}, &apply_book_row(&1, &2, state))
+    book = rows |> Enum.reduce(empty_book(), &apply_book_row(&1, &2, state))
 
     state
     |> put_in([Access.key(:books), symbol], book)
@@ -362,7 +410,7 @@ defmodule DpExchange.Coinbase.Socket do
        )
        when is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(product)
-    book = Map.get(state.books, symbol, %{bids: %{}, asks: %{}})
+    book = Map.get(state.books, symbol, empty_book())
     book = Enum.reduce(rows, book, &apply_book_row(&1, &2, state))
 
     state
@@ -372,8 +420,10 @@ defmodule DpExchange.Coinbase.Socket do
 
   defp apply_book_event(_other, state, _timestamp), do: state
 
+  defp empty_book, do: %{bids: :gb_trees.empty(), asks: :gb_trees.empty()}
+
   # A price level's quantity is the venue's CURRENT total at that price, not a delta to
-  # add — replacing the map entry is correct; summing it would double every level that
+  # add — replacing the tree entry is correct; summing it would double every level that
   # appears in two update frames in a row. `new_quantity: "0"` removes the level: it is
   # not a price of zero, it is the level no longer existing, and leaving a zero-quantity
   # entry in the book would make it a phantom best price the moment nothing outranks it.
@@ -384,21 +434,32 @@ defmodule DpExchange.Coinbase.Socket do
   # unparseable quantity silently ignored can leave a stale price level in the maintained
   # book indefinitely with nothing indicating why. Reported, not swallowed, same as
   # `deliver_ticker/3` and `deliver_book/3` — and still never fatal to the connection.
+  #
+  # A `price_level` that parses as a `Decimal` but cannot be represented exactly at
+  # `price_key/1`'s scale is reported through the identical path — see the moduledoc's
+  # "Each side is kept ORDERED" section for why that must fail closed rather than round.
   defp apply_book_row(
          %{"side" => side, "price_level" => price, "new_quantity" => quantity} = row,
          book,
          state
        ) do
-    key = book_side(side)
+    side_key = book_side(side)
 
     case {decimal(price), decimal(quantity)} do
       {nil, _ignored} -> malformed_row(state, book, row)
       {_ignored, nil} -> malformed_row(state, book, row)
-      {price, quantity} -> update_level(book, key, price, quantity)
+      {price, quantity} -> apply_priced_row(book, side_key, price, quantity, row, state)
     end
   end
 
   defp apply_book_row(row, book, state), do: malformed_row(state, book, row)
+
+  defp apply_priced_row(book, side, price, quantity, row, state) do
+    case price_key(price) do
+      {:ok, key} -> update_level(book, side, key, price, quantity)
+      :error -> malformed_row(state, book, row)
+    end
+  end
 
   defp malformed_row(state, book, row) do
     report_quality(state, inspect(row))
@@ -408,15 +469,37 @@ defmodule DpExchange.Coinbase.Socket do
   defp book_side("bid"), do: :bids
   defp book_side(_offer_or_other), do: :asks
 
-  defp update_level(book, side, price, quantity) do
-    if Decimal.compare(quantity, 0) == :eq do
-      remove_level(book, side, price)
+  # See the moduledoc: verified 2026-09-06 against Coinbase's own public
+  # `GET /api/v3/brokerage/market/products` (931 products) — the smallest published
+  # `quote_increment` across every one is `0.00000001` (8 decimal places), and no
+  # product's own `price` field carries more decimal digits than that. `10^8` is exact
+  # for every real Coinbase price on record.
+  @price_scale_factor 100_000_000
+
+  # Exact by construction, not by assumption: `Decimal.integer?/1` on the scaled value
+  # is checked on every call rather than trusted from the evidence above, so a price
+  # this venue somehow sends with more precision than it currently publishes is refused
+  # — reported by the caller — rather than rounded.
+  defp price_key(price) do
+    scaled = Decimal.mult(price, @price_scale_factor)
+
+    if Decimal.integer?(scaled) do
+      {:ok, Decimal.to_integer(scaled)}
     else
-      Map.update!(book, side, &Map.put(&1, price, quantity))
+      :error
     end
   end
 
-  defp remove_level(book, side, price), do: Map.update!(book, side, &Map.delete(&1, price))
+  defp update_level(book, side, key, price, quantity) do
+    if Decimal.compare(quantity, 0) == :eq do
+      remove_level(book, side, key)
+    else
+      Map.update!(book, side, &:gb_trees.enter(key, {price, quantity}, &1))
+    end
+  end
+
+  defp remove_level(book, side, key),
+    do: Map.update!(book, side, &:gb_trees.delete_any(key, &1))
 
   # FAILS CLOSED on the timestamp, same as `build_quote/3` — this used to substitute
   # `DateTime.utc_now/0` unconditionally, which is the exact substitution the moduledoc
@@ -431,8 +514,8 @@ defmodule DpExchange.Coinbase.Socket do
       {:ok, at} ->
         order_book = %Types.OrderBook{
           symbol: symbol,
-          bids: sorted_levels(book.bids, :desc),
-          asks: sorted_levels(book.asks, :asc),
+          bids: ordered_levels(book.bids, :desc),
+          asks: ordered_levels(book.asks, :asc),
           timestamp: at,
           provider: :coinbase
         }
@@ -445,11 +528,14 @@ defmodule DpExchange.Coinbase.Socket do
     end
   end
 
-  defp sorted_levels(levels, :desc),
-    do: Enum.sort_by(levels, fn {price, _qty} -> price end, {:desc, Decimal})
+  # No comparison sort: `tree`'s keys are already in ascending numeric order by
+  # construction (see `price_key/1`), so `:gb_trees.to_list/1` is an ordered traversal,
+  # not a sort. `:asc` needs no further work; `:desc` reverses the already-ordered list
+  # — still no comparator invoked. See the moduledoc for the cost this replaced.
+  defp ordered_levels(tree, :asc), do: tree |> :gb_trees.to_list() |> Enum.map(&elem(&1, 1))
 
-  defp sorted_levels(levels, :asc),
-    do: Enum.sort_by(levels, fn {price, _qty} -> price end, {:asc, Decimal})
+  defp ordered_levels(tree, :desc),
+    do: tree |> :gb_trees.to_list() |> Enum.reverse() |> Enum.map(&elem(&1, 1))
 
   defp parse_time(nil), do: {:error, :missing_venue_timestamp}
 

@@ -427,7 +427,7 @@ defmodule DpExchange.Coinbase.SocketTest do
 
       refute_received {:dp_exchange, :coinbase, %Types.OrderBook{}}
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
-      assert map_size(s.books["BTC-USD"].bids) > 0
+      assert :gb_trees.size(s.books["BTC-USD"].bids) > 0
     end
 
     test "a reconnect clears the maintained book" do
@@ -437,6 +437,183 @@ defmodule DpExchange.Coinbase.SocketTest do
 
       assert {:reconnect, s} = Socket.handle_disconnect(%{reason: :closed}, s)
       assert s.books == %{}
+    end
+  end
+
+  describe "order-book resort-cost fix — observably invisible" do
+    # dp_exchange_core's docs/design/2026-09-06_order-book-resort-cost.md replaced a
+    # per-frame `Enum.sort_by/3` over a `%{Decimal => Decimal}` map with a `:gb_trees`
+    # tree keyed by an exactly scaled integer. This is a pure performance change: the
+    # design's own non-negotiable is that it be "observably invisible" — same order,
+    # same `Decimal` values, same count as the map+sort approach it replaced. These
+    # tests prove that against a REFERENCE implementation of the old approach, applied
+    # to the identical rows, rather than merely asserting the new code agrees with
+    # itself.
+
+    # A fixed, non-monotonic permutation of 0..(n - 1) via an affine map mod n (131 is
+    # prime and does not divide 300, so this is a bijection) — proves neither the
+    # production code nor the reference below is secretly relying on rows arriving
+    # already in price order.
+    defp scrambled(n), do: Enum.map(0..(n - 1), &rem(&1 * 131 + 17, n))
+
+    defp level_rows(side, base_cents, n) do
+      Enum.map(scrambled(n), fn i ->
+        price = Decimal.new(base_cents - i) |> Decimal.mult(Decimal.new("0.01"))
+        qty = Decimal.new(i + 1) |> Decimal.mult(Decimal.new("0.001"))
+
+        %{
+          "side" => side,
+          "price_level" => Decimal.to_string(price),
+          "new_quantity" => Decimal.to_string(qty)
+        }
+      end)
+    end
+
+    defp book_event_frame(type, product, rows, timestamp) do
+      %{
+        "channel" => "l2_data",
+        "timestamp" => timestamp,
+        "events" => [%{"type" => type, "product_id" => product, "updates" => rows}]
+      }
+    end
+
+    # The map-keyed-by-Decimal, full-`Enum.sort_by/3` approach `deliver_book/3` used to
+    # use — reimplemented here ONLY as a comparison oracle, never as production code.
+    defp reference_apply_row(%{"side" => side, "price_level" => p, "new_quantity" => q}, book) do
+      key = if side == "bid", do: :bids, else: :asks
+      price = Decimal.new(p)
+      qty = Decimal.new(q)
+
+      Map.update!(book, key, fn levels ->
+        if Decimal.compare(qty, 0) == :eq do
+          Map.delete(levels, price)
+        else
+          Map.put(levels, price, qty)
+        end
+      end)
+    end
+
+    defp reference_book(rows, book \\ %{bids: %{}, asks: %{}}),
+      do: Enum.reduce(rows, book, &reference_apply_row/2)
+
+    defp reference_ordered(book) do
+      %{
+        bids: Enum.sort_by(book.bids, fn {p, _q} -> p end, {:desc, Decimal}),
+        asks: Enum.sort_by(book.asks, fn {p, _q} -> p end, {:asc, Decimal})
+      }
+    end
+
+    test "a non-trivial book, snapshot then update, matches the map+sort reference exactly" do
+      bid_rows = level_rows("bid", 1_000_000, 300)
+      ask_rows = level_rows("offer", 1_050_000, 300)
+      all_rows = bid_rows ++ ask_rows
+
+      snapshot =
+        book_event_frame("snapshot", "BTC-USD", all_rows, "2026-09-06T00:00:00.000000Z")
+
+      assert {:ok, s} = Socket.handle_frame({:text, Jason.encode!(snapshot)}, state())
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
+
+      ref = reference_ordered(reference_book(all_rows))
+
+      assert book.bids == ref.bids
+      assert book.asks == ref.asks
+      assert length(book.bids) == 300
+      assert length(book.asks) == 300
+
+      # A delta must match the reference too, not only a fresh snapshot — the
+      # defect this replaced re-sorted on every frame, not only the first one.
+      update_rows = [
+        # updates an existing level in place (i = 5 of the bid range above)
+        %{"side" => "bid", "price_level" => "9999.95", "new_quantity" => "5.55"},
+        # removes an existing level (i = 10)
+        %{"side" => "bid", "price_level" => "9999.90", "new_quantity" => "0"},
+        # inserts a brand-new best bid, above every price in the snapshot
+        %{"side" => "bid", "price_level" => "10000.50", "new_quantity" => "1.23"},
+        # same three operations on the ask side
+        %{"side" => "offer", "price_level" => "10499.95", "new_quantity" => "9.99"},
+        %{"side" => "offer", "price_level" => "10499.90", "new_quantity" => "0"},
+        %{"side" => "offer", "price_level" => "10490.00", "new_quantity" => "0.77"}
+      ]
+
+      update = book_event_frame("update", "BTC-USD", update_rows, "2026-09-06T00:00:01.000000Z")
+      assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(update)}, s)
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = updated}
+
+      ref2 = reference_ordered(reference_book(update_rows, reference_book(all_rows)))
+
+      assert updated.bids == ref2.bids
+      assert updated.asks == ref2.asks
+      assert {Decimal.new("10000.50"), Decimal.new("1.23")} == hd(updated.bids)
+      assert {Decimal.new("10490.00"), Decimal.new("0.77")} == hd(updated.asks)
+    end
+
+    @dup_price_snapshot %{
+      "channel" => "l2_data",
+      "timestamp" => "2026-09-06T00:00:00.000000Z",
+      "events" => [
+        %{
+          "type" => "snapshot",
+          "product_id" => "BTC-USD",
+          "updates" => [
+            %{"side" => "bid", "price_level" => "1.5", "new_quantity" => "1.0"},
+            %{"side" => "bid", "price_level" => "1.50", "new_quantity" => "2.0"}
+          ]
+        }
+      ]
+    }
+
+    test "numerically-equal, differently-scaled prices are ONE level, last write wins — " <>
+           "the map-keyed-by-Decimal implementation this replaced would have kept both" do
+      assert {:ok, _s} =
+               Socket.handle_frame({:text, Jason.encode!(@dup_price_snapshot)}, state())
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
+
+      assert length(book.bids) == 1
+      assert [{price, qty}] = book.bids
+      assert Decimal.equal?(price, Decimal.new("1.50"))
+      assert Decimal.equal?(qty, Decimal.new("2.0"))
+
+      # The factual record of what the OLD behaviour actually did, not an assumption:
+      # `%Decimal{}` structs compare by field (sign/coef/exp), so these are DIFFERENT
+      # map keys even though `Decimal.equal?/2` says they are the same price — the map
+      # this fix replaced would have carried both as separate levels for one price.
+      old_map =
+        %{}
+        |> Map.put(Decimal.new("1.5"), Decimal.new("1.0"))
+        |> Map.put(Decimal.new("1.50"), Decimal.new("2.0"))
+
+      assert map_size(old_map) == 2
+      refute Decimal.new("1.5") === Decimal.new("1.50")
+      assert Decimal.equal?(Decimal.new("1.5"), Decimal.new("1.50"))
+    end
+
+    @too_precise_snapshot %{
+      "channel" => "l2_data",
+      "timestamp" => "2026-09-06T00:00:00.000000Z",
+      "events" => [
+        %{
+          "type" => "snapshot",
+          "product_id" => "BTC-USD",
+          "updates" => [
+            %{"side" => "bid", "price_level" => "1.123456789", "new_quantity" => "1.0"}
+          ]
+        }
+      ]
+    }
+
+    test "a price with more precision than the venue's own quote_increment publishes " <>
+           "is reported and dropped, never rounded into the book" do
+      # 9 decimal digits — one more than the 8 verified live against Coinbase's own
+      # published `quote_increment` values (see Socket's moduledoc). Rounding this into
+      # the book would be exactly the "nearby substitute" this family refuses.
+      assert {:ok, _s} =
+               Socket.handle_frame({:text, Jason.encode!(@too_precise_snapshot)}, state())
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
+      assert book.bids == []
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
     end
   end
 end

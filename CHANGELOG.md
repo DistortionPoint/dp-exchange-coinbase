@@ -74,6 +74,46 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`Socket` full-re-sorted BOTH sides of the maintained level2 book on EVERY `l2_data`
+  frame, including an `update` changing a single price level** —
+  `dp_exchange_core`'s `docs/design/2026-09-06_order-book-resort-cost.md`. Measured at
+  the book size DpCryptoManagement reported live for `BTC-USD` (issue #22, ~22,800 bid
+  / ~21,100 ask levels): one update frame cost 62–110 ms across repeated runs in this
+  repo (`bench/order_book_resort.exs`) — a ceiling of roughly 9–16 book updates/second,
+  maximum, on a socket a shard shares across up to 100 symbols. Stated as a hypothesis
+  in the design, not a conclusion here: this is very likely a major part of why
+  `ticker` starves whenever `level2` is delivering broadly in #22, since the
+  single-threaded socket could never idle long enough to service the `ticker`
+  subscribe inside `FrameSender`'s 5-second window — but that causal claim is only
+  confirmed by this fix changing behaviour on their node, not by anything measured
+  here.
+
+  Each side's `%{Decimal => Decimal}` map is now a `:gb_trees` tree keyed by the price
+  scaled to an exact integer (`10^8` — verified 2026-09-06 against Coinbase's own
+  public `GET /api/v3/brokerage/market/products`: the smallest published
+  `quote_increment` across all 931 products is `0.00000001`, 8 decimal places, and no
+  product's own `price` field carries more precision than that either), carrying the
+  original `Decimal` as the tree's value. Delivery is now an ordered traversal —
+  `Enum.sort_by/3` no longer runs anywhere in the per-frame path. Measured against the
+  same book size, repeated runs in this repo: the same one-update-frame cost fell to
+  0.9–2.9 ms (roughly 345–1075 updates/second, maximum), and the isolated bids-only
+  sort/traversal fell from 49–83 ms to 0.5–6.2 ms. Run
+  `mix run bench/order_book_resort.exs` to reproduce on any machine.
+
+  A price that cannot be represented exactly at that scale is refused and reported
+  through the same `:data_quality` notice path as any other unparseable row, rather
+  than rounded — no real Coinbase price has needed this path so far, but the family's
+  own rule against silently substituting a nearby value applies here too. One
+  behaviour is deliberately NOT identical to the map-keyed implementation: two
+  numerically-equal, differently-scaled price strings (`"1.5"` and `"1.50"`) used to
+  become two map entries — two "levels" at one price, because `%Decimal{}` structs
+  compare unequal by field even when `Decimal.equal?/2` says they are the same number
+  — and now collapse into one, last-write-wins. That was a latent defect in the
+  map-keyed version, found and fixed here rather than a behaviour changed as a side
+  effect; everything else observable — order, `Decimal` values, count, the
+  `Core.Types.OrderBook` struct itself — is unchanged, and is asserted so against a
+  reference reimplementation of the old approach in `socket_test.exs`.
+
 - **The alias-map fetch added for issue #22 was throttled by the caller's OWN rate
   limiter at boot and never retried, disabling attribution for the life of the process —
   DpCryptoManagement's issue #26, a regression in a fix this package shipped.**
