@@ -734,10 +734,6 @@ defmodule DpExchange.Coinbase.FeedTest do
     test "an empty scope is zero shards, not one empty one" do
       assert Feed.shards([]) == []
     end
-
-    test "pairs_per_socket is the number the incident measured, not a guess" do
-      assert Feed.pairs_per_socket() == 100
-    end
   end
 
   describe "sharding across the whole subscribe lifecycle" do

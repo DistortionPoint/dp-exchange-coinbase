@@ -60,14 +60,16 @@ defmodule DpExchange.Coinbase do
   # consumer could have had. Robinhood shipped four of the first kind and no test failed.
   @venue_does_not_serve [
     # **Prime publishes staking; it does not publish these four.** `stake/3` and
-    # `unstake/3` are live against Prime — see `DpExchange.Coinbase.Prime` — and these are
-    # the reads that have no endpoint behind them:
+    # `unstake/3` are live against Prime — see `DpExchange.Coinbase.Prime` — and this
+    # module's own `staking_status/4`, `unstake_status/4`, `claim_rewards/4`,
+    # `query_transaction_validators/3` and `preview_unstake_wallet/6` reach the rest of
+    # Prime's nine endpoints directly. These four callbacks still have no endpoint behind
+    # them:
     #
     # * no rate schedule is published at all
     # * `staking/status` names **one wallet** and reports that wallet's state, which is not
     #   "every staked position, one per asset". Returning it here would answer a narrower
-    #   question while looking like the wider one; it is reachable as
-    #   `Prime.staking_status/4`.
+    #   question while looking like the wider one; it is reachable as `staking_status/4`.
     # * `claim_rewards` is a write that moves accrued rewards, not a report of what accrued
     # * there is no staking history endpoint at either scope
     {:get_staking_rates, 1},
@@ -668,9 +670,8 @@ defmodule DpExchange.Coinbase do
   Redeems `amount` of a staked `asset` through **Coinbase Prime**.
 
   **Returns before the redemption completes.** The asset unbonds on the chain's schedule
-  and arrives in parts; `DpExchange.Coinbase.Prime.unstake_status/4` is what reports
-  progress. A caller treating this return value as settled will spend an asset it does not
-  have yet.
+  and arrives in parts; `unstake_status/4` is what reports progress. A caller treating this
+  return value as settled will spend an asset it does not have yet.
 
   Scope and credentials work exactly as they do on `stake/3`.
   """
@@ -705,6 +706,76 @@ defmodule DpExchange.Coinbase do
 
   defp prime_wallet(:unstake, credentials, portfolio, wallet, asset, amount, opts),
     do: Prime.unstake_wallet(credentials, portfolio, wallet, asset, amount, opts)
+
+  @doc """
+  The validators a Prime staking transaction would touch, across a **portfolio** —
+  see `DpExchange.Coinbase.Prime.query_transaction_validators/3`.
+
+  A read, despite Prime taking the query as a POST body. `opts[:query]` is the venue's
+  own filter map and is sent as given — reshaping a vocabulary only Prime defines would
+  be a second place to be wrong about it.
+  """
+  @spec query_transaction_validators(Prime.credentials(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def query_transaction_validators(credentials, portfolio_id, opts \\ []),
+    do: Prime.query_transaction_validators(credentials, portfolio_id, opts)
+
+  @doc """
+  One Prime wallet's staking state — see `DpExchange.Coinbase.Prime.staking_status/4`.
+
+  **Not `get_staking_balances/1`.** That callback answers "every staked position, one
+  per asset" and this venue does not serve it — see `venue_does_not_serve/0`. This names
+  one wallet and reports that wallet's state, which is a narrower question answered
+  correctly rather than the wider one answered wrong.
+  """
+  @spec staking_status(Prime.credentials(), String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def staking_status(credentials, portfolio_id, wallet_id, opts \\ []),
+    do: Prime.staking_status(credentials, portfolio_id, wallet_id, opts)
+
+  @doc """
+  How far a Prime wallet's redemption has got — see
+  `DpExchange.Coinbase.Prime.unstake_status/4`.
+
+  **This is the call that says a redemption is not finished.** `unstake/3` returns
+  before the asset has unbonded; a caller that never reads this reports a redemption as
+  complete the moment it was accepted.
+  """
+  @spec unstake_status(Prime.credentials(), String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def unstake_status(credentials, portfolio_id, wallet_id, opts \\ []),
+    do: Prime.unstake_status(credentials, portfolio_id, wallet_id, opts)
+
+  @doc """
+  Claims accrued Prime staking rewards for one wallet. **This moves funds.** See
+  `DpExchange.Coinbase.Prime.claim_rewards/4`.
+
+  **A write, not a report.** It does not say what has accrued; it moves what has. Not
+  `get_staking_rewards/1` — that callback is declared unsupported on this venue
+  precisely because there is no read for what this writes; see `venue_does_not_serve/0`.
+  """
+  @spec claim_rewards(Prime.credentials(), String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def claim_rewards(credentials, portfolio_id, wallet_id, opts \\ []),
+    do: Prime.claim_rewards(credentials, portfolio_id, wallet_id, opts)
+
+  @doc """
+  What a wallet-scoped Prime unstake would do, without doing it — see
+  `DpExchange.Coinbase.Prime.preview_unstake_wallet/6`.
+
+  **A preview is not a reservation.** Nothing is held, and the unbonding schedule
+  returned is the schedule as of the moment it was asked.
+  """
+  @spec preview_unstake_wallet(
+          Prime.credentials(),
+          String.t(),
+          String.t(),
+          String.t(),
+          Decimal.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def preview_unstake_wallet(credentials, portfolio_id, wallet_id, asset, amount, opts \\ []),
+    do: Prime.preview_unstake_wallet(credentials, portfolio_id, wallet_id, asset, amount, opts)
 
   @doc """
   Quotes a conversion. **Nothing moves.**

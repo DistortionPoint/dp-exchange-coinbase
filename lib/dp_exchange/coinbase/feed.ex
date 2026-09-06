@@ -428,9 +428,6 @@ defmodule DpExchange.Coinbase.Feed do
   # on each of a symbol's affected shards, so a single call can wait out several windows.
   @call_timeout @frame_window_ms * 3
 
-  @spec pairs_per_socket() :: pos_integer()
-  def pairs_per_socket, do: @pairs_per_socket
-
   @doc "The scope split into one list per socket."
   @spec shards([String.t()]) :: [[String.t()]]
   def shards([]), do: []

@@ -22,6 +22,22 @@ acceptable changelog line.
 
 ### Added
 
+- **Five of Coinbase Prime's nine staking endpoints are now reachable from the facade
+  — `dp_exchange_core`'s new "internal wiring" conformance assertion (assertion 16)
+  caught them as built and never called from this package's own `lib/`.**
+  `DpExchange.Coinbase.query_transaction_validators/3`, `staking_status/4`,
+  `unstake_status/4`, `claim_rewards/4` and `preview_unstake_wallet/6` now delegate
+  straight to the matching `DpExchange.Coinbase.Prime` function, the same pattern
+  `stake/3` and `unstake/3` already used for the other four. None of these map onto a
+  `dp_exchange_core.Venue` callback — `staking_status` answers a narrower question than
+  `get_staking_balances/1` would, `claim_rewards` is a write where that callback wants a
+  read, and `query_transaction_validators`/`preview_unstake_wallet` have no generic
+  analogue at all — so they are Coinbase-specific facade functions, the same shape as
+  the existing futures and portfolio extras (`list_futures_positions/1`,
+  `get_portfolio_breakdown/3`, and friends). `venue_does_not_serve/0`'s own
+  documentation already claimed these were "reachable as `Prime.X`"; that claim is now
+  true through the facade as well, not only by reaching past it into an internal module.
+
 - **`coverage_by_kind/1` implemented — Coinbase is the motivating case for
   `dp_exchange_core` 0.1.48's new optional callback.** `coverage/1` answers "is
   anything arriving for this symbol" by counting any payload at all, so a `level2`
@@ -71,6 +87,22 @@ acceptable changelog line.
   `high_24h`, `low_24h`, `status` and `product_type` per product, and `get_symbols/1` kept
   only `product_id`. Both new functions read the same response `get_symbols/1` already
   fetches — via a shared `fetch_products/1` — rather than a second request.
+
+### Removed
+
+- **`Feed.pairs_per_socket/0` and `SymbolFormat.mapping/0` deleted — both were public
+  getters over a module attribute with no caller anywhere in this package's own `lib/`,
+  the other shape
+  assertion 16 exists to catch.** `Feed`'s own moduledoc already says sharding details
+  "never reach the facade" — `@pairs_per_socket` is consulted directly by `shards/1`,
+  the function that actually shards, and stays; the accessor was consulted only by a
+  test asserting the same number `shards/1`'s own tests already prove through behaviour.
+  `SymbolFormat.mapping/0`'s doc claimed it existed "so the conformance suite can drive
+  `CanonicalPair` with it," but `dp_exchange_core`'s conformance suite calls only
+  `to_canonical_symbol/1` and `to_exchange_symbol/1` (the actual behaviour callbacks) —
+  it never called `mapping/0`, and neither did anything else outside this package's own
+  test suite. **Breaking**, for the two functions removed; neither was part of the
+  `Venue` behaviour or documented as consumer-facing in `usage-rules.md`.
 
 ### Fixed
 

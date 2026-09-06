@@ -192,19 +192,36 @@ every available excess dollar** — the venue's default, not this package's.
 
 ## Prime is a different product, host and credential
 
-`DpExchange.Coinbase.Prime` reaches Coinbase **Prime**'s nine custodial staking endpoints.
-It talks to `api.prime.coinbase.com` and signs an HMAC under an access key, a passphrase and
-a signing key — **the CDP key pair the rest of this package uses is not accepted there**, and
-two of the three is refused locally rather than sent as a signature over the wrong string.
+Coinbase **Prime** is nine custodial staking endpoints. It talks to
+`api.prime.coinbase.com` and signs an HMAC under an access key, a passphrase and a
+signing key — **the CDP key pair the rest of this package uses is not accepted there**,
+and two of the three is refused locally rather than sent as a signature over the wrong
+string. `DpExchange.Coinbase.Prime.credentials()` is that triple's type.
 
-`stake/3` and `unstake/3` reach it, and **pick a scope only from what you said**: a
-`:wallet_id` means the wallet, its absence means the portfolio, and `:portfolio_id` is always
-required. A portfolio-scoped unstake redeems across *every* wallet in the portfolio.
+**All nine reach through the facade.** `stake/3` and `unstake/3` are the two that also
+answer a `Core.Venue` callback, and they **pick a scope only from what you said**: a
+`:wallet_id` means the wallet, its absence means the portfolio, and `:portfolio_id` is
+always required. A portfolio-scoped unstake redeems across *every* wallet in the
+portfolio. The other five are Coinbase-specific — no generic callback fits them, so they
+are plain functions on `DpExchange.Coinbase` instead:
 
-These are **not** the CDP Staking API, whose seven endpoints return unsigned transactions for
-you to sign and broadcast. If you hold one of those, nothing has been staked.
+- `query_transaction_validators/3` — the validators a portfolio-scoped staking
+  transaction would touch. A read, despite being a POST: Prime takes the query in the
+  body.
+- `staking_status/4` — one wallet's staking state. **Not** what `get_staking_balances/1`
+  would answer even if this venue served it: that is every staked position, one per
+  asset; this is one wallet's own state.
+- `unstake_status/4` — how far a wallet-scoped redemption has got. `unstake/3` returns
+  before the asset has unbonded; this is what says whether it is done.
+- `claim_rewards/4` — **moves funds.** Claims a wallet's accrued rewards. A write, not a
+  report — it does not say what accrued, only moves what has.
+- `preview_unstake_wallet/6` — what a wallet-scoped unstake would do, without doing it.
+  Moves nothing.
 
-**Nothing in `Prime` has been run.** The paths come from the vendor's pages and the signing
+These are **not** the CDP Staking API, whose seven endpoints return unsigned transactions
+for you to sign and broadcast. If you hold one of those, nothing has been staked.
+
+**Nothing here has been run.** The paths come from the vendor's pages and the signing
 scheme from its authentication documentation; this repository holds no Prime credential.
 
 ## Convert: two steps, and no expiry to rely on

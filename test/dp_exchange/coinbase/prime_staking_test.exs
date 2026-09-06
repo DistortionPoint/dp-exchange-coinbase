@@ -362,6 +362,65 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
     end
   end
 
+  describe "the facade reaches the rest of Prime's nine endpoints directly" do
+    test "query_transaction_validators/3 reaches the portfolio-scoped path" do
+      me = self()
+
+      assert {:ok, _result} =
+               DpExchange.Coinbase.query_transaction_validators(@credentials, "pf-1", opts(me))
+
+      assert_receive {:request, "POST", path, _raw, _headers}
+      assert path == "/v1/portfolios/pf-1/staking/transaction-validators/query"
+    end
+
+    test "staking_status/4 reaches the wallet-scoped GET" do
+      me = self()
+
+      assert {:ok, _result} =
+               DpExchange.Coinbase.staking_status(@credentials, "pf-1", "w-9", opts(me))
+
+      assert_receive {:request, "GET", path, _raw, _headers}
+      assert path == "/v1/portfolios/pf-1/wallets/w-9/staking/status"
+    end
+
+    test "unstake_status/4 reaches the wallet-scoped GET" do
+      me = self()
+
+      assert {:ok, _result} =
+               DpExchange.Coinbase.unstake_status(@credentials, "pf-1", "w-9", opts(me))
+
+      assert_receive {:request, "GET", path, _raw, _headers}
+      assert path == "/v1/portfolios/pf-1/wallets/w-9/staking/unstake/status"
+    end
+
+    test "claim_rewards/4 reaches the wallet-scoped write" do
+      me = self()
+
+      assert {:ok, _result} =
+               DpExchange.Coinbase.claim_rewards(@credentials, "pf-1", "w-9", opts(me))
+
+      assert_receive {:request, "POST", path, _raw, _headers}
+      assert path == "/v1/portfolios/pf-1/wallets/w-9/staking/claim_rewards"
+    end
+
+    test "preview_unstake_wallet/6 reaches the preview path and moves nothing" do
+      me = self()
+
+      assert {:ok, _result} =
+               DpExchange.Coinbase.preview_unstake_wallet(
+                 @credentials,
+                 "pf-1",
+                 "w-9",
+                 "ETH",
+                 Decimal.new("1"),
+                 opts(me)
+               )
+
+      assert_receive {:request, "POST", path, _raw, _headers}
+      assert path == "/v1/portfolios/pf-1/wallets/w-9/staking/unstake/preview"
+    end
+  end
+
   describe "the fake holds the same guards" do
     test "a stake without a portfolio is refused" do
       assert {:error, :missing_portfolio} = Fake.stake("ETH", Decimal.new("1"))

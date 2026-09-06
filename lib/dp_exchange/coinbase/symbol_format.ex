@@ -36,10 +36,6 @@ defmodule DpExchange.Coinbase.SymbolFormat do
 
   @mapping %{sep: "-", quotes: ~w(USDC USDT USD EUR GBP BTC ETH)}
 
-  @doc "The mapping, exposed so the conformance suite can drive `CanonicalPair` with it."
-  @spec mapping() :: CanonicalPair.mapping()
-  def mapping, do: @mapping
-
   @impl true
   @spec to_canonical_symbol(String.t()) :: String.t()
   def to_canonical_symbol(native) when is_binary(native),

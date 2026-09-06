@@ -50,24 +50,4 @@ defmodule DpExchange.Coinbase.SymbolFormatTest do
       end
     end
   end
-
-  describe "mapping/0" do
-    test "is exposed so the conformance suite can drive CanonicalPair with it" do
-      mapping = SymbolFormat.mapping()
-
-      assert mapping.sep == "-"
-      assert "USDC" in mapping.quotes
-    end
-
-    test "quotes are ordered longest-first, as the shared convention requires" do
-      # Never consulted on this venue — a dashed mapping splits on the separator and
-      # never falls back to suffix matching. Kept correct anyway: it costs nothing, and
-      # it stops being cosmetic the moment someone reuses this mapping for a venue that
-      # concatenates.
-      quotes = SymbolFormat.mapping().quotes
-
-      assert Enum.find_index(quotes, &(&1 == "USDC")) < Enum.find_index(quotes, &(&1 == "USD"))
-      assert Enum.find_index(quotes, &(&1 == "USDT")) < Enum.find_index(quotes, &(&1 == "USD"))
-    end
-  end
 end
