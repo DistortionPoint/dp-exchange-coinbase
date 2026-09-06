@@ -141,8 +141,10 @@ defmodule DpExchange.Coinbase do
     {:get_volume_profile, 3},
     # No transfer ledger on this surface; transfers happen in the consumer product.
     {:get_transfers, 2},
-    # The venue meters by header rather than by endpoint: there is no call that reports
-    # what a credential has left.
+    # There is no call that reports what a credential has left, and no header either:
+    # measured 2026-08-28, a brokerage response carries no `x-ratelimit-*`, no `cb-*` and
+    # no `retry-after` — see `docs/reference/coinbase/reconciliation.md` §5.5. Budget is
+    # simply not published on this surface, in any form.
     {:get_rate_limit_status, 2}
   ]
 
@@ -211,8 +213,12 @@ defmodule DpExchange.Coinbase do
       supports_order_replace: true,
       # `level2` was recognised and decoded but never subscribed — `Socket` already had
       # the auth machinery for it, and the only thing standing between that and a real
-      # declaration was `Feed` asking for it. Now sharded (100 pairs/socket, the number
-      # from the incident that made sharding necessary) and subscribed on every shard.
+      # declaration was `Feed` asking for it. Now sharded and subscribed on every shard.
+      # `level2` no longer shares `ticker`'s shard size: `ticker` stays at 100 pairs per
+      # socket (the number from the incident that made sharding necessary), `level2` is
+      # chunked at 30 — the per-session product ceiling DpCryptoManagement bisected live
+      # on 2026-09-06. See `Feed`'s moduledoc and
+      # `docs/reference/coinbase/level2-session-limit.md`.
       streamable: [:quotes, :order_book],
       historical_timeframes: Rest.granularities(),
       max_candles_per_request: Rest.max_candles(),
@@ -224,7 +230,7 @@ defmodule DpExchange.Coinbase do
       # "required" or "not", and neither is true for the package as a whole. The one
       # exception is `get_top_of_book/2`, which genuinely has no public form — see its
       # own doc and `docs/reference/coinbase/endpoint-inventory.md` — but one endpoint's
-      # exception does not make `:required` the honest word for the other forty-five.
+      # exception does not make `:required` the honest word for the other forty-eight.
       credential_benefit: :higher_ceiling,
       public_ceiling: %{limit: 3, per_ms: 1_000},
       authenticated_ceiling: %{limit: 10, per_ms: 1_000},

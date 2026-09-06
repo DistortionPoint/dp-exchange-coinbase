@@ -112,12 +112,15 @@ of the contract's 87 callbacks, most of them authenticated. The fix is not a fre
 capture — Advanced Trade's operation count has not moved — it is stating what changed on
 this side of the boundary, which a vendor capture cannot do for itself.
 
-**Current, from `capabilities/0`, checked 2026-09-03**: 46 `:experimental`, 41
-`:unsupported`, of which 38 are the venue's own absence — see `negative-claims.md` — and
-3 are genuinely not yet ported (`get_funding/2`, `get_contract_stats/2`, `list_instruments/1`).
+**Current, from `capabilities/0`, checked 2026-09-06**: 88 callbacks — 49 `:experimental`,
+39 `:unsupported`, of which 37 are the venue's own absence — see `negative-claims.md` — and
+2 are genuinely not yet ported (`get_funding/2`, `get_contract_stats/2`). `list_instruments/1`
+was on that not-ported list and no longer is: it has been implemented since 2026-09-01.
 
 The vendor-side counts below are unchanged since the original capture and still describe
 Advanced Trade's own surface, not this package's coverage of it — read the two separately.
+The "in this package" column, by contrast, is this side of the boundary and was re-checked
+against `lib/dp_exchange/coinbase/rest.ex` on 2026-09-06.
 
 | | endpoints | in this package |
 |---|---|---|
@@ -125,74 +128,78 @@ Advanced Trade's own surface, not this package's coverage of it — read the two
 
 | group | endpoints | in this package |
 |---|---|---|
-| orders | 9 | most — place, get, cancel, list; no batch-place, batch has no atomic multi-cancel beyond the venue's own |
-| futures (CFM) | 9 | not ported — `list_instruments/1`-adjacent |
+| orders | 9 | **all 9** — place, preview, edit, edit-preview, cancel, close-position, get, list, fills. `place_orders/3` is still unsupported as a *callback*, because `POST /orders` takes one order — that is the venue's shape, not a missing endpoint |
+| futures (CFM) | 9 | **all 9** — `get_futures_position/3`, `get_futures_balance_summary/2`, `list_futures_sweeps/2`, `schedule_futures_sweep/2`, `cancel_futures_sweep/2`, `get_intraday_margin_setting/2`, `set_intraday_margin_setting/3`, `get_current_margin_window/2`, and `/cfm/positions` read two ways (`get_positions/1` as `Types.Position`, `list_futures_positions/1` as the venue's own row) |
 | public | 6 | quotes, top of book, trades |
 | products | 6 | symbols, instrument metadata |
-| portfolios | 6 | not ported (`list_portfolios/1`) |
-| perpetuals (INTX) | 6 | 0 — **vendor-deprecated**, and `supported_instrument_types` deliberately excludes `:perp` for it |
-| convert | 3 | 0 — **the venue's absence**, not this package's; see Notes |
-| payment methods | 2 | 0 — **the venue's absence** |
-| accounts | 2 | balances |
-| fees | 1 | 0 — read separately from `get_trade_volume/2`, which is now implemented |
-| data API | 1 | 0 |
+| portfolios | 6 | **all 6** — `list_portfolios/1`, `get_portfolio_breakdown/3`, `create_account/1`, `rename_account/3`, `delete_portfolio/3`, `transfer_internal/4` (`/portfolios/move_funds`) |
+| perpetuals (INTX) | 6 | 0 — **vendor-deprecated**, and `supported_instrument_types` deliberately excludes `:perp` for it. This is the only group with nothing implemented |
+| convert | 3 | **all 3** — `quote_conversion/4`, `commit_conversion/2`, `get_conversion/2`. The venue's absence is the *one-step* `convert/4`, which belongs to the Exchange API; the two-step form is here — see Notes |
+| payment methods | 2 | **both** — `list_payment_methods/2`, `get_payment_method/3`. The venue's absence is `add_payment_method/2`, which has no endpoint at all |
+| accounts | 2 | **both** — `get_balances/2`, `get_accounts/2` |
+| fees | 1 | **1** — `/transaction_summary`, read by `get_fees/2` and, separately, by `get_trade_volume/2` |
+| data API | 1 | **1** — `/key_permissions`, read by `get_roles/1` |
 
 ## Endpoints
 
-`✓` marks what this package implements today.
+`✓` marks what this package implements today — re-checked against the path literals in
+`lib/dp_exchange/coinbase/rest.ex` on 2026-09-06. **45 of the 51 are marked; the six
+unmarked ones are all `intx/*`**, which is `APPROVED-SKIP` as vendor-deprecated. The seven
+marks this list carried before that re-check were a snapshot frozen at the first release
+and had not moved since, which is the same staleness the Counts section above records.
 
 ```
-  DELETE /api/v3/brokerage/cfm/sweeps
-  DELETE /api/v3/brokerage/portfolios/{portfolio_uuid}
-  GET /api/v3/brokerage/accounts
-  GET /api/v3/brokerage/accounts/{account_uuid}
+✓ DELETE /api/v3/brokerage/cfm/sweeps
+✓ DELETE /api/v3/brokerage/portfolios/{portfolio_uuid}
+✓ GET /api/v3/brokerage/accounts
+✓ GET /api/v3/brokerage/accounts/{account_uuid}
 ✓ GET /api/v3/brokerage/best_bid_ask
-  GET /api/v3/brokerage/cfm/balance_summary
-  GET /api/v3/brokerage/cfm/intraday/current_margin_window
-  GET /api/v3/brokerage/cfm/intraday/margin_setting
-  GET /api/v3/brokerage/cfm/positions
-  GET /api/v3/brokerage/cfm/positions/{product_id}
-  GET /api/v3/brokerage/cfm/sweeps
-  GET /api/v3/brokerage/convert/trade/{trade_id}
+✓ GET /api/v3/brokerage/cfm/balance_summary
+✓ GET /api/v3/brokerage/cfm/intraday/current_margin_window
+✓ GET /api/v3/brokerage/cfm/intraday/margin_setting
+✓ GET /api/v3/brokerage/cfm/positions
+✓ GET /api/v3/brokerage/cfm/positions/{product_id}
+✓ GET /api/v3/brokerage/cfm/sweeps
+✓ GET /api/v3/brokerage/convert/trade/{trade_id}
   GET /api/v3/brokerage/intx/balances/{portfolio_uuid}
   GET /api/v3/brokerage/intx/portfolio/{portfolio_uuid}
   GET /api/v3/brokerage/intx/positions/{portfolio_uuid}
   GET /api/v3/brokerage/intx/positions/{portfolio_uuid}/{symbol}
-  GET /api/v3/brokerage/key_permissions
+✓ GET /api/v3/brokerage/key_permissions
 ✓ GET /api/v3/brokerage/market/product_book
 ✓ GET /api/v3/brokerage/market/products
-  GET /api/v3/brokerage/market/products/{product_id}
+✓ GET /api/v3/brokerage/market/products/{product_id}
 ✓ GET /api/v3/brokerage/market/products/{product_id}/candles
 ✓ GET /api/v3/brokerage/market/products/{product_id}/ticker
-  GET /api/v3/brokerage/orders/historical/batch
-  GET /api/v3/brokerage/orders/historical/fills
-  GET /api/v3/brokerage/orders/historical/{order_id}
-  GET /api/v3/brokerage/payment_methods
-  GET /api/v3/brokerage/payment_methods/{payment_method_id}
-  GET /api/v3/brokerage/portfolios
-  GET /api/v3/brokerage/portfolios/{portfolio_uuid}
+✓ GET /api/v3/brokerage/orders/historical/batch
+✓ GET /api/v3/brokerage/orders/historical/fills
+✓ GET /api/v3/brokerage/orders/historical/{order_id}
+✓ GET /api/v3/brokerage/payment_methods
+✓ GET /api/v3/brokerage/payment_methods/{payment_method_id}
+✓ GET /api/v3/brokerage/portfolios
+✓ GET /api/v3/brokerage/portfolios/{portfolio_uuid}
 ✓ GET /api/v3/brokerage/product_book
-  GET /api/v3/brokerage/products
-  GET /api/v3/brokerage/products/{product_id}
-  GET /api/v3/brokerage/products/{product_id}/candles
+✓ GET /api/v3/brokerage/products
+✓ GET /api/v3/brokerage/products/{product_id}
+✓ GET /api/v3/brokerage/products/{product_id}/candles
 ✓ GET /api/v3/brokerage/products/{product_id}/ticker
-  GET /api/v3/brokerage/time
-  GET /api/v3/brokerage/transaction_summary
-  POST /api/v3/brokerage/cfm/intraday/margin_setting
-  POST /api/v3/brokerage/cfm/sweeps/schedule
-  POST /api/v3/brokerage/convert/quote
-  POST /api/v3/brokerage/convert/trade/{trade_id}
+✓ GET /api/v3/brokerage/time
+✓ GET /api/v3/brokerage/transaction_summary
+✓ POST /api/v3/brokerage/cfm/intraday/margin_setting
+✓ POST /api/v3/brokerage/cfm/sweeps/schedule
+✓ POST /api/v3/brokerage/convert/quote
+✓ POST /api/v3/brokerage/convert/trade/{trade_id}
   POST /api/v3/brokerage/intx/allocate
   POST /api/v3/brokerage/intx/multi_asset_collateral
-  POST /api/v3/brokerage/orders
-  POST /api/v3/brokerage/orders/batch_cancel
-  POST /api/v3/brokerage/orders/close_position
-  POST /api/v3/brokerage/orders/edit
-  POST /api/v3/brokerage/orders/edit_preview
-  POST /api/v3/brokerage/orders/preview
-  POST /api/v3/brokerage/portfolios
-  POST /api/v3/brokerage/portfolios/move_funds
-  PUT /api/v3/brokerage/portfolios/{portfolio_uuid}
+✓ POST /api/v3/brokerage/orders
+✓ POST /api/v3/brokerage/orders/batch_cancel
+✓ POST /api/v3/brokerage/orders/close_position
+✓ POST /api/v3/brokerage/orders/edit
+✓ POST /api/v3/brokerage/orders/edit_preview
+✓ POST /api/v3/brokerage/orders/preview
+✓ POST /api/v3/brokerage/portfolios
+✓ POST /api/v3/brokerage/portfolios/move_funds
+✓ PUT /api/v3/brokerage/portfolios/{portfolio_uuid}
 ```
 
 ## Notes

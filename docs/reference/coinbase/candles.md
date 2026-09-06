@@ -42,5 +42,13 @@ The documentation is what settles it: the enum above either contains a width or 
 not, and a width it does not contain is an error rather than the nearest neighbour.
 
 Coinbase's own endpoint behaves the same way — an unrecognised enum such as `THREE_HOUR`
-returns **empty**, not an error and not a substitute. So a package that guesses is
-guessing on top of a venue that already refuses to.
+is **refused outright**, not substituted with a nearby width. Measured live 2026-08-28:
+
+```
+parsing field "granularity": "THREE_HOUR" is not a valid value
+```
+
+This corrects an earlier reading of this page, which said an unrecognised enum came back
+**empty**. It does not; it errors. Either way the conclusion is unchanged — a package that
+guesses is guessing on top of a venue that already refuses to — but "empty" was the prior
+adapter's own claim, carried here unchecked, and the measurement above is what settles it.

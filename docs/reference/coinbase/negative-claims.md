@@ -5,8 +5,10 @@
 must never be substituted for a missing one; this is the same rule pointed at documentation.
 **An unverified negative is a substitution exactly like an invented value.**
 
-Two of this package's negatives turned out to be wrong, both found by this audit's own plan,
-and both for the same reason: **the claim was made from the wrong endpoint's absence.**
+Three of this package's negatives turned out to be wrong, all found by this audit's own
+plan, and all for the same reason: **the claim was made from the wrong endpoint's
+absence.** They are the three the table marks **WAS WRONG**, and the pattern section at the
+foot of this file is about those three.
 
 ## Sources
 
@@ -31,7 +33,7 @@ and both for the same reason: **the claim was made from the wrong endpoint's abs
 | **`supports_order_preview: false`** | pages | **WAS WRONG, corrected.** The venue publishes `/orders/preview` |
 | **`supports_order_replace: false`** | pages | **WAS WRONG, corrected, and it mattered more than the first.** The venue publishes `/orders/edit`. The false claim told a caller to cancel and re-place, which opens a window in which no order is live — the package was describing a risk it was creating by not implementing the endpoint that avoids it |
 | **`get_trade_volume/2` — "Advanced Trade does not aggregate"** | pages, 2026-09-01 | **WAS WRONG, corrected.** `/transaction_summary` carries `volume_breakdown` per volume type, plus `advanced_trade_only_volume` and `coinbase_pro_volume`. The claim had been made from `/products/volume-summary`'s absence, which is *market* volume — a different question |
-| No public market data without a credential | pages | **holds.** The `/market/*` paths exist but this package signs everything; the declaration says `credential_benefit` rather than claiming the venue is closed |
+| No public market data without a credential | pages | **WAS WRONG about this package, corrected 2026-09-06.** The verdict used to read "the `/market/*` paths exist but this package signs everything". It does not, and never did: `Rest` picks the authenticated path only when it is given credentials and the public `/market/*` one when it is not — `get_price/2`, `get_symbols/1`, `get_historical_prices/4`, `get_order_book/2` and `quantization/2` all branch on `opts[:credentials]`. That is why the declaration is `credential_benefit: :higher_ceiling`. The one genuine exception is `/best_bid_ask`, which publishes no `market/` form — see `endpoint-inventory.md` |
 
 ## The pattern in all three mistakes
 
