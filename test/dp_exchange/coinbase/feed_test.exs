@@ -26,6 +26,21 @@ defmodule DpExchange.Coinbase.FeedTest do
     }
   end
 
+  # Polls a condition instead of sleeping a guessed duration.
+  #
+  # `Process.sleep(n)` as a synchronisation device is a bet that some asynchronous work
+  # finishes within `n` milliseconds on a loaded, `async: true` suite. It passes locally,
+  # then fails in CI against code that is working correctly — which is strictly worse than
+  # having no test, because it teaches the reader to distrust the suite. Both of the
+  # retry-chain tests below were written that way and one of them did exactly that.
+  defp wait_until(fun, timeout \\ 2_000, waited \\ 0) do
+    cond do
+      fun.() -> :ok
+      waited >= timeout -> flunk("condition was still false after #{timeout}ms")
+      true -> Process.sleep(5) && wait_until(fun, timeout, waited + 5)
+    end
+  end
+
   defp order_book_for(symbol) do
     %Types.OrderBook{
       symbol: symbol,
@@ -915,7 +930,10 @@ defmodule DpExchange.Coinbase.FeedTest do
       log =
         capture_log(fn ->
           send(feed, {:channel_subscribe, socket, "ticker", ["BTC-USD"], nil})
-          Process.sleep(50)
+
+          # Wait for the retry to actually land rather than sleeping a guessed duration —
+          # see `wait_until/1`.
+          wait_until(fn -> :counters.get(counter, 1) == 2 end)
         end)
 
       # Two sends reached the socket: the failed first attempt and the retry that
@@ -936,17 +954,20 @@ defmodule DpExchange.Coinbase.FeedTest do
       log =
         capture_log(fn ->
           send(feed, {:channel_subscribe, socket, "level2", ["BTC-USD"], nil})
-          Process.sleep(20)
+
+          # The notice is the completion signal — waiting on it, rather than on a clock,
+          # guarantees the log has been written before it is asserted against.
+          assert_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change} = notice},
+                         2_000
+
+          assert notice.severity == :warning
+          assert notice.details.channel == "level2"
+          assert notice.details.reason =~ "credentials_required"
         end)
 
       assert log =~ "failed permanently"
       assert log =~ "not retrying"
       refute log =~ "retrying in"
-
-      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change} = notice}
-      assert notice.severity == :warning
-      assert notice.details.channel == "level2"
-      assert notice.details.reason =~ "credentials_required"
       assert Process.alive?(feed)
     end
 
@@ -967,15 +988,23 @@ defmodule DpExchange.Coinbase.FeedTest do
       log =
         capture_log(fn ->
           send(feed, {:channel_subscribe, socket, "ticker", ["BTC-USD"], nil})
-          Process.sleep(100)
+
+          # Wait on the notice, not on a clock. The exhaustion notice is emitted only
+          # after the final attempt, so receiving it proves the whole chain has run.
+          # The `Process.sleep(100)` this replaces was a guess that two 5ms retry gaps
+          # plus GenServer scheduling would fit in 100ms; under a loaded async suite they
+          # sometimes did not, the captured log ended at "attempt 2/3", and the assertion
+          # below failed against a fix that was working correctly. A test that reports a
+          # regression the code did not commit is worse than no test.
+          assert_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change} = notice},
+                         2_000
+
+          assert notice.severity == :warning
+          assert notice.details.channel == "ticker"
+          assert notice.details.reason =~ "send_timeout"
         end)
 
       assert log =~ "giving up until the next resubscribe cycle"
-
-      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change} = notice}
-      assert notice.severity == :warning
-      assert notice.details.channel == "ticker"
-      assert notice.details.reason =~ "send_timeout"
 
       # One initial attempt plus @max_subscribe_retries (2) retries — three sends, and
       # never a fourth, proving the chain is bounded rather than open-ended.
