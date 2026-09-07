@@ -123,13 +123,14 @@ defmodule DpExchange.Coinbase.Feed do
 
   **Connects are staggered across both groups on one sequence, `ticker` first.** Every new
   socket this module opens — whichever channel it carries — takes the next tick of
-  `@shard_spacing_ms`, in an order that places every touched `ticker` shard ahead of every
-  touched `level2` shard. This is what keeps `ticker`'s own boot-time coverage exactly as
-  fast as the section above describes: a 406-symbol subscribe still resolves its
-  synchronous reply and its remaining `ticker` shards inside the same handful of seconds
-  as before this fix, with `level2`'s 14 shards ramping in behind them. For that universe
-  the last `level2` shard's tick lands roughly 70 seconds after boot (`(14 - 1) *
-  @shard_spacing_ms`) — materially slower than `ticker`'s own coverage, and an accepted,
+  `shard_spacing_ms` (`5_000`ms by default — see that option's own section below), in an
+  order that places every touched `ticker` shard ahead of every touched `level2` shard.
+  This is what keeps `ticker`'s own boot-time coverage exactly as fast as the section above
+  describes: a 406-symbol subscribe still resolves its synchronous reply and its remaining
+  `ticker` shards inside the same handful of seconds as before this fix, with `level2`'s 14
+  shards ramping in behind them. For that universe the last `level2` shard's tick lands
+  roughly 70 seconds after boot (`(14 - 1) * shard_spacing_ms`, at the default) —
+  materially slower than `ticker`'s own coverage, and an accepted,
   stated cost, now roughly a fifth of what the `6`-sized grouping cost (about six
   minutes): `order_book` coverage was permanently `6 / 406` before `level2` got its own
   grouping at all, climbing by 5,099 refusals and counting; ramping to `406 / 406` in
@@ -418,7 +419,7 @@ defmodule DpExchange.Coinbase.Feed do
 
   ## Every shard beyond the first must open on its own tick, not the same one
 
-  `@shard_spacing_ms` staggers shard opens **relative to each other**, not relative to a
+  `shard_spacing_ms` staggers shard opens **relative to each other**, not relative to a
   fixed instant. A scope wide enough to need three or more shards — DpCryptoManagement's
   issue #20, 406 symbols / 5 shards, filed against real production traffic — used to
   schedule every shard past the first (the synchronous one) with the *same* fixed delay,
@@ -427,7 +428,9 @@ defmodule DpExchange.Coinbase.Feed do
   connections lost that race ever delivered a tick; coverage sat at whatever fraction of
   one shard survived, indistinguishable from the outside from a quiet market. The
   60-second unconditional resubscribe re-issued the same burst every minute. Both paths
-  now schedule each shard's turn `position * @shard_spacing_ms` after the one before it.
+  now schedule each shard's turn `position * shard_spacing_ms` after the one before it —
+  see "`shard_spacing_ms` — a supervision option" below for what that value is, where it
+  comes from, and how a consumer can change it.
 
   **This staggering has to reach an already-open shard too, not only a brand-new
   connection.** `reconcile_shard/7` used to receive the same `delay` `reshard/1` computes
@@ -440,6 +443,78 @@ defmodule DpExchange.Coinbase.Feed do
   blocking sends, stalling `coverage/1` and every other call to this `Feed` for as long as
   the slowest one takes. Fixed the same way: `delay` now reaches `reconcile_shard/7` and
   staggers its frames exactly as it already staggered a new shard's.
+
+  ## `shard_spacing_ms` — a supervision option, so a test does not have to wait out a
+  production timer to prove staggering happened
+
+  `30` in `@default_level2_pairs_per_socket` and `60_000` in
+  `@default_resubscribe_interval_ms` both became supervision options once they had a
+  reason a consumer might legitimately want to move them. `shard_spacing_ms` gets the
+  same treatment for a different reason: this package's own test suite needed one first.
+
+  Five of this file's own sharding tests exist to prove staggering happened — that a
+  connect burst is spread across ticks, that `ticker` shards are scheduled ahead of
+  `level2` ones, that an already-open shard's reconcile is staggered too (the
+  "already-open shard" fix two sections up) — and every one of them, before this option
+  existed, could only prove that by actually waiting out `@shard_spacing_ms` in real
+  time: 45 of this suite's roughly 51 seconds, across five tests, one of them 15 seconds
+  on its own. That is not merely slow; a test that synchronises by sleeping out a real
+  production timer is the same shape of hazard `wait_until/3` exists elsewhere in this
+  suite to avoid — passing locally, then flaking in a more loaded CI the timer was never
+  sized for. `Feed.start_link/1` (via `DpExchange.Coinbase.Supervisor`'s ordinary opts
+  pass-through — no Supervisor code change needed, the same as `level2_pairs_per_socket`)
+  now accepts `shard_spacing_ms: n` and every stagger this module schedules — a new
+  shard's connect, an already-open shard's reconcile, the unconditional resubscribe, the
+  derived floor under `resubscribe_interval_ms` (`next_resubscribe_delay/1`) — reads it
+  from `state` instead of the module attribute. A test drives it down to a few tens of
+  milliseconds and keeps every one of those assertions meaningful: the relative ordering
+  (shard 1 before shard 2, `ticker` before `level2`) and the fact that a real,
+  positive delay was scheduled at all — see each test's own comment for how it does that
+  without merely asserting the calls happened.
+
+  **Validated the same way `level2_pairs_per_socket` is, on the axis that is
+  unconditionally nonsense.** A negative value or a non-integer cannot schedule
+  `Process.send_after/3` at all and is refused at `init/1` with an `ArgumentError` — see
+  `validate_shard_spacing_ms!/1`. `0` is NOT refused: `Process.send_after/3` accepts it
+  without complaint, and unlike a negative delay there is nothing mathematically broken
+  about "every shard opens in the same instant" — it is simply the connect burst this
+  whole file otherwise exists to avoid, which is the next paragraph's problem, not this
+  one.
+
+  **This is also a knob pointed at a venue rate limit, and this package just spent one
+  investigation (`level2_pairs_per_socket`, above) learning what happens when a number
+  that should be the venue's own fact is instead a guess.** Unlike `level2`'s per-session
+  product ceiling, though, Coinbase does document a connect-rate number: the Advanced
+  Trade rate-limits page states "WebSocket connections ... are ... limited to 8 per
+  second per IP" (re-read 2026-09-06, the same pass that produced the `level2` ceiling
+  above). This module opens one new socket per `shard_spacing_ms` tick, so that figure
+  converts directly into a floor: `ceil(1_000 / 8)` = `125`ms. A consumer setting
+  something below that is asking this package's own connects alone to exceed a limit
+  Coinbase states outright, independent of whatever else shares that IP.
+
+  Below the floor is honoured, not refused — the same shape as `level2_pairs_per_socket`
+  above its own measured ceiling, and for a symmetric reason: this package has no
+  visibility into a consumer's own network position (a dedicated IP with headroom this
+  repo cannot see, say), so it does not get to assume the conservative number is the only
+  correct one for every consumer. What a sub-floor value gets instead is a loud
+  `Logger.warning` naming the documented floor, its source, and the concrete risk —
+  connects tighter than the venue's own stated per-IP rate risk the connect-burst resets
+  this moduledoc opens with — legible, not silently accepted, exactly the standard
+  `level2_pairs_per_socket` set above the measured `30`.
+
+  **The default stays `5_000`, unmoved by this change, on purpose.** `@default_shard_spacing_ms`
+  predates this option and is carried over from the reference fix this package replaced —
+  inherited, not derived, the same way `@pairs_per_socket` (100) is. Against the
+  documented 8-connections-per-second-per-IP floor above, `5_000`ms is roughly forty
+  times more conservative than the venue's own stated rate requires, which is worth
+  saying plainly: it is very likely safe to tighten. It is not tightened here. This task
+  was to make the value injectable for a test, and to leave production behaviour alone
+  while doing it — retuning a constant nobody has yet deliberately measured a better
+  value for, inside a change whose stated purpose is test speed, is exactly the kind of
+  drive-by this family's own `FrameSender` moduledoc already warns against for a
+  different constant ("that is a decision for the design doc, with reasoning, not a
+  drive-by here"). See `docs/design/ideas/shard-spacing-headroom.md` for this observation
+  recorded as a non-blocking discovery, not acted on.
 
   ## The venue rewrites an aliased product id on delivery, and that has to be undone HERE
 
@@ -665,7 +740,30 @@ defmodule DpExchange.Coinbase.Feed do
 
   # Between opening each new socket, whichever channel it will carry. Opening several
   # connections in the same instant is a connect burst the venue answers with resets.
-  @shard_spacing_ms 5_000
+  #
+  # `5_000` is inherited from the reference fix this package replaced, the same way
+  # `@pairs_per_socket` (100) is — carried over, not derived from anything measured
+  # against this venue. See the moduledoc's "`shard_spacing_ms` — a supervision option"
+  # section for the one number this package DOES have on the record for connect pacing
+  # (Coinbase's own documented 8 connections/second/IP) and why the default is left alone
+  # here rather than tightened to it.
+  #
+  # Overridable via `:shard_spacing_ms`, the same shape as `:resubscribe_interval_ms` and
+  # `:level2_pairs_per_socket` — see `validate_shard_spacing_ms!/1` and the moduledoc's own
+  # section for the validation this one carries.
+  @default_shard_spacing_ms 5_000
+
+  # Coinbase's own Advanced Trade rate-limits page: "WebSocket connections ... are ...
+  # limited to 8 per second per IP" — re-read 2026-09-06 alongside the `level2` ceiling
+  # investigation above, the same pass that produced `@default_level2_pairs_per_socket`.
+  # This package opens one new connection per `@default_shard_spacing_ms` tick, so 8/sec
+  # translates directly into a floor on that spacing: `ceil(1_000 / 8)` = `125`ms. Below
+  # that, THIS package's own connects alone could exceed the documented per-IP ceiling,
+  # independent of whatever else shares the IP. See `validate_shard_spacing_ms!/1` — this
+  # is a documented venue fact, not a measured one like `30` above, so it earns a
+  # comparison and a warning rather than the outright refusal a mathematically nonsense
+  # value gets.
+  @shard_spacing_floor_ms 125
 
   # How long to wait before retrying a subscribe that timed out — see the moduledoc's "a
   # timed-out subscribe used to be thrown away" section. At the time this was chosen it was
@@ -840,6 +938,48 @@ defmodule DpExchange.Coinbase.Feed do
           "level2_pairs_per_socket must be a positive integer, got: #{inspect(value)}"
   end
 
+  # See the moduledoc's "`shard_spacing_ms` — a supervision option" section.
+  #
+  # Below `0`, or not an integer at all, is unconditionally nonsense: `Process.send_after/3`
+  # takes a non-negative integer delay, so a negative or fractional value could never have
+  # scheduled anything. Refused here, in `init/1`, the same way an unusable
+  # `level2_pairs_per_socket` is — this family fails closed rather than substitutes. `0`
+  # itself is NOT refused: it is a real, if extreme, choice (every shard opens in the same
+  # instant) and `Process.send_after/3` accepts it without complaint, so there is nothing
+  # mathematically broken about it the way there is about a negative delay.
+  #
+  # A value below the documented `@shard_spacing_floor_ms` (125 — Coinbase's own 8
+  # connections/second/IP, see that constant's comment) is honoured, not refused, the same
+  # shape as `level2_pairs_per_socket` above the measured `30`: this package cannot verify
+  # whether a consumer's own network position makes a faster pace safe for them (a
+  # dedicated IP with headroom this repo has no visibility into, say), so it does not get
+  # to assume the conservative answer is the only correct one. What it gets instead is a
+  # loud `Logger.warning` naming the documented floor, its source, and the concrete risk:
+  # connects tighter than the venue's own stated per-IP rate risk exactly the connect-burst
+  # resets this module's own moduledoc opens with.
+  defp validate_shard_spacing_ms!(value) when is_integer(value) and value >= 0 do
+    if value < @shard_spacing_floor_ms do
+      Logger.warning(
+        "[Coinbase Feed] shard_spacing_ms #{value} is below the documented connect-rate " <>
+          "floor of #{@shard_spacing_floor_ms}ms, derived from Coinbase's own Advanced " <>
+          "Trade rate-limits page (\"WebSocket connections ... are ... limited to 8 per " <>
+          "second per IP\", re-read 2026-09-06). This value is honoured anyway: this " <>
+          "package cannot verify whether a faster pace is safe for your own network " <>
+          "position. But every new socket this feed opens ticks at this spacing, so a " <>
+          "scope wide enough to need several shards will now open connections faster " <>
+          "than the venue's own documented per-IP rate allows, risking the connect-burst " <>
+          "resets this module's own moduledoc describes."
+      )
+    end
+
+    value
+  end
+
+  defp validate_shard_spacing_ms!(value) do
+    raise ArgumentError,
+          "shard_spacing_ms must be a non-negative integer, got: #{inspect(value)}"
+  end
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -892,6 +1032,15 @@ defmodule DpExchange.Coinbase.Feed do
       (Keyword.get(opts, :level2_pairs_per_socket) || @default_level2_pairs_per_socket)
       |> validate_level2_pairs_per_socket!()
 
+    # See the moduledoc's "`shard_spacing_ms` — a supervision option" section and
+    # `validate_shard_spacing_ms!/1`. Same nil-vs-absent-safe `Keyword.get/2 || default`
+    # shape as the two options above; validated the same way `level2_pairs_per_socket` is,
+    # because a value that cannot schedule anything (negative, non-integer) is exactly as
+    # unusable here as one that cannot chunk anything is there.
+    shard_spacing_ms =
+      (Keyword.get(opts, :shard_spacing_ms) || @default_shard_spacing_ms)
+      |> validate_shard_spacing_ms!()
+
     Process.send_after(self(), :resubscribe, resubscribe_interval_ms)
 
     credentials = Keyword.get(opts, :credentials)
@@ -911,7 +1060,7 @@ defmodule DpExchange.Coinbase.Feed do
        # the socket-bearing branches without reaching a venue.
        injected_socket: Keyword.get(opts, :socket),
        # index => %{socket: pid, symbols: [...]}. Populated as shards open; a shard
-       # whose socket has not opened yet (still waiting out its `@shard_spacing_ms`
+       # whose socket has not opened yet (still waiting out its `shard_spacing_ms`
        # delay, or the connect failed) is simply absent — its symbols stay on whatever
        # this package's REST poll answers until the socket comes up.
        shards: %{},
@@ -932,6 +1081,13 @@ defmodule DpExchange.Coinbase.Feed do
        # computes uses the value it started with, not a constant that ignores what the
        # caller asked for.
        level2_pairs_per_socket: level2_pairs_per_socket,
+       # See `@default_shard_spacing_ms` and the moduledoc's own section on this option.
+       # Read once, here, already validated — every place that used to reach for
+       # `@shard_spacing_ms` directly (`reshard/1`, `reconcile_shard_in_place/7`,
+       # `handle_info(:resubscribe, _)`, `retry_missing_shards/1`,
+       # `next_resubscribe_delay/1`) now reads `state.shard_spacing_ms` instead, so every
+       # stagger this process ever schedules uses the value it started with.
+       shard_spacing_ms: shard_spacing_ms,
        # See `@subscribe_retry_delay_ms` — the same "diagnostic knob, real default" shape
        # as `resubscribe_interval_ms` above, for a test's benefit rather than a consumer's.
        subscribe_retry_delay_ms:
@@ -1178,7 +1334,7 @@ defmodule DpExchange.Coinbase.Feed do
         Process.send_after(
           self(),
           {:resubscribe_shard, socket, channel, symbols, state.credentials},
-          position * @shard_spacing_ms
+          position * state.shard_spacing_ms
         )
       end
     end)
@@ -1193,7 +1349,7 @@ defmodule DpExchange.Coinbase.Feed do
     # moduledoc says must never go unretried. Retrying it here, on the same unconditional
     # cadence an already-open shard's subscriptions are re-issued on, closes that gap —
     # staggered past whatever this tick already scheduled for open shards, for the same
-    # connect-burst reason `@shard_spacing_ms` exists everywhere else in this module.
+    # connect-burst reason `shard_spacing_ms` exists everywhere else in this module.
     retry_missing_shards(state)
 
     {:noreply, state}
@@ -1212,10 +1368,10 @@ defmodule DpExchange.Coinbase.Feed do
   # --- internal ------------------------------------------------------------
 
   # A re-issue cycle is not instantaneous: every shard — `ticker` and `level2` alike, each
-  # on its own socket now — is staggered `@shard_spacing_ms` apart, so the last frame of a
+  # on its own socket now — is staggered `shard_spacing_ms` apart, so the last frame of a
   # cycle goes out roughly
   #
-  #     (shards - 1) * @shard_spacing_ms
+  #     (shards - 1) * shard_spacing_ms
   #
   # after the tick. If the timer re-fires before that, cycles overlap: frames queue behind
   # each other, `WebSockex.send_frame/2` blows its window, and the `Feed` can stop
@@ -1236,7 +1392,7 @@ defmodule DpExchange.Coinbase.Feed do
   # silently — a diagnostic knob whose value is quietly ignored is its own trap.
   defp next_resubscribe_delay(state) do
     shard_count = map_size(state.shards)
-    span = max(shard_count - 1, 0) * @shard_spacing_ms
+    span = max(shard_count - 1, 0) * state.shard_spacing_ms
     floor_ms = span + @frame_window_ms
 
     if state.resubscribe_interval_ms < floor_ms do
@@ -1260,7 +1416,7 @@ defmodule DpExchange.Coinbase.Feed do
   # whatever a fresh `subscribe/3` or `update_symbols/2` call would also compute for the
   # same `wanted` set.
   #
-  # Staggered starting one `@shard_spacing_ms` past every already-open shard's own
+  # Staggered starting one `shard_spacing_ms` past every already-open shard's own
   # resubscribe slot (`map_size(state.shards)` of them, scheduled just above), so a retry
   # here never lands in the same instant as an open shard's unconditional resubscribe.
   defp retry_missing_shards(state) do
@@ -1283,7 +1439,7 @@ defmodule DpExchange.Coinbase.Feed do
       Process.send_after(
         self(),
         {:open_shard, channel, index, symbols},
-        (base + position) * @shard_spacing_ms
+        (base + position) * state.shard_spacing_ms
       )
     end)
   end
@@ -1310,7 +1466,7 @@ defmodule DpExchange.Coinbase.Feed do
   # from a quiet market. A caller whose `update_symbols` spans four hundred symbols
   # touches dozens of shards (`level2`'s own grouping alone, at `@level2_pairs_per_socket`,
   # sees to that), and dialling all of them inline would block the reply behind
-  # `@shard_spacing_ms` many times over and risk a connect burst besides.
+  # `shard_spacing_ms` many times over and risk a connect burst besides.
   #
   # So: the FIRST shard this call actually touches — by `shard_key_order/2`, which puts
   # every `ticker` shard ahead of every `level2` shard and orders each channel by index —
@@ -1367,7 +1523,7 @@ defmodule DpExchange.Coinbase.Feed do
             {_result, acc} =
               touch_shard(acc, key, new_shards,
                 sync: false,
-                delay: position * @shard_spacing_ms
+                delay: position * state.shard_spacing_ms
               )
 
             acc
@@ -1465,7 +1621,7 @@ defmodule DpExchange.Coinbase.Feed do
 
   # `delay` staggers this shard's frames past every OTHER shard `reshard/1` is touching in
   # the same call, the same way `open_shard/5`'s async clause already staggers opening a
-  # brand-new socket — see `reshard/1`'s "position * @shard_spacing_ms" comment. Before
+  # brand-new socket — see `reshard/1`'s "position * shard_spacing_ms" comment. Before
   # this fix `delay` was computed by `reshard/1` and then silently dropped here: a single
   # `update_symbols/2` that reshuffled several ALREADY-OPEN shards at once scheduled every
   # one of their subscribes at the same instant regardless. Because `Socket.subscribe/4`

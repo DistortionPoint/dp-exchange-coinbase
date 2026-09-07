@@ -8,13 +8,26 @@ defmodule DpExchange.Coinbase.FrameSenderTest do
   # A process that behaves the way `WebSockex.send_frame/2` does in each failure mode.
   # Not a mock of WebSockex — a real process that exits, times out, or answers, which is
   # what the guard has to survive.
+  #
+  # `WebSockex.send_frame/2` is `:gen.call(client, :"$websockex_send", frame)` — see
+  # `FrameSender`'s own moduledoc — and `:gen.call/3` sends `{Label, From, Request}`, so
+  # the message this process actually receives is tagged `:"$websockex_send"`, not
+  # `:"$gen_call"`. It used to be matched on `:"$gen_call"` here, which never arrives:
+  # every send against `socket(:accepts)` silently fell through to `:gen.call`'s own
+  # 5-second timeout and returned `{:error, :send_timeout}` — a real error, and one this
+  # test's own `assert result == :ok or match?({:error, _reason}, result)` was loose
+  # enough to accept without ever noticing the accept path had not actually run. Fixed by
+  # matching the real tag; the reply itself is `:gen.reply/2`, the exact call WebSockex's
+  # own `sync_send/5` makes (`deps/websockex/lib/websockex.ex`), not `GenServer.reply/2` —
+  # both satisfy `:gen.call`'s receive in principle, but this is the real protocol rather
+  # than one that happens to also work.
   defp socket(behaviour) do
     spawn(fn -> loop(behaviour) end)
   end
 
   defp loop(:accepts) do
     receive do
-      {:"$gen_call", from, _frame} -> GenServer.reply(from, :ok)
+      {:"$websockex_send", from, _frame} -> :gen.reply(from, :ok)
     end
 
     loop(:accepts)
@@ -32,9 +45,11 @@ defmodule DpExchange.Coinbase.FrameSenderTest do
     test "returns whatever the socket returned" do
       # WebSockex.send_frame against a plain process is not a real websocket, so this
       # asserts the guard does not interfere on the success path rather than asserting
-      # the protocol.
-      result = FrameSender.send(socket(:accepts), {:text, "{}"}, "test")
-      assert result == :ok or match?({:error, _reason}, result)
+      # the protocol. `socket(:accepts)` genuinely replies `:ok` via the real
+      # `:"$websockex_send"` / `:gen.reply/2` protocol (see `socket/1`'s own comment), so
+      # this now asserts the exact success value rather than merely tolerating an error
+      # alongside it.
+      assert FrameSender.send(socket(:accepts), {:text, "{}"}, "test") == :ok
     end
   end
 

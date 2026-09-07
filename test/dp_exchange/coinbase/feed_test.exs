@@ -8,12 +8,31 @@ defmodule DpExchange.Coinbase.FeedTest do
 
   @moduletag :capture_log
 
+  # `Feed`'s production stagger between opening shards — see `feed.ex`'s moduledoc,
+  # "`shard_spacing_ms` — a supervision option". Several sharding tests below only need to
+  # prove that a shard past the first got its own tick at all — the STRUCTURE of
+  # `reshard/1`'s staggering (right shard indices, right channel, right count of async
+  # opens) — not the literal production gap between ticks. Those tests inject this instead
+  # of waiting out the real 5_000ms default, which is what made this file's own suite the
+  # slowest thing `mix test` ran. Kept well above the documented Coinbase connect-rate
+  # floor `validate_shard_spacing_ms!/1` warns below (125ms) purely so a warning log never
+  # fires mid-test-run for a value that is only ever exercised in-process, against no real
+  # socket.
+  @test_shard_spacing_ms 30
+
+  # One test (`reconciling two ALREADY-OPEN shards...`, below) measures an actual time
+  # delta between two real messages from two real processes, rather than only "did the
+  # staggered event eventually happen" — a stricter proof that deserves more margin
+  # against scheduler jitter on a loaded, `async: true` suite than the generic structural
+  # value above needs. Still two orders of magnitude below the real 5_000ms default.
+  @test_shard_spacing_ms_precise 200
+
   # Real GenServers and real messages. The feed's socket is never started here — these
   # test the subscription bookkeeping and the coverage rule, which is where the
   # interesting behaviour is and where a venue gets it wrong.
-  defp start_feed do
+  defp start_feed(opts \\ []) do
     name = :"feed_#{System.unique_integer([:positive])}"
-    pid = start_supervised!({Feed, name: name, alias_map_source: fn -> {:ok, %{}} end})
+    pid = start_supervised!({Feed, [name: name, alias_map_source: fn -> {:ok, %{}} end] ++ opts})
     pid
   end
 
@@ -784,24 +803,32 @@ defmodule DpExchange.Coinbase.FeedTest do
           {Feed,
            name: :"feed_#{System.unique_integer([:positive])}",
            url: "ws://127.0.0.1:1/nowhere",
+           shard_spacing_ms: @test_shard_spacing_ms,
            alias_map_source: fn -> {:ok, %{}} end}
         )
 
       :ok = Feed.subscribe_notices(feed, to: self())
 
       # The first shard is synchronous (this call's own reply); the second is
-      # deliberately staggered by @shard_spacing_ms so as not to burst-connect. The
+      # deliberately staggered by `shard_spacing_ms` so as not to burst-connect. The
       # endpoint is unreachable, so both attempts fail — proven here by BOTH actually
       # being observed to fail, not merely by the process surviving a brief pause: the
       # synchronous first shard's failure is this call's own reply, and the async
       # second shard's failure now emits a `:coverage_change` Notice (see
       # `notify_shard_open_failed/3`) once its staggered attempt actually runs, roughly
-      # `@shard_spacing_ms` later.
+      # `shard_spacing_ms` later. `@test_shard_spacing_ms` replaces the real production
+      # default (5_000ms) here so this test proves the SAME structure without waiting out
+      # a multi-second production timer — see that attribute's own comment.
+      before = System.monotonic_time(:millisecond)
       assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{shard: 1}}},
-                     6_000
+                     2_000
+
+      # Proves a real delay was actually applied, not merely that the async attempt
+      # eventually ran: shard 1 must not have reported before its own stagger tick.
+      assert System.monotonic_time(:millisecond) - before >= @test_shard_spacing_ms / 2
 
       assert Process.alive?(feed)
     end
@@ -820,22 +847,46 @@ defmodule DpExchange.Coinbase.FeedTest do
           {Feed,
            name: :"feed_#{System.unique_integer([:positive])}",
            url: "ws://127.0.0.1:1/nowhere",
+           shard_spacing_ms: @test_shard_spacing_ms,
            alias_map_source: fn -> {:ok, %{}} end}
         )
 
       :ok = Feed.subscribe_notices(feed, to: self())
+      before = System.monotonic_time(:millisecond)
       assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
 
-      # Shard 1 fails roughly one @shard_spacing_ms out, shard 2 roughly two out — proof
+      # Shard 1 fails roughly one `shard_spacing_ms` out, shard 2 roughly two out — proof
       # every shard past the first got its own tick rather than all of them bursting
-      # together (DpCryptoManagement's issue #20).
+      # together (DpCryptoManagement's issue #20). `@test_shard_spacing_ms` stands in for
+      # the real 5_000ms default so this runs in milliseconds.
+      #
+      # Both arrivals are checked against `before` — a single fixed point captured BEFORE
+      # either timer was scheduled — rather than against each other's observed arrival
+      # time. A delta measured between two dynamically-observed arrivals is exactly the
+      # kind of check that flakes on a loaded, `async: true` suite: if this test process
+      # itself is not scheduled promptly, both notices can already be sitting in its
+      # mailbox by the time it next runs, collapsing an apparent gap to ~0ms even though
+      # the underlying timers fired staggered. Anchoring to a fixed point before any
+      # waiting began does not have that failure mode — scheduler contention can only
+      # push an arrival LATER than its nominal tick, never earlier, so a lower bound
+      # anchored there stays valid under load. The threshold for each position sits
+      # halfway between its own correct tick and the ADJACENT (lower) tick the
+      # regression this guards against would have produced instead — see
+      # DpCryptoManagement's issue #20 in the comment above: the bug scheduled every
+      # `rest` entry at the SAME one-tick delay, so shard 2 arriving at only `1 *
+      # shard_spacing_ms` (instead of `2 *`) is exactly the failure this threshold is
+      # placed to catch.
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{shard: 1}}},
-                     6_000
+                     2_000
+
+      assert System.monotonic_time(:millisecond) - before >= 0.5 * @test_shard_spacing_ms
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{shard: 2}}},
-                     6_000
+                     2_000
+
+      assert System.monotonic_time(:millisecond) - before >= 1.5 * @test_shard_spacing_ms
 
       assert Process.alive?(feed)
     end
@@ -864,10 +915,13 @@ defmodule DpExchange.Coinbase.FeedTest do
            name: :"feed_#{System.unique_integer([:positive])}",
            url: "ws://127.0.0.1:1/nowhere",
            credentials: @credentials,
+           shard_spacing_ms: @test_shard_spacing_ms,
            alias_map_source: fn -> {:ok, %{}} end}
         )
 
       :ok = Feed.subscribe_notices(feed, to: self())
+
+      before = System.monotonic_time(:millisecond)
 
       # The endpoint is unreachable, so every shard's connect fails — the synchronous
       # primary's failure is this call's own reply, proving `ticker` (not `level2`) was
@@ -877,14 +931,24 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       # Both level2 shards eventually fail their own staggered async connect and report
       # themselves — proof `level2` got TWO shards from a symbol count `ticker` needed
-      # only one for.
+      # only one for (`shard_key_order/2` places level2/0 then level2/1 in `reshard/1`'s
+      # `rest`, at positions 1 and 2). Each arrival is checked against `before` — a fixed
+      # point captured before either timer was scheduled — rather than against each
+      # other's observed arrival time; see the 250-symbol test above for why that is the
+      # scheduler-jitter-robust way to prove a stagger happened on a loaded, `async: true`
+      # suite, and what threshold actually distinguishes this from the regression it
+      # guards against.
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{channel: "level2", shard: 0}}},
-                     6_000
+                     2_000
+
+      assert System.monotonic_time(:millisecond) - before >= 0.5 * @test_shard_spacing_ms
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{channel: "level2", shard: 1}}},
-                     6_000
+                     2_000
+
+      assert System.monotonic_time(:millisecond) - before >= 1.5 * @test_shard_spacing_ms
 
       assert Process.alive?(feed)
     end
@@ -947,25 +1011,41 @@ defmodule DpExchange.Coinbase.FeedTest do
            url: "ws://127.0.0.1:1/nowhere",
            credentials: @credentials,
            level2_pairs_per_socket: 5,
+           shard_spacing_ms: @test_shard_spacing_ms,
            alias_map_source: fn -> {:ok, %{}} end}
         )
 
       assert :sys.get_state(feed).level2_pairs_per_socket == 5
 
       :ok = Feed.subscribe_notices(feed, to: self())
+      before = System.monotonic_time(:millisecond)
 
       # The synchronous primary is the sole `ticker` shard (`shard_key_order/2` sorts it
       # first); its failure is this call's own reply.
       assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
 
-      for shard_index <- [0, 1, 2] do
+      # Each shard's own arrival is checked against `before` — a fixed point captured
+      # before any of the three timers was scheduled — rather than against the PREVIOUS
+      # shard's observed arrival time. See the 250-symbol test above for why a delta
+      # between two dynamically-observed arrivals flakes on a loaded, `async: true` suite
+      # (this file's own seed-2 and seed-3 CI runs hit exactly that failure during this
+      # change) while a lower bound anchored to a point before any waiting began does
+      # not. `@test_shard_spacing_ms` stands in for the real 5_000ms default so three
+      # stacked ticks (positions 1, 2, 3) cost tens of milliseconds here instead of
+      # fifteen seconds.
+      [0, 1, 2]
+      |> Enum.each(fn shard_index ->
         assert_receive {:dp_exchange, :coinbase,
                         %Notice{
                           kind: :coverage_change,
                           details: %{channel: "level2", shard: ^shard_index}
                         }},
-                       6_000
-      end
+                       2_000
+
+        min_elapsed = (shard_index + 1 - 0.5) * @test_shard_spacing_ms
+
+        assert System.monotonic_time(:millisecond) - before >= min_elapsed
+      end)
 
       assert Process.alive?(feed)
     end
@@ -1019,6 +1099,85 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
   end
 
+  describe "shard_spacing_ms is a supervision option" do
+    # See feed.ex's own moduledoc, "`shard_spacing_ms` — a supervision option" — validated
+    # the same shape as `level2_pairs_per_socket` above, on the axis that is
+    # unconditionally nonsense (`Process.send_after/3` cannot schedule a negative or
+    # fractional delay), and honoured-with-a-warning on the axis that is merely risky
+    # (below the documented Coinbase connect-rate floor, 125ms).
+    test "the default is 5_000, unchanged from before this option existed" do
+      assert :sys.get_state(start_feed()).shard_spacing_ms == 5_000
+    end
+
+    test "an explicit nil falls back to the default rather than crashing at start" do
+      pid = start_feed(shard_spacing_ms: nil)
+      assert :sys.get_state(pid).shard_spacing_ms == 5_000
+    end
+
+    test "an explicit override is honoured" do
+      pid = start_feed(shard_spacing_ms: @test_shard_spacing_ms)
+      assert :sys.get_state(pid).shard_spacing_ms == @test_shard_spacing_ms
+    end
+
+    test "a negative value is refused at start, loudly, rather than coerced" do
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stacktrace}} =
+               Feed.start_link(
+                 name: :"feed_#{System.unique_integer([:positive])}",
+                 alias_map_source: fn -> {:ok, %{}} end,
+                 shard_spacing_ms: -1
+               )
+
+      assert message =~ "shard_spacing_ms must be a non-negative integer"
+    end
+
+    test "a non-integer value is refused at start, loudly, rather than coerced" do
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stacktrace}} =
+               Feed.start_link(
+                 name: :"feed_#{System.unique_integer([:positive])}",
+                 alias_map_source: fn -> {:ok, %{}} end,
+                 shard_spacing_ms: 5_000.0
+               )
+
+      assert message =~ "shard_spacing_ms must be a non-negative integer"
+    end
+
+    test "zero is honoured, not refused — extreme but not mathematically nonsense" do
+      log =
+        capture_log(fn ->
+          pid = start_feed(shard_spacing_ms: 0)
+          assert :sys.get_state(pid).shard_spacing_ms == 0
+        end)
+
+      assert log =~ "shard_spacing_ms 0 is below the documented connect-rate floor"
+    end
+
+    test "a value below the documented 125ms floor is honoured, not refused, and warns loudly" do
+      # The consumer's whole reason this is an option at all: this package cannot verify
+      # whether a faster pace is safe for a given consumer's own network position, so it
+      # does not get to refuse a value merely because it is below the documented floor —
+      # only make the risk legible.
+      log =
+        capture_log(fn ->
+          pid = start_feed(shard_spacing_ms: 50)
+          assert :sys.get_state(pid).shard_spacing_ms == 50
+        end)
+
+      assert log =~ "shard_spacing_ms 50 is below the documented connect-rate floor of 125ms"
+      assert log =~ "8 per second per IP"
+    end
+
+    test "a value at or above the documented floor is used as given, with no warning" do
+      refute capture_log(fn ->
+               pid = start_feed(shard_spacing_ms: 125)
+               assert :sys.get_state(pid).shard_spacing_ms == 125
+             end) =~ "connect-rate floor"
+    end
+  end
+
   describe "internal messages — the staggered async paths" do
     # These are the messages `reshard/1` schedules with `Process.send_after/3` for every
     # shard beyond the first, and for the resubscribe timer. Driven directly rather than
@@ -1058,7 +1217,7 @@ defmodule DpExchange.Coinbase.FeedTest do
 
     # Reports WHEN it received a send, tagged with `label`, to `test_pid` — the proof
     # `reconcile_shard/7`'s stagger actually works: two sockets' first frames arriving
-    # `@shard_spacing_ms` apart, not proximity in the log or the process staying alive.
+    # `shard_spacing_ms` apart, not proximity in the log or the process staying alive.
     defp timing_socket(test_pid, label) do
       pid = spawn(fn -> timing_socket_loop(test_pid, label) end)
       on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
@@ -1424,11 +1583,16 @@ defmodule DpExchange.Coinbase.FeedTest do
       # 150 symbols forces two shards (100 + 50 at `@pairs_per_socket`); both start already
       # open, under placeholder symbol sets that differ from whatever the new 150-symbol
       # scope resolves to, so BOTH are touched — shard 0 as the synchronous primary, shard
-      # 1 asynchronously and staggered by `@shard_spacing_ms` behind it.
+      # 1 asynchronously and staggered by `shard_spacing_ms` behind it. This is the one
+      # sharding test in this file that measures an actual elapsed time between two real
+      # frames rather than only "did both eventually happen", so it injects
+      # `@test_shard_spacing_ms_precise` rather than the smaller generic
+      # `@test_shard_spacing_ms` other structural tests use — see that attribute's own
+      # comment.
       socket0 = timing_socket(self(), :shard0)
       socket1 = timing_socket(self(), :shard1)
 
-      feed = start_feed()
+      feed = start_feed(shard_spacing_ms: @test_shard_spacing_ms_precise)
 
       :sys.replace_state(feed, fn state ->
         %{
@@ -1441,14 +1605,24 @@ defmodule DpExchange.Coinbase.FeedTest do
       end)
 
       new_symbols = for n <- 1..150, do: "NEW#{n}-USD"
+      before = System.monotonic_time(:millisecond)
       assert :ok = Feed.update_symbols(feed, new_symbols)
 
-      assert_receive {:frame_at, :shard0, t0}, 500
-      assert_receive {:frame_at, :shard1, t1}, 6_000
+      assert_receive {:frame_at, :shard0, _t0}, 500
+      assert_receive {:frame_at, :shard1, t1}, 2_000
 
-      # `@shard_spacing_ms` is 5_000; allow real scheduler jitter either side rather than
-      # pinning the exact figure.
-      assert t1 - t0 >= 4_000
+      # `shard_spacing_ms` is `@test_shard_spacing_ms_precise` here (200ms). Checked
+      # against `before` — a fixed point captured before either shard's subscribe was
+      # scheduled — rather than against shard 0's own observed arrival time: a delta
+      # between two dynamically-observed arrivals is what flaked this file's other
+      # sharding tests on a loaded, `async: true` suite (see the 250-symbol test's own
+      # comment), because a delayed reader can observe both already sitting in its inbox
+      # and collapse the apparent gap. `t0`/`t1` here are timestamped by the two
+      # `timing_socket/2` processes themselves at the moment each received its frame —
+      # already more robust than a test-process-side read — but anchoring to `before`
+      # keeps the same safe shape as every other stagger assertion in this file rather
+      # than being the one exception.
+      assert t1 - before >= @test_shard_spacing_ms_precise / 2
     end
   end
 

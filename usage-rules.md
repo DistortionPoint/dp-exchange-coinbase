@@ -288,6 +288,45 @@ per-session ceiling to tune against, measured or suspected. This option exists b
 `level2`'s ceiling is a real, located venue fact a consumer already hit in production, not
 because "every constant should also be an option."
 
+### `shard_spacing_ms` — the delay between opening successive shards
+
+```elixir
+children = [{DpExchange.Coinbase, credentials: my_credentials(), shard_spacing_ms: 1_000}]
+```
+
+Every new socket this package opens — either channel — takes the next tick of this
+spacing, so several shards do not connect in the same instant: opening more than one
+connection at once is a connect burst Coinbase answers with resets (see this file's
+`level2` sections above and `feed.ex`'s own moduledoc for the measured incidents behind
+that). The same spacing now also staggers `reconcile_shard/7`'s frames when one
+`update_symbols/2` call touches several already-open shards at once, not only when
+opening a brand-new one.
+
+Default is **5,000ms**, unchanged — inherited from the reference fix this package
+replaced, the same way `ticker`'s 100-per-socket shard size is, not derived from anything
+measured against this venue.
+
+**Below `0`, or not an integer, is refused at start** — the same shape as
+`level2_pairs_per_socket`. `0` itself is honoured, not refused: it schedules every shard
+in the same instant, which is extreme but not mathematically nonsense the way a negative
+delay is.
+
+**Below the documented connect-rate floor is honoured, not capped — with a loud warning.**
+Coinbase's own Advanced Trade rate-limits page states WebSocket connections are limited to
+8 per second per IP, which converts directly into a floor of `125`ms
+(`ceil(1_000 / 8)`) on this package's own connects. This package cannot verify whether a
+faster pace is safe for your own network position, so a value below that floor is used as
+given rather than refused — but it logs the documented floor, its source, and the concrete
+risk first: connects tighter than the venue's own stated per-IP rate risk the same
+connect-burst resets this option exists to avoid.
+
+**The 5,000ms default is very likely far more conservative than the venue requires** —
+roughly forty times the documented floor — but that is not acted on here; see
+`feed.ex`'s own moduledoc, `"shard_spacing_ms — a supervision option"`, for why tightening
+the default is a separate, deliberate decision rather than a side effect of this option's
+introduction. If you have your own evidence that a tighter pace is safe for your network
+position, this option is how you take it.
+
 ## Testing against this package
 
 Use `DpExchange.Coinbase.Fake`, selected per process through `DpExchange.Core.Config`. It

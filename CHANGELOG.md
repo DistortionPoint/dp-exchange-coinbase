@@ -48,6 +48,42 @@ acceptable changelog line.
   supervision option"`, and `usage-rules.md` for the full reasoning
   (`DistortionPoint/dp-exchange-core` issue #22).
 
+- **`shard_spacing_ms` is now a supervision option**, not only the internal
+  `@default_shard_spacing_ms` constant it defaults to — the delay between opening each
+  successive shard's socket, whichever channel it carries, and the same delay
+  `reconcile_shard/7` now applies when reconciling several already-open shards in one
+  `update_symbols/2` call:
+
+  ```elixir
+  children = [{DpExchange.Coinbase, credentials: my_credentials(), shard_spacing_ms: 1_000}]
+  ```
+
+  Default is unchanged — **5,000ms**, inherited from the reference fix this package
+  replaced, the same way `@pairs_per_socket` (100) is. A negative value, or a
+  non-integer, fails `Feed.start_link/1` at start with an `ArgumentError`, the same shape
+  as `level2_pairs_per_socket`; `0` is NOT refused — `Process.send_after/3` accepts it
+  without complaint, so there is nothing mathematically broken about it, only extreme (a
+  connect burst, the exact hazard this whole file otherwise staggers to avoid).
+
+  Coinbase's own Advanced Trade rate-limits page states WebSocket connections are limited
+  to 8 per second per IP, which converts directly into a floor of `125`ms
+  (`ceil(1_000 / 8)`) on this package's own connects. A value below that floor is
+  honoured, not refused — this package cannot verify whether a faster pace is safe for a
+  given consumer's own network position — but it logs a `Logger.warning` naming the
+  documented floor, its source, and the concrete risk: connects tighter than the venue's
+  own stated per-IP rate risk the connect-burst resets this package's own moduledoc opens
+  with. See `feed.ex`'s own moduledoc, `"shard_spacing_ms — a supervision option"`, for
+  the full reasoning, including why the 5,000ms default is left unmoved here even though
+  it is roughly forty times more conservative than the documented floor requires
+  (`docs/design/ideas/shard-spacing-headroom.md` records that as a non-blocking
+  discovery, not acted on).
+
+  This option exists first for this package's own test suite: five sharding tests in
+  `feed_test.exs` existed to prove staggering happened and could previously only do that
+  by waiting out the real production delay — 45 of the suite's roughly 51 seconds, across
+  five tests. They now inject a small value and prove the same relative ordering and that
+  a real delay was applied, rather than sleeping through the production default.
+
 ### Changed
 
 - **BREAKING: `Socket` no longer maintains a `level2` order book. An `update` frame now
