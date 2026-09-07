@@ -22,6 +22,27 @@ acceptable changelog line.
 
 ### Fixed
 
+- **A crash of `Feed` or `Socket` printed the CDP `api_key`/`api_secret` pair in
+  cleartext, in OTP's own crash report.** Both processes hold `:credentials` for their
+  entire lifetime — `Feed` to keep resharding and resubscribing, `Socket` to sign every
+  authenticated `subscribe/4` — and both stored it as a bare map field in `GenServer`/
+  `WebSockex` state. OTP's default crash report prints a process's state in full on
+  termination; a plain map prints every key it holds, secrets included. Verified by
+  crashing an equivalent process holding `%{api_key: "...", api_secret: "..."}` as a bare
+  state field and reading the resulting log line back — the key pair came back in
+  cleartext. `Process.flag(:sensitive, true)` was tried as an alternative and does not
+  help: the same crash, with the flag set, printed the same cleartext state; it disables
+  tracing, not crash-report formatting. Now both processes wrap the pair in
+  `DpExchange.Coinbase.Credentials`, a struct whose `Inspect` is derived with `except:`
+  naming both fields, at the point credentials enter state — nowhere else in either
+  module changes, because a struct is a map and `Auth.jwt/2`'s
+  `%{api_key: k, api_secret: s} = credentials` still binds the real values inside the one
+  function that has to sign with them. Re-verified against a real crash of the new shape:
+  the log line now reads `credentials: #DpExchange.Coinbase.Credentials<...>`. See
+  `Credentials`'s moduledoc for the full mechanism, including why it also closes a second
+  leak (a `FunctionClauseError`'s printed argument list goes through the same `Inspect`
+  protocol as a crash report's state).
+
 - **A shard's socket crashing took the whole `Feed` down with it, silently discarding
   every subscription this feed had ever been given.** `Socket.start_link/1` runs inside
   `Feed`'s own `handle_call`/`handle_info` (`get_socket/1`), which links every shard's

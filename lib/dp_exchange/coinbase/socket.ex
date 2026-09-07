@@ -130,7 +130,7 @@ defmodule DpExchange.Coinbase.Socket do
 
   use WebSockex
 
-  alias DpExchange.Coinbase.{Auth, FrameSender, SymbolFormat}
+  alias DpExchange.Coinbase.{Auth, Credentials, FrameSender, SymbolFormat}
   alias DpExchange.Core.{Notice, Types}
 
   require Logger
@@ -164,7 +164,10 @@ defmodule DpExchange.Coinbase.Socket do
   def start_link(opts) do
     state = %{
       subscriber: Keyword.fetch!(opts, :subscriber),
-      credentials: Keyword.get(opts, :credentials),
+      # Wrapped immediately — see `Credentials`'s moduledoc. This process holds the pair
+      # for as long as the socket is up, and a WebSockex crash prints its state via the
+      # same OTP crash report `Feed`'s does.
+      credentials: opts |> Keyword.get(:credentials) |> Credentials.wrap(),
       # Observed delivery, not intended: a symbol enters this set when a payload for it
       # arrives, never when it is subscribed.
       delivering: MapSet.new()
@@ -193,7 +196,8 @@ defmodule DpExchange.Coinbase.Socket do
   Returns `{:error, :send_timeout}` rather than dying when the socket is too busy to
   accept the frame — see `DpExchange.Coinbase.FrameSender`.
   """
-  @spec subscribe(pid(), String.t(), [String.t()], map() | nil) :: :ok | {:error, term()}
+  @spec subscribe(pid(), String.t(), [String.t()], Credentials.t() | nil) ::
+          :ok | {:error, term()}
   def subscribe(socket, channel, symbols, credentials \\ nil) do
     products = Enum.map(symbols, &SymbolFormat.to_exchange_symbol/1)
 

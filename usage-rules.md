@@ -52,6 +52,16 @@ those calls — it never held onto the functions or the process that made them. 
 consumer needs to survive a `Feed` restart unattended, monitor the `Feed` pid (or the
 `DpExchange.Coinbase` pid it sits under) yourself and re-issue `subscribe/2` on `:DOWN`.
 
+**Your `api_key`/`api_secret` will not appear in the crash log.** `Feed` and `Socket`
+both hold your credential for as long as they run, and a crash of either logs that
+process's state via OTP's default crash report — which is where you *would* see it,
+because a crash report prints unredacted `Logger` metadata otherwise. Both processes
+wrap the pair in a struct before it ever reaches state, so the crash line reads
+`credentials: #DpExchange.Coinbase.Credentials<...>` rather than the key pair itself.
+This is not a claim about your own code: if you read `state.credentials` yourself via
+`:sys.get_state/1` or similar, you get the same struct — call `Map.from_struct/1` on it
+to get the plain map back.
+
 ## Credentials choose the endpoint; they do not gate it — except one call
 
 Coinbase serves almost all market data publicly and authenticated. Pass credentials and

@@ -959,7 +959,7 @@ defmodule DpExchange.Coinbase.Feed do
 
   use GenServer
 
-  alias DpExchange.Coinbase.{Rest, Socket}
+  alias DpExchange.Coinbase.{Credentials, Rest, Socket}
   alias DpExchange.Core.{Capabilities, Notice, Types}
 
   require Logger
@@ -1325,7 +1325,12 @@ defmodule DpExchange.Coinbase.Feed do
 
     Process.send_after(self(), :resubscribe, resubscribe_interval_ms)
 
-    credentials = Keyword.get(opts, :credentials)
+    # Wrapped immediately, before it reaches `state` or any closure captured off it —
+    # see `Credentials`'s moduledoc. Every downstream use (`Socket.subscribe/4`, the
+    # resubscribe/reconcile `handle_info` messages that carry it, `Auth.jwt/2`) keeps
+    # working unchanged: a struct is a map, and `nil` (the credential-less case) passes
+    # through `wrap/1` untouched.
+    credentials = opts |> Keyword.get(:credentials) |> Credentials.wrap()
 
     # A test injects a fast, hermetic stand-in here — see the moduledoc's alias-map
     # section. Production supplies none, so this default runs: the venue's own public
