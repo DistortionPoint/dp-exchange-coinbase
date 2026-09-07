@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`get_top_of_book/2` answered a missing local credential with `{:refused, :missing_credentials}`** — in the real `Rest` client and in `Fake` alike — even though the credential never left this process and nothing at Coinbase ever saw a request to decline. `DpExchange.Core.Venue`'s own moduledoc reserves `:refused` for the venue's own permanent word about a request it actually received; a locally-detected precondition is an `:error`. Found by a cross-package audit: Gemini, Robinhood and Schwab's real facades already used `{:error, {:missing_credentials, venue}}` for this exact condition — this package and Schwab's `Fake` (see that package's own changelog) were the two hold-outs. Now `{:error, {:missing_credentials, :coinbase}}`, matching the rest of the family.
+
 - **A credential that could not sign produced an unauthenticated request that was actually
   sent — on write endpoints, `place_order/3` included.** `Auth.rest_headers/4` was written
   as `Core.HttpClient`'s 4-arity auth hook, which may only return a header list and has no
