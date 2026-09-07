@@ -22,6 +22,29 @@ acceptable changelog line.
 
 ### Fixed
 
+- **A shard's socket crashing took the whole `Feed` down with it, silently discarding
+  every subscription this feed had ever been given.** `Socket.start_link/1` runs inside
+  `Feed`'s own `handle_call`/`handle_info` (`get_socket/1`), which links every shard's
+  socket to `Feed` the way `start_link` always does. `Feed` never called
+  `Process.flag(:trap_exit, true)`, so an abnormal socket exit — a decode bug raising
+  inside a WebSockex callback, or anything else that kills the socket pid — sent an
+  untrappable `EXIT` signal along that link and crashed `Feed` too. `DpExchange.
+  Coinbase.Supervisor` then restarted `Feed` from the *static* `opts` it was given at
+  tree-start, which never carry a consumer's later `subscribe/2` calls: one shard's bug
+  cost every symbol this feed was ever asked for, not just the shard that broke. Found by
+  a 2026-09-07 supervision audit — proven by linking a real process into a running `Feed`
+  the way `get_socket/1` does and killing it with `Process.exit(pid, :kill)` (not
+  `:normal`, which a non-trapping process ignores), which crashed `Feed` before this fix
+  and does not after.
+
+  `Feed` now traps exits and isolates a crashed socket to the one shard it belonged to:
+  only that shard's symbols lose coverage, only the `data_kind()` that shard's channel
+  carries is cleared from `coverage/1`/`coverage_by_kind/1` (a `level2` crash no longer
+  erases a symbol's still-healthy `ticker` quote), a `:link_down` `Core.Notice` reports
+  the crash, and the shard reopens immediately rather than waiting out the next
+  `:resubscribe` tick (up to 60s by default). Every other shard, on other sockets, is
+  untouched.
+
 - **BREAKING: `supported_order_types` and `supported_time_in_force` were both `[]` while
   `{:place_order, 3}` is `:experimental` and `Rest.order_configuration/1`'s own
   `@configurations` cross-product builds three order types across four time-in-force

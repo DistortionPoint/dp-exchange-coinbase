@@ -1284,6 +1284,23 @@ defmodule DpExchange.Coinbase.Feed do
 
   @impl true
   def init(opts) do
+    # `Socket.start_link/1` (via `get_socket/1`) runs inside THIS process — `open_shard/5`'s
+    # synchronous clause and `handle_info({:open_shard, _, _}, _)`'s async one both call it
+    # from a `Feed` callback, which makes every shard's socket a LINKED child of `Feed`,
+    # not a supervised sibling. Without this flag, a socket that exits abnormally — a
+    # decode bug raising inside a WebSockex callback, or anything that kills the socket
+    # pid directly — sends an untrappable EXIT signal along that link and takes `Feed`
+    # down with it: every shard, every symbol, the whole `wanted` set, gone in the same
+    # instant, restarted by `DpExchange.Coinbase.Supervisor` from the STATIC `opts` it was
+    # given at tree-start, which never carry a consumer's later `subscribe/2` calls. One
+    # shard's decode bug should cost that shard's coverage, not every symbol this feed
+    # was ever asked for. Proven by killing a real linked child with `Process.exit(pid,
+    # :kill)` in this module's own tests — see the "a shard's socket crash" describe
+    # block below — after this flag was found absent during the 2026-09-07 supervision
+    # audit that also found `child_spec/1` missing `type: :supervisor` in four of five
+    # sibling packages.
+    Process.flag(:trap_exit, true)
+
     resubscribe_interval_ms =
       Keyword.get(opts, :resubscribe_interval_ms) || @default_resubscribe_interval_ms
 
@@ -1642,6 +1659,29 @@ defmodule DpExchange.Coinbase.Feed do
     end
 
     {:noreply, state}
+  end
+
+  # The other half of `init/1`'s `Process.flag(:trap_exit, true)`. Every shard's socket
+  # is a linked child of THIS process (see `get_socket/1` — `Socket.start_link/1` is
+  # always called from inside a `Feed` callback), so an abnormal socket exit arrives
+  # here as a message instead of killing `Feed`. `reason == :normal` is included even
+  # though nothing in this module currently stops a socket that way, on the same
+  # "fail closed" footing as everywhere else: matching every reason the same way means a
+  # future normal-exit path does not silently regress into an unhandled crash just
+  # because this clause assumed it could never happen.
+  #
+  # A `pid` that matches no shard's socket — already replaced by a newer one from the
+  # same shard key, or never one of this feed's sockets at all — is not this feed's to
+  # react to; explicitly ignored rather than crashing on an `EXIT` this module cannot
+  # attribute to anything it opened.
+  def handle_info({:EXIT, pid, reason}, state) do
+    case shard_key_for_socket(state, pid) do
+      {channel, index} = key ->
+        {:noreply, isolate_crashed_shard(state, key, channel, index, reason)}
+
+      nil ->
+        {:noreply, state}
+    end
   end
 
   def handle_info(_other, state), do: {:noreply, state}
@@ -2271,6 +2311,99 @@ defmodule DpExchange.Coinbase.Feed do
         message:
           "#{channel} shard #{index} (#{length(symbols)} symbol(s)) did not open — " <>
             "staying on the internal poll until the next resubscribe cycle retries it",
+        details: %{
+          shard: index,
+          channel: channel,
+          symbol_count: length(symbols),
+          reason: inspect(reason)
+        }
+      )
+
+    fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})
+  end
+
+  # `state.shards` is the only place a socket pid this feed opened is recorded, so this
+  # is also the only lookup that can tell an `:EXIT` this feed's own link produced from
+  # one it cannot attribute to anything it started — see `handle_info({:EXIT, _, _}, _)`.
+  defp shard_key_for_socket(state, pid) do
+    Enum.find_value(state.shards, fn
+      {key, %{socket: ^pid}} -> key
+      _other -> nil
+    end)
+  end
+
+  # A crashed shard is isolated to itself, never treated as a whole-feed event: only the
+  # symbols THAT shard carried lose coverage, only the `data_kind()` that shard's own
+  # channel delivers is cleared from `state.delivering` (a `level2` crash must not erase
+  # a symbol's still-healthy `ticker` quote), and only that one shard's socket is
+  # replaced — every other shard, on other sockets, is untouched. This is what
+  # `Process.flag(:trap_exit, true)` in `init/1` buys: without it, this whole function is
+  # unreachable because the crash would have taken `Feed` down first.
+  defp isolate_crashed_shard(state, key, channel, index, reason) do
+    %{symbols: symbols} = Map.fetch!(state.shards, key)
+    kind = channel_kind(channel)
+
+    state = %{
+      state
+      | shards: Map.delete(state.shards, key),
+        pending_unsubscribes: Map.delete(state.pending_unsubscribes, key),
+        delivering: drop_kind(state.delivering, symbols, kind)
+    }
+
+    notify_shard_crashed(state, channel, index, symbols, reason)
+
+    # Reopened NOW, not on the next `:resubscribe` tick — that cadence exists to cover a
+    # shard whose FIRST open never happened at all (see `retry_missing_shards/1`'s own
+    # moduledoc reference); a shard that was open and delivering a moment ago should not
+    # wait up to `resubscribe_interval_ms` (60s by default) to try again.
+    Process.send_after(self(), {:open_shard, channel, index, symbols}, 0)
+
+    state
+  end
+
+  # Mirrors `payload_kind/1`'s struct-to-kind mapping, from the other direction: a
+  # crashed shard only ever knows its own channel string, never the struct a payload on
+  # it would have carried.
+  defp channel_kind("ticker"), do: :quotes
+  defp channel_kind("level2"), do: :order_book
+
+  # Removes exactly `kind` from each symbol's kind map, dropping the symbol entirely
+  # once it has no kind left delivering — the same shape `coverage/1` already expects
+  # (a symbol present in `state.delivering` at all means SOMETHING is still arriving for
+  # it).
+  defp drop_kind(delivering, symbols, kind) do
+    Enum.reduce(symbols, delivering, fn symbol, acc ->
+      case Map.get(acc, symbol) do
+        nil ->
+          acc
+
+        kinds ->
+          case Map.delete(kinds, kind) do
+            remaining when map_size(remaining) == 0 -> Map.delete(acc, symbol)
+            remaining -> Map.put(acc, symbol, remaining)
+          end
+      end
+    end)
+  end
+
+  # The one shard-level event this module could not report before: every other
+  # `notify_*` function above fires on a subscribe/unsubscribe that never took, which
+  # only ever happens synchronously in response to a caller's own action. A shard crash
+  # is asynchronous and has no caller waiting on it — without a notice here it is exactly
+  # the "silent half-dead feed" this package's moduledoc is about, discoverable only by
+  # a consumer polling `coverage/1` and noticing symbols it used to see are gone.
+  # `:link_down` — see `dp_exchange_core`'s `Core.Notice` moduledoc, "stated without
+  # naming the transport" — rather than `:coverage_change`, because this is reporting
+  # the CAUSE (the link went down) and not only its coverage effect; `coverage_change`
+  # notices elsewhere in this module report a subscribe attempt that never became
+  # delivery, which is a different fact from a connection that WAS delivering and died.
+  defp notify_shard_crashed(state, channel, index, symbols, reason) do
+    notice =
+      Notice.new(:link_down, :coinbase,
+        severity: :warning,
+        message:
+          "#{channel} shard #{index} (#{length(symbols)} symbol(s)) crashed (#{inspect(reason)}) " <>
+            "— reopening now",
         details: %{
           shard: index,
           channel: channel,

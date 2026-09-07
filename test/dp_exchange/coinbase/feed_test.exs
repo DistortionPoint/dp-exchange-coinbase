@@ -763,8 +763,13 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
 
     test "a feed whose socket dies stays alive to reconnect" do
-      # The whole reason frames go through the guard: a dead socket must not take down
-      # the process that would have re-established it.
+      # This socket is injected via `opts` — it was never `start_link`'d FROM this
+      # `Feed`, so it is not actually linked to it, and this test would pass even
+      # without `init/1`'s `Process.flag(:trap_exit, true)`. It still earns its place:
+      # it proves a dead socket pid does not, by itself, wedge `subscribe/2` or crash
+      # `Feed` some OTHER way. See the "a shard's socket crash is isolated, not fatal"
+      # describe block below for the case that DOES depend on the trap_exit flag —
+      # a socket genuinely linked to `Feed`, the way `get_socket/1` links every real one.
       {feed, socket} = start_with_socket()
       ref = Process.monitor(socket)
       Process.exit(socket, :kill)
@@ -772,6 +777,93 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       assert {:error, _reason} = Feed.subscribe(feed, ~w(BTC-USD), to: self())
       assert Process.alive?(feed)
+    end
+  end
+
+  describe "a shard's socket crash is isolated, not fatal" do
+    # Every real socket this module ever opens is linked to it — `get_socket/1` calls
+    # `Socket.start_link/1` from inside a `Feed` callback, and `start_link` always
+    # links. `start_with_socket/0`'s injected double is not (see the comment on "a feed
+    # whose socket dies stays alive to reconnect" above), so proving what actually
+    # happens when a REAL linked child dies needs a real link — created here the same
+    # way production creates one, except from a place this test controls.
+    #
+    # `:sys.replace_state/2` runs the given function INSIDE the target process, the same
+    # mechanism `:sys.get_state/1` already uses elsewhere in this file — so `Process.
+    # link/1` inside it creates a link owned by `feed`, not by this test process, exactly
+    # matching what `get_socket/1` does in production. This is not a workaround; it is
+    # the one way to attach a link a test controls to a process it does not run inside.
+    defp link_socket_into_feed(feed, socket) do
+      :sys.replace_state(feed, fn state ->
+        Process.link(socket)
+        state
+      end)
+    end
+
+    test "the feed survives a linked socket being killed" do
+      {feed, socket} = start_with_socket()
+      link_socket_into_feed(feed, socket)
+
+      # Without `init/1`'s `Process.flag(:trap_exit, true)`, this `:kill` propagates
+      # along the link this test just created and takes `feed` down with it —
+      # `Process.exit(pid, :normal)` would NOT prove this (a non-trapping process
+      # ignores a peer's normal exit), which is why this uses `:kill`.
+      ref = Process.monitor(feed)
+      Process.exit(socket, :kill)
+      refute_receive {:DOWN, ^ref, :process, ^feed, _reason}, 500
+      assert Process.alive?(feed)
+    end
+
+    test "a crashed shard's coverage clears, a :link_down notice fires, and it reopens" do
+      {feed, socket} =
+        start_with_socket_and_opts(url: "ws://127.0.0.1:1/nowhere")
+
+      Feed.subscribe(feed, ~w(BTC-USD), to: self())
+      # A real arrival, so there is something in `state.delivering` for the crash to
+      # actually clear — proving "cleared" rather than "was never populated."
+      send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+      link_socket_into_feed(feed, socket)
+
+      Process.exit(socket, :kill)
+
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :link_down, details: %{channel: "ticker", shard: 0}}},
+                     500
+
+      assert Process.alive?(feed)
+      # Cleared immediately — not merely "will clear once something else overwrites
+      # it" — this is the coverage-truthfulness question the audit asked directly: does
+      # `coverage/1` still say `:stream` right after the shard that carried "BTC-USD"
+      # crashed? It must not.
+      assert Feed.coverage(feed) == %{}
+
+      # Reopened right away, not on the next `:resubscribe` tick (60s by default): the
+      # replacement dials `"ws://127.0.0.1:1/nowhere"`, refuses locally and fast, and
+      # reports itself the same way `handle_info({:open_shard, _, _}, _)` always does —
+      # proving an attempt actually happened, not merely that nothing crashed.
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :coverage_change, details: %{channel: "ticker", shard: 0}}},
+                     2_000
+    end
+
+    defp start_with_socket_and_opts(opts) do
+      socket = spawn(&reject_frames_loop/0)
+      on_exit(fn -> Process.exit(socket, :kill) end)
+
+      feed =
+        start_supervised!(
+          {Feed,
+           [
+             name: :"feed_#{System.unique_integer([:positive])}",
+             socket: socket,
+             alias_map_source: fn -> {:ok, %{}} end
+           ] ++ opts}
+        )
+
+      {feed, socket}
     end
   end
 

@@ -31,6 +31,27 @@ Running two — two credentials, two scopes — needs distinct names:
  {DpExchange.Coinbase, name: :cb_b, feed: :cb_b_feed, limiter: :cb_b_limiter}]
 ```
 
+## A shard's socket crash costs one shard, never your whole subscription
+
+Each `level2`/`ticker` shard runs on its own socket, and that socket is a **linked**
+child of `Feed` — not a supervised sibling you can restart independently. As of this
+version `Feed` traps exits, so a shard's socket dying abnormally no longer takes `Feed`
+down with it: only that one shard's symbols drop out of `coverage/1` and
+`coverage_by_kind/1` (only the `data_kind()` its channel carries — a `level2` crash
+never touches a symbol's `ticker` coverage), you get a `:link_down` `Core.Notice`
+naming which shard and why, and this package reopens that shard on its own, immediately,
+without you calling `subscribe/2` again.
+
+**What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
+the socket-crash path, or anything that kills the `Feed` pid directly.
+`DpExchange.Coinbase.Supervisor` restarts `Feed` under `:one_for_one`, but from the
+*static* `opts` your supervision tree started it with; every `subscribe/2`,
+`update_symbols/2` and `subscribe_notices/1` call you made afterward is gone; `coverage/1`
+reads empty until you call `subscribe/2` again. Nothing inside this package can replay
+those calls — it never held onto the functions or the process that made them. If your
+consumer needs to survive a `Feed` restart unattended, monitor the `Feed` pid (or the
+`DpExchange.Coinbase` pid it sits under) yourself and re-issue `subscribe/2` on `:DOWN`.
+
 ## Credentials choose the endpoint; they do not gate it — except one call
 
 Coinbase serves almost all market data publicly and authenticated. Pass credentials and
