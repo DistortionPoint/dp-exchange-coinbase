@@ -1237,6 +1237,146 @@ defmodule DpExchange.Coinbase.FeedTest do
       timing_socket_loop(test_pid, label)
     end
 
+    # Reports each frame's decoded `type` and `product_ids` to `test_pid`, IN THE ORDER
+    # this socket process actually received them — the proof this file's own "unsubscribe
+    # before subscribe" tests need: `assert_receive {:frame, type, _}` twice in a row, with
+    # `type` left unbound both times, drains the mailbox front-to-back (messages from one
+    # sender to one receiver are FIFO), so the two `type`s observed are the real send
+    # order, not merely "both eventually happened."
+    defp frame_reporting_socket(test_pid) do
+      pid = spawn(fn -> frame_reporting_socket_loop(test_pid) end)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp frame_reporting_socket_loop(test_pid) do
+      receive do
+        {:"$websockex_send", from, {:text, payload}} ->
+          case Jason.decode(payload) do
+            {:ok, %{"type" => type, "product_ids" => product_ids}} ->
+              send(test_pid, {:frame, type, product_ids})
+
+            _other ->
+              :ok
+          end
+
+          :gen.reply(from, :ok)
+
+        {:"$websockex_send", from, _frame} ->
+          :gen.reply(from, :ok)
+
+        _other ->
+          :ok
+      end
+
+      frame_reporting_socket_loop(test_pid)
+    end
+
+    # Simulates the venue's own concurrently-subscribed set on ONE session: `subscribe`
+    # frames add their `product_ids`, `unsubscribe` frames remove them, and the running
+    # size is reported to `test_pid` after every frame. `initial_live` seeds it with
+    # whatever this socket already carries when the test starts — the same real starting
+    # point `Feed`'s own bookkeeping (`current`) records for an already-open shard. This is
+    # how the "never more than the shard's own cap, even transiently" invariant gets
+    # checked directly against the actual frames sent, not inferred from the final state.
+    defp concurrent_tracking_socket(test_pid, initial_live) do
+      pid = spawn(fn -> concurrent_tracking_socket_loop(test_pid, initial_live) end)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp concurrent_tracking_socket_loop(test_pid, live) do
+      receive do
+        {:"$websockex_send", from, {:text, payload}} ->
+          live = apply_tracked_frame(live, Jason.decode(payload))
+          send(test_pid, {:live_count, MapSet.size(live)})
+          :gen.reply(from, :ok)
+          concurrent_tracking_socket_loop(test_pid, live)
+
+        _other ->
+          concurrent_tracking_socket_loop(test_pid, live)
+      end
+    end
+
+    defp apply_tracked_frame(live, {:ok, %{"type" => "subscribe", "product_ids" => ids}}),
+      do: MapSet.union(live, MapSet.new(ids))
+
+    defp apply_tracked_frame(live, {:ok, %{"type" => "unsubscribe", "product_ids" => ids}}),
+      do: MapSet.difference(live, MapSet.new(ids))
+
+    defp apply_tracked_frame(live, _other), do: live
+
+    # Fails every `unsubscribe` send with `{:error, :send_timeout}` and succeeds every
+    # `subscribe` send — the shape needed to prove the subscribe half of a reconcile is
+    # genuinely WITHHELD while the unsubscribe half is still failing, not merely delayed.
+    # `counter` records every unsubscribe attempt actually received; `sub_counter` records
+    # every subscribe attempt actually received, which must stay `0` for as long as the
+    # unsubscribe keeps failing.
+    defp unsubscribe_always_fails_socket(unsub_counter, sub_counter) do
+      pid = spawn(fn -> unsubscribe_always_fails_loop(unsub_counter, sub_counter) end)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp unsubscribe_always_fails_loop(unsub_counter, sub_counter) do
+      receive do
+        {:"$websockex_send", from, {:text, payload}} ->
+          case Jason.decode(payload) do
+            {:ok, %{"type" => "unsubscribe"}} ->
+              :counters.add(unsub_counter, 1, 1)
+              :gen.reply(from, {:error, :send_timeout})
+
+            _other ->
+              :counters.add(sub_counter, 1, 1)
+              :gen.reply(from, :ok)
+          end
+
+        _other ->
+          :ok
+      end
+
+      unsubscribe_always_fails_loop(unsub_counter, sub_counter)
+    end
+
+    # Fails the first `fail_times` UNSUBSCRIBE sends with `{:error, :send_timeout}`, then
+    # answers every send `:ok` after — an unsubscribe that was busy or briefly unreachable
+    # and then caught up, the same shape `flaky_socket/2` already gives a plain subscribe.
+    # `sub_counter` records every SUBSCRIBE send actually received, so a test can prove the
+    # subscribe half was genuinely withheld while the unsubscribe half was still failing,
+    # not merely that it happened to arrive later.
+    defp unsubscribe_flaky_socket(fail_times, unsub_counter, sub_counter) do
+      pid = spawn(fn -> unsubscribe_flaky_socket_loop(fail_times, unsub_counter, sub_counter) end)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp unsubscribe_flaky_socket_loop(remaining, unsub_counter, sub_counter) do
+      receive do
+        {:"$websockex_send", from, {:text, payload}} ->
+          if unsubscribe_frame?(payload) do
+            :counters.add(unsub_counter, 1, 1)
+
+            if remaining > 0 do
+              :gen.reply(from, {:error, :send_timeout})
+              unsubscribe_flaky_socket_loop(remaining - 1, unsub_counter, sub_counter)
+            else
+              :gen.reply(from, :ok)
+              unsubscribe_flaky_socket_loop(0, unsub_counter, sub_counter)
+            end
+          else
+            :counters.add(sub_counter, 1, 1)
+            :gen.reply(from, :ok)
+            unsubscribe_flaky_socket_loop(remaining, unsub_counter, sub_counter)
+          end
+
+        _other ->
+          unsubscribe_flaky_socket_loop(remaining, unsub_counter, sub_counter)
+      end
+    end
+
+    defp unsubscribe_frame?(payload),
+      do: match?({:ok, %{"type" => "unsubscribe"}}, Jason.decode(payload))
+
     # Fails `fail_times` sends with `{:error, :send_timeout}`, then answers `:ok` forever
     # after — a socket that was busy decoding a burst and then caught up. `counter`
     # records every send it actually received, which is how a test proves a retry was
@@ -1529,23 +1669,144 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert Process.alive?(feed)
     end
 
-    test "a :channel_unsubscribe message reaches the socket" do
-      feed = start_feed()
-      socket = fake_socket()
+    # `:channel_unsubscribe` (fire-and-forget, no retry, no ordering guarantee against a
+    # sibling `:channel_subscribe`) is gone — see `feed.ex`'s moduledoc, "unsubscribe
+    # before subscribe". `:channel_reconcile` replaces it: ONE deferred message carrying
+    # both the departing and arriving symbols, handled by `attempt_channel_reconcile/6`,
+    # which never sends the subscribe half until the unsubscribe half has succeeded.
 
-      send(feed, {:channel_unsubscribe, socket, "ticker", ["BTC-USD"]})
+    test "a :channel_reconcile message unsubscribes before it subscribes, on the same socket" do
+      feed = start_feed()
+      socket = frame_reporting_socket(self())
+
+      send(feed, {:channel_reconcile, socket, "ticker", ["OLD-USD"], ["NEW-USD"], nil})
+      :sys.get_state(feed)
+
+      assert_receive {:frame, type1, ids1}, 500
+      assert_receive {:frame, type2, ids2}, 500
+
+      assert {type1, ids1} == {"unsubscribe", ["OLD-USD"]}
+      assert {type2, ids2} == {"subscribe", ["NEW-USD"]}
+      assert Process.alive?(feed)
+    end
+
+    test "a :channel_reconcile with nothing to remove sends only the subscribe" do
+      feed = start_feed()
+      socket = frame_reporting_socket(self())
+
+      send(feed, {:channel_reconcile, socket, "ticker", [], ["NEW-USD"], nil})
+      :sys.get_state(feed)
+
+      assert_receive {:frame, "subscribe", ["NEW-USD"]}, 500
+      refute_receive {:frame, "unsubscribe", _ids}, 100
+      assert Process.alive?(feed)
+    end
+
+    test "a :channel_reconcile with nothing to add sends only the unsubscribe" do
+      feed = start_feed()
+      socket = frame_reporting_socket(self())
+
+      send(feed, {:channel_reconcile, socket, "ticker", ["OLD-USD"], [], nil})
+      :sys.get_state(feed)
+
+      assert_receive {:frame, "unsubscribe", ["OLD-USD"]}, 500
+      refute_receive {:frame, "subscribe", _ids}, 100
+      assert Process.alive?(feed)
+    end
+
+    test "a :channel_reconcile against a dead socket is skipped" do
+      feed = start_feed()
+      dead = dead_pid()
+
+      send(feed, {:channel_reconcile, dead, "ticker", ["OLD-USD"], ["NEW-USD"], nil})
       :sys.get_state(feed)
 
       assert Process.alive?(feed)
     end
 
-    test "a :channel_unsubscribe against a dead socket is skipped" do
-      feed = start_feed()
-      dead = dead_pid()
+    test "a transient unsubscribe failure is retried, and the subscribe stays withheld " <>
+           "until it succeeds" do
+      unsub_counter = :counters.new(1, [])
+      sub_counter = :counters.new(1, [])
+      socket = unsubscribe_flaky_socket(1, unsub_counter, sub_counter)
 
-      send(feed, {:channel_unsubscribe, dead, "ticker", ["BTC-USD"]})
-      :sys.get_state(feed)
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: fn -> {:ok, %{}} end,
+           subscribe_retry_delay_ms: 5}
+        )
 
+      # Real, JWT-signing credentials — not `nil` — so a wrongly-early subscribe attempt
+      # would actually reach this socket and increment `sub_counter`, rather than being
+      # swallowed by `{:error, {:credentials_required, "level2"}}` before any frame goes
+      # out, which would make `sub_counter == 0` true regardless of whether the withholding
+      # logic under test works at all.
+      send(
+        feed,
+        {:channel_reconcile, socket, "level2", ["OLD-USD"], ["NEW-USD"], valid_credentials()}
+      )
+
+      # Wait for the FIRST (failing) unsubscribe attempt, and check the subscribe has not
+      # gone out yet — proving it is genuinely withheld while the unsubscribe is still
+      # failing, not merely that it happens to arrive later than a passing test would
+      # tolerate.
+      wait_until(fn -> :counters.get(unsub_counter, 1) == 1 end)
+      assert :counters.get(sub_counter, 1) == 0
+
+      # Now wait for the retry to succeed (attempt 2), and confirm the subscribe DOES
+      # follow it — withheld only until the unsubscribe actually lands, not forever.
+      wait_until(fn -> :counters.get(unsub_counter, 1) == 2 end)
+      wait_until(fn -> :counters.get(sub_counter, 1) == 1 end)
+
+      assert :counters.get(unsub_counter, 1) == 2
+      assert :counters.get(sub_counter, 1) == 1
+      assert Process.alive?(feed)
+    end
+
+    test "unsubscribe exhausting its retries withholds the subscribe entirely and reports " <>
+           "a :coverage_change notice" do
+      unsub_counter = :counters.new(1, [])
+      sub_counter = :counters.new(1, [])
+      socket = unsubscribe_always_fails_socket(unsub_counter, sub_counter)
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: fn -> {:ok, %{}} end,
+           subscribe_retry_delay_ms: 5}
+        )
+
+      Feed.subscribe_notices(feed, to: self())
+
+      log =
+        capture_log(fn ->
+          # Real credentials here too — see the previous test's own comment on why `nil`
+          # would leave `sub_counter == 0` true even if the withholding logic were broken.
+          send(
+            feed,
+            {:channel_reconcile, socket, "level2", ["OLD-USD"], ["NEW-USD"], valid_credentials()}
+          )
+
+          assert_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change} = notice},
+                         2_000
+
+          assert notice.severity == :warning
+          assert notice.details.channel == "level2"
+          assert notice.details.removed_count == 1
+          assert notice.details.added_count == 1
+          assert notice.details.reason =~ "send_timeout"
+        end)
+
+      assert log =~ "giving up"
+
+      # One initial attempt plus @max_subscribe_retries (2) retries for the unsubscribe —
+      # three sends — and the subscribe NEVER sent at all, proving it was genuinely
+      # withheld rather than merely delayed.
+      assert :counters.get(unsub_counter, 1) == 3
+      assert :counters.get(sub_counter, 1) == 0
       assert Process.alive?(feed)
     end
 
@@ -1626,15 +1887,17 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
   end
 
-  describe "level2 replaces its socket rather than mutating it — cumulative vs. concurrent" do
-    # See `feed.ex`'s moduledoc, "cumulative vs. concurrent" section. `reconcile_shard/7`
-    # used to send only the newly-added symbols to `Socket.subscribe/4` on whatever socket
-    # a `level2` shard already had open — fine for the CONCURRENT ceiling `n <= 30` always
-    # respects by construction, but nothing stopped that same socket's own subscription
-    # HISTORY from growing past 30 distinct products over its lifetime as `wanted` churned.
-    # These tests exercise the fix directly: a shard whose membership would GROW gets a
-    # fresh socket instead, so no `level2` socket this module opens is ever asked, over its
-    # whole lifetime, to carry more than one shard's worth of distinct products.
+  describe "level2 reconciles in place — unsubscribe before subscribe, no socket replacement" do
+    # See `feed.ex`'s moduledoc, "unsubscribe before subscribe" section. `reconcile_shard/7`
+    # used to open a brand-new socket whenever an already-open `level2` shard would GAIN a
+    # symbol, subscribe the new socket with the shard's whole target set, and only then
+    # kill the old one — hedging against a question DpCryptoManagement has since answered
+    # directly against the live venue (2026-09-07, three probes, all raw `Socket.subscribe/4`
+    # on ONE socket): the ceiling is CONCURRENT, not cumulative; repeats do not accumulate;
+    # `unsubscribe` releases budget. These tests exercise the cheaper fix that measurement
+    # unlocked: a growing shard now reconciles on its EXISTING socket, exactly like a
+    # shrinking one already did, with `removed` unsubscribed before `added` is subscribed —
+    # never the other way round, and never both at once.
     #
     # A real, JWT-signing credential — not the connect-failure-only `%{api_key: "k",
     # api_secret: "s"}` used elsewhere in this file — because these tests exercise an
@@ -1651,13 +1914,14 @@ defmodule DpExchange.Coinbase.FeedTest do
     # same way `reshard/1` computes it (`MapSet.to_list/1` of the same symbols), which is
     # safe to precompute here because a `MapSet`'s enumeration order is a function of its
     # current key set only, never of insertion history — see the moduledoc's own proof of
-    # that fact.
-    defp feed_with_stale_level2_shard(stale_symbols_fun) do
+    # that fact. `level2_socket` defaults to a plain `fake_socket/0`; a test proving frame
+    # order or the concurrent-count invariant passes its own instead.
+    defp feed_with_stale_level2_shard(stale_symbols_fun, level2_socket \\ nil) do
       symbols = for n <- 1..35, do: "SYM#{n}-USD"
       wanted_list = symbols |> MapSet.new() |> MapSet.to_list()
       [level2_shard0, level2_shard1] = Enum.chunk_every(wanted_list, 30)
 
-      old_socket = fake_socket()
+      old_socket = level2_socket || fake_socket()
       ticker_socket = fake_socket()
       level2_socket1 = fake_socket()
 
@@ -1684,22 +1948,22 @@ defmodule DpExchange.Coinbase.FeedTest do
       %{feed: feed, old_socket: old_socket, target: level2_shard0}
     end
 
-    test "a shard that would GAIN symbols is replaced: old socket killed, new one carries " <>
-           "the full target set" do
+    test "a shard that would GAIN symbols reconciles on its EXISTING socket — never " <>
+           "replaced" do
       %{feed: feed, old_socket: old_socket, target: target} =
         feed_with_stale_level2_shard(&Enum.take(&1, 25))
 
       ref = Process.monitor(old_socket)
-      new_socket = fake_socket()
-      :sys.replace_state(feed, fn state -> %{state | injected_socket: new_socket} end)
 
       assert :ok = Feed.subscribe(feed, [], to: self())
 
-      # The old session is force-closed, not left running under a symbol set this module
-      # has already stopped tracking — see `terminate_socket/1`.
-      assert_receive {:DOWN, ^ref, :process, ^old_socket, :killed}, 500
+      # The socket that was already open is still open, and still THIS socket — nothing
+      # else was even injected for it to be replaced with (`injected_socket` is left
+      # `nil`, so a replacement would have had to open a real connection and fail loudly).
+      refute_receive {:DOWN, ^ref, :process, ^old_socket, _reason}, 200
+      assert Process.alive?(old_socket)
 
-      assert %{{"level2", 0} => %{socket: ^new_socket, symbols: ^target}} =
+      assert %{{"level2", 0} => %{socket: ^old_socket, symbols: ^target}} =
                Map.take(:sys.get_state(feed).shards, [{"level2", 0}])
     end
 
@@ -1709,16 +1973,14 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       assert :ok = Feed.subscribe(feed, [], to: self())
 
-      # No replacement needed — removal alone can never grow a socket's lifetime
-      # subscription count, so the socket that was already open keeps carrying this shard.
       assert Process.alive?(old_socket)
 
       assert %{{"level2", 0} => %{socket: ^old_socket, symbols: ^target}} =
                Map.take(:sys.get_state(feed).shards, [{"level2", 0}])
     end
 
-    test "ticker keeps mutating its own socket in place even when it gains symbols — it " <>
-           "has no known ceiling to protect" do
+    test "ticker keeps mutating its own socket in place when it gains symbols — the same " <>
+           "reconcile path level2 now takes, since it costs ticker nothing" do
       ticker_socket = fake_socket()
       feed = start_feed()
 
@@ -1732,114 +1994,108 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       assert :ok = Feed.subscribe(feed, [], to: self())
 
-      # Same socket, now carrying the symbol — never replaced, because `ticker` has no
-      # cumulative ceiling this module protects it against.
       assert %{{"ticker", 0} => %{socket: ^ticker_socket, symbols: ["BTC-USD"]}} =
                :sys.get_state(feed).shards
 
       assert Process.alive?(ticker_socket)
     end
 
-    test "a deferred replace lands cleanly when nothing else touched the shard since" do
+    test "a shard that both loses and gains sends the unsubscribe before the subscribe, " <>
+           "on the primary (synchronous) reconcile path" do
+      reporting_socket = frame_reporting_socket(self())
+
+      %{feed: feed} =
+        feed_with_stale_level2_shard(
+          fn shard0 -> Enum.drop(shard0, 5) ++ ~w(EXTRA1-USD EXTRA2-USD) end,
+          reporting_socket
+        )
+
+      assert :ok = Feed.subscribe(feed, [], to: self())
+
+      assert_receive {:frame, type1, ids1}, 500
+      assert_receive {:frame, type2, ids2}, 500
+
+      assert type1 == "unsubscribe"
+      assert Enum.sort(ids1) == ~w(EXTRA1-USD EXTRA2-USD)
+      assert type2 == "subscribe"
+      assert length(ids2) == 5
+    end
+
+    test "a shard that both loses and gains, reconciled asynchronously (a non-primary " <>
+           "touched shard), also unsubscribes before it subscribes" do
+      # `feed_with_stale_level2_shard/2` already seeds a SECOND level2 shard
+      # (`{"level2", 1}`) whose symbols already match its own fresh target, so it stays
+      # untouched — the shard under test here is `{"level2", 0}`, which reshard/1 always
+      # picks as this call's PRIMARY (synchronous) shard, since it sorts first among the
+      # touched keys. To exercise the deferred path instead, this drives
+      # `attempt_channel_reconcile/6` directly via the same message
+      # `reconcile_shard_in_place/7`'s async clause schedules — proving the handler's own
+      # ordering, independent of which shard reshard/1 happens to pick as primary.
+      reporting_socket = frame_reporting_socket(self())
       feed = start_feed()
-      old_socket = fake_socket()
-      new_socket = fake_socket()
-      ref = Process.monitor(old_socket)
-      current = ~w(SYM1-USD SYM2-USD)
-      wanted = current ++ ~w(SYM3-USD)
+
+      send(
+        feed,
+        {:channel_reconcile, reporting_socket, "level2", ~w(EXTRA1-USD EXTRA2-USD),
+         ~w(NEW1-USD NEW2-USD NEW3-USD), valid_credentials()}
+      )
+
+      :sys.get_state(feed)
+
+      assert_receive {:frame, type1, ids1}, 500
+      assert_receive {:frame, type2, ids2}, 500
+
+      assert type1 == "unsubscribe"
+      assert Enum.sort(ids1) == ~w(EXTRA1-USD EXTRA2-USD)
+      assert type2 == "subscribe"
+      assert Enum.sort(ids2) == ~w(NEW1-USD NEW2-USD NEW3-USD)
+    end
+
+    test "a level2 shard reconciling losses and gains together never reports more live " <>
+           "products than its own shard size, even transiently mid-reconcile" do
+      cap = 5
+      current = for n <- 1..cap, do: "SYM#{n}-USD"
+
+      wanted_list =
+        (Enum.drop(current, 2) ++ ~w(NEW1-USD NEW2-USD)) |> MapSet.new() |> MapSet.to_list()
+
+      socket = concurrent_tracking_socket(self(), MapSet.new(current))
+      # `wanted` here doubles as `ticker`'s own shard content — see the moduledoc: both
+      # channels chunk the SAME `state.wanted` set, just at different sizes.
+      # `shards_for(wanted_list, "ticker", _)` (100/socket) produces one shard equal to
+      # `wanted_list` itself, so pre-seeding `{"ticker", 0}` with exactly that set keeps it
+      # untouched by this call, and the only shard `reshard/1` touches is the `level2` one
+      # under test — no real socket connect attempt for `ticker` to race against.
+      ticker_socket = fake_socket()
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: fn -> {:ok, %{}} end,
+           level2_pairs_per_socket: cap}
+        )
 
       :sys.replace_state(feed, fn state ->
         %{
           state
           | credentials: valid_credentials(),
-            injected_socket: new_socket,
-            shards: %{{"level2", 0} => %{socket: old_socket, symbols: current}}
+            wanted: MapSet.new(wanted_list),
+            shards: %{
+              {"ticker", 0} => %{socket: ticker_socket, symbols: wanted_list},
+              {"level2", 0} => %{socket: socket, symbols: current}
+            }
         }
       end)
 
-      send(feed, {:replace_shard_socket, "level2", 0, current, wanted})
-      :sys.get_state(feed)
+      assert :ok = Feed.subscribe(feed, [], to: self())
 
-      assert_receive {:DOWN, ^ref, :process, ^old_socket, :killed}, 500
+      assert_receive {:live_count, count_after_unsubscribe}, 500
+      assert_receive {:live_count, count_after_subscribe}, 500
 
-      assert %{{"level2", 0} => %{socket: ^new_socket, symbols: ^wanted}} =
-               :sys.get_state(feed).shards
-    end
-
-    test "a deferred replace is dropped when the shard's symbols changed since it was " <>
-           "scheduled" do
-      feed = start_feed()
-      socket = fake_socket()
-      scheduled_against = ~w(SYM1-USD SYM2-USD)
-      actual_current = ~w(SYM1-USD SYM2-USD SYM3-USD)
-
-      :sys.replace_state(feed, fn state ->
-        %{state | shards: %{{"level2", 0} => %{socket: socket, symbols: actual_current}}}
-      end)
-
-      send(feed, {:replace_shard_socket, "level2", 0, scheduled_against, ~w(SYM1-USD SYM4-USD)})
-      :sys.get_state(feed)
-
-      # The later change (whatever set `actual_current`) is authoritative — this stale
-      # intent must not clobber it, and the socket that later change chose stays untouched.
-      assert %{{"level2", 0} => %{socket: ^socket, symbols: ^actual_current}} =
-               :sys.get_state(feed).shards
-
-      assert Process.alive?(socket)
-    end
-
-    test "a deferred replace is dropped when the shard was dropped entirely since it was " <>
-           "scheduled" do
-      feed = start_feed()
-
-      send(feed, {:replace_shard_socket, "level2", 0, ~w(SYM1-USD), ~w(SYM1-USD SYM2-USD)})
-      :sys.get_state(feed)
-
-      assert :sys.get_state(feed).shards == %{}
-      assert Process.alive?(feed)
-    end
-
-    test "when the replacement socket cannot open, the old socket and its symbols are " <>
-           "left untouched, and the gap is reported" do
-      feed =
-        start_supervised!(
-          {Feed,
-           name: :"feed_#{System.unique_integer([:positive])}",
-           url: "ws://127.0.0.1:1/nowhere",
-           alias_map_source: fn -> {:ok, %{}} end}
-        )
-
-      :ok = Feed.subscribe_notices(feed, to: self())
-
-      old_socket = fake_socket()
-      current = ~w(SYM1-USD)
-      wanted = current ++ ~w(SYM2-USD)
-
-      :sys.replace_state(feed, fn state ->
-        %{state | shards: %{{"level2", 0} => %{socket: old_socket, symbols: current}}}
-      end)
-
-      log =
-        capture_log(fn ->
-          send(feed, {:replace_shard_socket, "level2", 0, current, wanted})
-
-          assert_receive {:dp_exchange, :coinbase,
-                          %Notice{kind: :coverage_change, details: %{channel: "level2", shard: 0}} =
-                            notice},
-                         2_000
-
-          # Only the symbol the replacement would have ADDED is reported missing — the
-          # shard's already-working symbol is still on the old, untouched socket.
-          assert notice.details.symbol_count == 1
-        end)
-
-      assert log =~ "replacement socket did not open"
-
-      assert %{{"level2", 0} => %{socket: ^old_socket, symbols: ^current}} =
-               :sys.get_state(feed).shards
-
-      assert Process.alive?(old_socket)
-      assert Process.alive?(feed)
+      assert count_after_unsubscribe <= cap
+      assert count_after_subscribe <= cap
+      assert count_after_subscribe == length(wanted_list)
     end
   end
 

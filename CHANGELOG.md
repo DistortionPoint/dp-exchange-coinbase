@@ -748,6 +748,82 @@ acceptable changelog line.
   (non-primary-shard) replace path is driven directly, including the stale-message guard
   and a replacement socket that fails to open.
 
+- **The socket-replacement fix directly above is superseded: the question it hedged
+  against is now measured, and the hedge was more expensive than the answer required.**
+  Same issue #22, continuing. `9139881` replaced a growing `level2` shard's socket outright
+  because this package could not tell whether Coinbase's per-session ceiling counted
+  concurrently-held products or every distinct product a session had ever carried — a real
+  open question at the time, and a full reconnect (fresh snapshot, coverage gap) was the
+  cost of not guessing wrong either way.
+
+  **DpCryptoManagement answered it directly, 2026-09-07: three probes, each on ONE socket,
+  using raw `Socket.subscribe/4` — deliberately not `Feed`/`update_symbols/2`, so the
+  result is evidence about the venue's own accounting, not this package's dedup.** The same
+  30 products re-sent ~60s apart 14 times (~13 minutes): all accepted, `books=0` on every
+  repeat — repeats do not accumulate, which also directly answers the "attempt-counting"
+  open question from the previous entry (the unconditional 60-second resubscribe does not
+  feed a cumulative counter, at any shard size). A different 30 products on the same
+  socket without unsubscribing the first batch: `cumulative=60` — REFUSED, but the socket
+  stayed alive and the first batch kept delivering (27/30 still ticking); only the second,
+  unreleased batch was rejected. Four batches of 30, each unsubscribing the previous batch
+  first: all four accepted, fresh snapshot each time — 120 distinct products through one
+  socket, never more than 30 live at once. **The ceiling is 30 CONCURRENT products per
+  session, not 30 over a session's lifetime**, and `unsubscribe` releases budget the venue
+  actually honours.
+
+  `reconcile_shard/7`'s `"level2"` clause and `replace_level2_shard/7` are gone.
+  `reconcile_shard_in_place/7` now handles both channels, all three shapes a shard's
+  membership can change (only losses, only gains, both), on the shard's EXISTING socket:
+  `removed` is unsubscribed before `added` is subscribed, and the subscribe never goes out
+  until the unsubscribe has returned `:ok` (retried on a transient send failure with the
+  same bounded backoff a channel subscribe already gets — `attempt_channel_reconcile/6`,
+  `handle_unsubscribe_failure/8` — with `added` withheld, not sent anyway, if the retries
+  exhaust). The order is load-bearing: probe 3 above works BECAUSE the departing batch's
+  slots were freed before the arriving batch was requested; probe 2 is the identical
+  operation in the other order and was refused, quietly — the socket stayed alive and
+  already-flowing symbols were unaffected, with only the newly-requested ones silently
+  missing. Shrinking before growing keeps a socket's transient concurrent count bounded by
+  `max(length(current), length(wanted))`, never more than `level2_pairs_per_socket`,
+  including mid-reconcile, not only at rest.
+
+  **What guarantee this package actually has is stated plainly, not assumed generous.**
+  `Socket.subscribe/4` and `Socket.unsubscribe/3` both block on `FrameSender`'s synchronous
+  `WebSockex.send_frame/2` call, so ordering the two calls in code orders the two frames on
+  the wire; TCP delivers one connection's bytes in the order they were written, and nothing
+  in any probe has ever shown Coinbase reordering two frames on one connection. But
+  `Socket.unsubscribe/3`'s `:ok` means the frame was handed to the connection, never that
+  the venue has finished releasing the departing slots — this protocol gives no
+  acknowledgement frame for an unsubscribe to wait on. This package relies on frame order,
+  not a confirmed venue-side state transition, and says so in `feed.ex`'s own moduledoc
+  ("unsubscribe before subscribe") rather than rounding the guarantee up. One gap stays
+  open and disclosed: a permanently stranded unsubscribe (every retry exhausted) is not
+  itself retried by the next resubscribe cycle, which only re-issues a plain `subscribe` —
+  closing that would need a cross-cycle retry ledger judged not to clear its own complexity
+  bar against how narrow the gap is.
+
+  `docs/reference/coinbase/level2-session-limit.md` records all three probes, dated and
+  attributed, and marks the cumulative-vs-concurrent and attempt-counting questions
+  resolved. **One thing is explicitly NOT resolved and is recorded as open, not decided
+  either way:** the `level2_pairs_per_socket` warning and the reference doc both used to
+  state that an oversized subscribe "closes the socket and loses that shard's entire
+  coverage" — probe 2 above shows a *cumulative* overage refusal that did NOT close the
+  socket. The original 2026-08-26 incident recorded socket closure for what may be a
+  different case (a *single* oversized subscribe, not cumulative overage), and the
+  consumer has offered to test the single-oversized case specifically; until that runs,
+  both observations are stated and the conflict is left open, and the warning text states
+  the worse of the two outcomes as the risk to plan for rather than asserting it as
+  certain.
+
+  New tests in `feed_test.exs` replace the socket-replacement suite: a growing `level2`
+  shard reconciles on its existing socket (never replaced, never killed); a shard that
+  both loses and gains sends the unsubscribe frame before the subscribe frame, on both the
+  synchronous (primary-shard) and deferred (async) reconcile paths; a shard reconciling
+  losses and gains together never reports more live products than its own shard size at
+  any point a fake venue-tracking socket observes, including mid-reconcile; a transient
+  unsubscribe failure is retried and the subscribe stays withheld until it succeeds; an
+  unsubscribe that exhausts its retries withholds the subscribe entirely and reports a
+  `:coverage_change` notice naming both the departing and withheld-arriving counts.
+
 ### Documentation
 
 - **CLAUDE.md claimed this package parses Coinbase's `cb-after` / `cb-before`

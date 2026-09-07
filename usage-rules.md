@@ -233,20 +233,22 @@ request — an unexplained, dated venue characteristic recorded in
 `coverage_by_kind/1` need no special handling for it: both report only symbols that
 actually delivered a payload, entirely independent of whatever notice accompanied them.
 
-**A `level2` shard whose membership grows gets a new socket, not a bigger subscription on
-the old one.** If your universe changes over time — symbols added, removed, or rotated —
-an already-open `level2` shard that would gain a symbol is moved to a freshly opened
-socket carrying its whole new set, rather than asking the existing session to subscribe
-one more product on top of what it already has. This package cannot ask Coinbase whether
-its ceiling counts concurrently-held products or every distinct product a session has ever
-carried, so it does not get to assume the cheaper answer: replacing the socket keeps every
-`level2` session's lifetime subscription count at or under 30 regardless of which answer
-is true. A shard that only loses symbols is unaffected — removal cannot grow that count,
-so it keeps its existing socket. This is an internal mechanism, not a new call you make,
-but it can mean a very brief coverage gap for the newly-added symbols on a shard mid-churn
-while the new socket comes up, reported the same way any other failed-to-open shard is:
-`subscribe_notices/1` receives a `:coverage_change` notice, and `coverage/1` simply does
-not show them covered yet.
+**A `level2` shard whose membership changes reconciles on its EXISTING socket, unsubscribing
+departing symbols before subscribing arriving ones.** If your universe changes over time —
+symbols added, removed, or rotated — an already-open `level2` shard never gets a new
+connection just because it gained a symbol; it unsubscribes whatever it is losing, then
+subscribes whatever it is gaining, on the same session, in that order, every time. The
+order is load-bearing, not incidental: DpCryptoManagement measured live (2026-09-07) that
+releasing a batch before requesting the next keeps a session's concurrent count within its
+own ceiling and gets accepted, while requesting before releasing gets refused — so shrinking
+always happens before growing, keeping this shard's own concurrent product count at or under
+`level2_pairs_per_socket` at every instant of a reconcile, not only at rest. A shard that
+only loses symbols, or only gains, takes the identical path with the unused half simply
+empty. This is an internal mechanism, not a new call you make, but a transient send failure
+on the unsubscribe half can mean a very brief coverage gap for the newly-added symbols while
+it retries, reported the same way any other failed subscribe is: `subscribe_notices/1`
+receives a `:coverage_change` notice, and `coverage/1` simply does not show them covered
+yet.
 
 ### `level2_pairs_per_socket` — a supervision option, so a venue-side change doesn't need a release
 
@@ -266,22 +268,30 @@ silently running with a value that could never have sized a shard.
 package cannot verify Coinbase's real ceiling itself (see above — that would be tier-3,
 authenticated, live probing, which this repo never runs), so it does not get to assume a
 value you set above today's measurement is wrong. It logs the measured ceiling, the date
-and source, and the concrete risk before proceeding: **a `level2` subscribe the venue
-refuses closes the whole socket, losing that entire shard's coverage — not just the
-symbols past the line.** If you are setting this above 30 because you have your own
-evidence the venue's limit moved, that is exactly what this option is for. If you are
-setting it above 30 without such evidence, expect the warning's risk to be the outcome.
+and source, and the concrete risk before proceeding — stated as what has actually been
+observed, not more than that. Setting this above `30` means every ordinary `level2`
+subscribe this package sends for that shard is, by itself, a single subscribe over the
+venue's real limit. The one incident on record for exactly that shape (2026-08-26) is a
+refusal that also closed the socket — a total coverage gap for the whole shard. A later
+measurement (2026-09-07) found a refusal that did *not* close the socket, but that was of
+*cumulative* overage across two smaller subscribes, not one oversized one — whether a
+single oversized subscribe still closes the socket has not been re-tested since 2026-08-26,
+and this package does not resolve that either direction. The warning states the worse of
+the two observed outcomes — whole-shard coverage loss — as the risk to plan for, not a
+guarantee it recurs. If you are setting this above 30 because you have your own evidence
+the venue's limit moved, that is exactly what this option is for.
 
 **The default is not shrunk for headroom, on purpose.** `30` is the actual boundary — `30`
 accepted, `31` refused, confirmed by interleaving and a contamination check — not merely
 "the largest value that hasn't failed yet" the way this package's superseded `6` was.
 Sitting exactly at a boundary that precise is a deliberate choice, not an oversight: see
 `feed.ex`'s own moduledoc, "`level2_pairs_per_socket` — a supervision option," for the
-full reasoning, including why headroom on shard size does not protect against this
-package's one still-open risk (whether the unconditional 60-second resubscribe counts
-toward a *cumulative*, attempt-shaped ceiling — see "cumulative vs. concurrent" in that
-same moduledoc). If you want margin below 30 for your own reasons, this option is exactly
-how you take it — pass a smaller value yourself.
+full reasoning. The risk this package used to flag as still-open here — whether the
+unconditional 60-second resubscribe could feed a *cumulative*, attempt-shaped ceiling — was
+answered 2026-09-07 (see "the ceiling is concurrent, not cumulative" in `feed.ex`'s own
+moduledoc): repeats do not accumulate, at any shard size. If you want margin below 30 for
+your own reasons regardless, this option is exactly how you take it — pass a smaller value
+yourself.
 
 **`ticker`'s own shard size (100) has no equivalent option**, on purpose: it has no known
 per-session ceiling to tune against, measured or suspected. This option exists because

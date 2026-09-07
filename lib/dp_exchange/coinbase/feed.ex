@@ -199,10 +199,22 @@ defmodule DpExchange.Coinbase.Feed do
   repo cannot bisect an authenticated session live). Refusing to even try would leave the
   option unable to do the one thing it was built for. What it gets instead is a loud
   `Logger.warning` at start naming the measured ceiling, its date and source, and the
-  concrete risk: a `level2` subscribe over the venue's real limit is refused and closes
-  the socket, which drops that WHOLE shard's coverage, not merely the symbols past the
-  line — a materially worse failure than "the option did what it was told." The warning
-  makes that risk legible; it does not block it.
+  concrete risk — stated as what has actually been observed, not more than that.
+
+  **What "the concrete risk" is, precisely, is not fully settled — say so, don't round it
+  off.** Setting this option above `30` means every ordinary `level2` subscribe this
+  package sends for that shard is, by itself, a SINGLE subscribe over the venue's real
+  limit. The one incident on record for exactly that shape (2026-08-26, see "level2 gets
+  its own, smaller sockets" above) is a refusal that also closed the socket — a total
+  coverage gap for the whole shard, not merely the symbols past the line. A later
+  measurement (2026-09-07, see "unsubscribe before subscribe" below) found a refusal that
+  did NOT close the socket — but that measurement was of CUMULATIVE overage across two
+  separate, smaller subscribes on one socket, not one single oversized subscribe, and
+  nobody has re-run the single-oversized case since 2026-08-26 to see whether it still
+  closes the socket. The two may be different venue behaviours, or the same one described
+  from two different angles; this file does not resolve that either direction, and neither
+  does the warning. What the warning states is the worse of the two observed outcomes —
+  whole-shard coverage loss — as the risk to plan for, not a claim that it is certain.
 
   **The default stays at `30`, without injected headroom, and that was a deliberate
   choice, not an oversight.** `30` is not "the largest value that has not yet failed"
@@ -231,84 +243,182 @@ defmodule DpExchange.Coinbase.Feed do
   way `level2` did, the fix is the same one this section documents, applied to
   `@pairs_per_socket` instead: nothing about this design is `level2`-specific.
 
-  ## Cumulative vs. concurrent — the ceiling this package cannot rule out by itself
+  ## The ceiling is concurrent, not cumulative — resolved, not merely bounded
 
-  The consumer's own harness used a fresh `Socket.start_link/1` for every attempt **on
-  purpose**, "because cumulative session state is the thing under test." That control
-  buys their measurement precision it would not otherwise have — but it also means their
-  406-symbol, `n=6..100` result above proves the ceiling on *concurrently held* `level2`
-  products. It cannot, by its own design, say whether Coinbase's real ceiling counts
-  concurrent subscriptions or **cumulative** ones — every distinct product this package's
-  own `level2` shards have ever asked one session to carry, whether or not all of them are
-  still wanted now. This module's own long-lived sockets are exactly the case that
-  distinction matters for, and it does not get to assume the answer is the convenient one.
+  **2026-09-07 update.** This section used to be titled "Cumulative vs. concurrent — the
+  ceiling this package cannot rule out by itself." The question it posed is answered below.
+  The reasoning that got this package here is kept rather than deleted, because the fix it
+  produced — and the cheaper one that replaced it — both depend on understanding why it was
+  written; see "When a moduledoc records an incident" in this package's own `CLAUDE.md`.
 
-  **The code was checked, not guessed.** `reconcile_shard/7` — reached from `reshard/1`
-  whenever `subscribe/3`, `unsubscribe/2` or `update_symbols/2` changes a shard `Feed`
-  already has a socket open for — computed `added = wanted -- current` and, before this
-  fix, sent exactly those newly-added symbols to `Socket.subscribe/4` **on the same
-  already-open socket**, never a fresh one. `wanted_symbols` per shard is always
-  `≤ @level2_pairs_per_socket` by construction (`level2_shards/1` chunks to it), so no
+  The 2026-09-06 bisection above (`n=6..100`) used a fresh `Socket.start_link/1` for every
+  attempt **on purpose**, "because cumulative session state is the thing under test." That
+  control bought the consumer's measurement precision it would not otherwise have — but it
+  also meant that result could only prove the ceiling on *concurrently held* `level2`
+  products. It could not, by its own design, say whether Coinbase's real ceiling counts
+  concurrent subscriptions or **cumulative** ones — every distinct product a session was
+  ever asked to carry, whether or not all of them were still wanted now. This module's own
+  long-lived sockets were exactly the case that distinction mattered for.
+
+  **The code was checked, not guessed, while the answer was still unknown.**
+  `reconcile_shard/7` — reached from `reshard/1` whenever `subscribe/3`, `unsubscribe/2` or
+  `update_symbols/2` changed a shard `Feed` already had a socket open for — computed
+  `added = wanted -- current` and sent exactly those newly-added symbols to
+  `Socket.subscribe/4` on the same already-open socket, never a fresh one.
+  `wanted_symbols` per shard is always `≤ @level2_pairs_per_socket` by construction, so no
   single subscribe call this module ever sent asked one socket for more than the shard
-  ceiling *at that instant*. Nothing stopped the same socket's own subscription history
-  from growing past it over time, one `added` batch at a time.
+  ceiling *at that instant* — but nothing stopped the same socket's own subscription
+  HISTORY from growing past it over time, one `added` batch at a time. This was never a
+  rare edge case: `MapSet.to_list/1`'s enumeration order is a function of the *current* key
+  set, not of insertion history — proven directly against a 406-member synthetic set, where
+  adding one member moves 8 symbols to a different chunk index and removing one moves 3 —
+  so ordinary universe churn, not only a caller explicitly asking to add a symbol,
+  routinely hands an already-open shard products it has never carried before.
 
-  **This is not a rare edge case; it is what ordinary universe churn does.** `wanted` is a
-  `MapSet`, and `MapSet.to_list/1`'s enumeration order is a function of the *current* key
-  set, not of insertion history — proven directly, not assumed: chunking a 406-member
-  synthetic set into groups of 30, then adding one more member and rechunking, moves 8 of
-  the original 406 symbols to a different chunk index; removing one member instead moves
-  3. A consumer whose universe gains or loses even a single symbol — exactly what
-  `DpCryptoManagement`'s own universe promotion/demotion does routinely — can therefore
-  hand an already-open `level2` shard several symbols it has never carried before, not
-  only when a caller explicitly asks to add one. At `@level2_pairs_per_socket` = `6` this
-  had enormous headroom: a shard would need to churn past six *net new* symbols before its
-  lifetime total could exceed even the old `100` ceiling nobody had located yet. At `30`,
-  aimed at a boundary now known exactly, there is no headroom at all — the very first
-  reshard that adds even one symbol to a shard already carrying its full 30 can, if
-  Coinbase's ceiling is cumulative, push that one socket's lifetime `level2` subscription
-  count to 31.
+  **Commit `9139881` hedged rather than guessed.** With the answer unknown and `30`
+  offering none of the headroom the old, deliberately-pessimistic `6` had, growing an
+  already-open `level2` shard replaced its socket outright — a fresh connection, subscribed
+  with the shard's whole target set, only then discarding the old one — so no `level2`
+  socket this package opened was ever asked, over its whole lifetime, to carry more
+  distinct products than one shard's worth. That made "should never be over the ceiling"
+  true unconditionally, concurrently *and* cumulatively, regardless of which of Coinbase's
+  two possible countings turned out to be real. It was also, by construction, more
+  expensive than necessary if the answer turned out to be the convenient one: a full
+  reconnect, a fresh snapshot for every symbol on the shard including the ones that never
+  changed, and a coverage gap while the new socket came up — every reshard that grew a
+  shard by even one symbol paid for a whole shard's worth of resubscribe.
 
-  **Fixed by replacing the socket, not by learning the venue's real semantics** — this
-  package still cannot ask the venue that question (see above). `reconcile_shard/7`'s
-  `"level2"` clause now checks whether a reshard would add anything to an already-open
-  shard; if so, it opens a brand-new socket, subscribes it fresh with the shard's whole
-  target set, and only then discards the old one (`replace_level2_shard/7`,
-  `terminate_socket/1`) — the old socket is never asked to carry a product it did not
-  already have. A shard that only *loses* symbols keeps mutating its existing socket in
-  place, since removal cannot grow a cumulative count. `ticker` is untouched: it has no
-  known ceiling, so there is nothing for it to cumulatively exceed, and mutating its own
-  socket in place is unchanged. This makes the earlier "should never be over the ceiling"
-  reasoning true unconditionally — concurrently *and* cumulatively, per socket — rather
-  than only for the single request currently in flight, regardless of what Coinbase's
-  actual counting semantics turn out to be.
+  **DpCryptoManagement answered the question directly, 2026-09-07, issue #22 continuing.**
+  Three probes, **each on ONE socket, using raw `Socket.subscribe/4` — deliberately not
+  `Feed` or `update_symbols/2`** — so the result is evidence about the VENUE's own
+  accounting, not about this package's own dedup or bookkeeping. All three drained
+  continuously against real products from the consumer's live scope:
 
-  **One axis remains genuinely open, and this package does not get to guess it either.**
-  The unconditional 60-second resubscribe (`handle_info(:resubscribe, _)`, see below)
-  re-issues a shard's *unchanged* current symbols to its *already-subscribed* socket,
-  forever, for as long as that socket lives — the resilience this file's own reconnect
-  section depends on. If Coinbase's ceiling counts *attempts* — every subscribe frame a
-  session ever sent, distinct products or not — rather than distinct products, this timer
-  feeds that counter on every tick, and no shard size fixes that: even a single symbol,
-  resubscribed enough times on one long-lived socket, would eventually cross an
-  attempt-counted ceiling. This was already an open question before this change (see
-  `@default_resubscribe_interval_ms`'s own comment); this investigation did not close it,
-  and this package has no way to close it that does not require exactly the tier-3 access
-  it has just established a consumer can supply and this repo cannot. Two probes would
-  settle it, symmetric to the method above:
+  1. **The same 30 products, re-sent roughly 60 seconds apart, 14 times: all accepted.**
+     The socket stayed alive throughout, roughly 13 minutes. `books=30` on the first
+     attempt and `books=0` on every repeat — the venue recognised those products were
+     already subscribed and replayed no snapshot, rather than refusing the repeat.
+     **Repeats do not accumulate.** This is also, precisely, the "attempt-counting" probe
+     the open question below used to call for: it directly answers whether the
+     unconditional 60-second resubscribe this coordinator runs forever could itself feed
+     an attempt-counted ceiling. It does not, at any shard size, for as long as 14 repeats
+     over 13 minutes is representative of a longer-running socket.
+  2. **A different 30 products, on the SAME socket, without unsubscribing the first batch
+     first: `cumulative=60` — REFUSED**, `"too many L2 streams requested in a single
+     session"`. **But the socket stayed alive, and the first batch kept delivering** (27
+     of 30 still ticking during the refusal) — only the second, unreleased batch was
+     rejected.
+  3. **Four batches of 30 products each, always unsubscribing the previous batch before
+     requesting the next: all four accepted**, a fresh snapshot every time — 120 distinct
+     products moved through one socket's lifetime, never more than 30 live at any moment.
 
-  * **Attempt-counting.** One socket, a small fixed `level2` set well under 30 (say 5),
-    held constant, with `resubscribe_interval_ms` set low enough to fire dozens of
-    identical re-subscribes within a few minutes. A refusal despite concurrent membership
-    never exceeding 5 would mean attempts count; none after well over 30 re-issues would
-    be strong evidence only distinct concurrent products do.
-  * **Cumulative distinct-count.** One socket, 25 `level2` symbols, then several rounds of
-    "remove 5, add 5 new ones" — never exceeding 25 concurrently, but accumulating past 30
-    *distinct* products across the session by the second round. A refusal here despite
-    concurrent membership never exceeding 25 would confirm the cumulative-distinct
-    hypothesis this fix was written against; acceptance through several rounds would show
-    the fix above cost nothing but bought a safety margin that was not, in fact, load-
-    bearing.
+  **So the ceiling is 30 CONCURRENT products per session, not 30 over a session's
+  lifetime.** `unsubscribe` releases budget the venue actually honours (probe 3); a
+  long-lived socket does not degrade as its membership churns, provided it releases what
+  it is giving up before it asks for what it is gaining (probe 2, read the other way
+  round). The cumulative-hedge `9139881` shipped is no longer necessary, and — see the next
+  section — it was strictly more expensive than the alternative this measurement unlocks.
+
+  ## Unsubscribe before subscribe — what replaced socket replacement
+
+  Socket replacement bought a guarantee this package no longer needs to buy that way.
+  `reconcile_shard/7`'s `"level2"` clause is gone; every shard, either channel, now
+  reconciles on its EXISTING socket through one function, `reconcile_shard_in_place/7` —
+  the mechanism `ticker` already used, since it never had a ceiling to protect against in
+  the first place. For a shard whose membership changes, `removed` is unsubscribed and
+  `added` is subscribed on that one socket — **and `removed` is unsubscribed FIRST, every
+  time, never the other way round, and the subscribe never goes out until the unsubscribe
+  has.**
+
+  **The ordering is load-bearing, and it is the whole point.** Probe 3 above works BECAUSE
+  the departing batch's slots were freed before the arriving batch was requested; probe 2
+  is the identical operation in the other order — request before release — and it was
+  refused. A `level2` shard already carrying its full `level2_pairs_per_socket` that issued
+  a bare additive subscribe would hit exactly probe 2's shape, and per that probe the
+  refusal is QUIET from a consumer's own vantage point: the socket lives, the shard's
+  existing symbols keep flowing, and only the newly-requested ones silently never arrive.
+  That is precisely the failure this fix exists not to introduce, so shrinking always
+  happens before growing: the transient concurrent count during any reconcile is bounded by
+  `max(length(current), length(wanted))`, and both are already bounded by shard
+  construction — never more than `level2_pairs_per_socket`, including mid-reconcile, not
+  only at rest.
+
+  **What guarantee this package actually has, and how it was established — read from
+  `Socket`, not assumed.** `Socket.subscribe/4` and `Socket.unsubscribe/3` both go through
+  `FrameSender.send/3`, which calls `WebSockex.send_frame/2` — a *synchronous* `:gen.call`
+  into the WebSockex connection process that returns only once that ONE process has handed
+  the frame to the underlying TCP socket (or reports why it could not — see `FrameSender`'s
+  own moduledoc). Because `attempt_channel_reconcile/6` (and the synchronous clause of
+  `reconcile_shard_in_place/7`) never calls `Socket.subscribe/4` until `Socket.unsubscribe/3`
+  for the SAME message has returned `:ok`, the unsubscribe frame is written to this one TCP
+  connection strictly before the subscribe frame is. TCP delivers bytes on one connection in
+  the order they were written, and Coinbase's own session, so far as this package or
+  DpCryptoManagement has ever observed, processes one connection's frames in the order it
+  receives them — nothing in any probe above, or in the original bisection, has ever shown
+  the venue reordering two frames sent on the same socket. Given that, sending the frames in
+  this order is what makes the venue very likely to *process* the unsubscribe before the
+  subscribe too, even though this package cannot observe that processing directly.
+
+  **That is the honest limit of what this package can confirm, and it is worth stating
+  plainly rather than folding into the paragraph above.** `Socket.unsubscribe/3`'s `:ok`
+  means "the frame was handed to this connection's own send," never "the venue has finished
+  releasing this shard's departing slots" — Coinbase's `l2_data` protocol gives this package
+  no acknowledgement frame for an unsubscribe to wait on (contrast `"channel" =>
+  "subscriptions"`, which acknowledges a *subscribe*, and which `dispatch/2` deliberately
+  does not treat as coverage — see this moduledoc's own opening section — let alone waits on
+  here). So this package relies on frame ORDER on one connection, not on a confirmed
+  venue-side STATE transition, to keep a reconcile inside the shard's own cap. Given probe
+  3's own success — four rounds of exactly this pattern, no waiting for any acknowledgement
+  between the unsubscribe and the next subscribe, all four accepted — ordering alone,
+  without an acknowledgement this protocol does not offer, is what this package actually
+  has, and it is what DpCryptoManagement's own probe already relied on to get the result it
+  got.
+
+  **A transient send failure on the unsubscribe half withholds the subscribe half entirely,
+  rather than risk the alternative.** `attempt_channel_reconcile/6` retries a failed
+  unsubscribe with the same bounded backoff a channel subscribe already gets
+  (`handle_unsubscribe_failure/8`); the subscribe for `added` is never attempted until the
+  unsubscribe has actually gone out, or the retries are exhausted and the added symbols are
+  withheld for this cycle (reported through `subscribe_notices/1`, the same as any other
+  subscribe that never took — see "a timed-out subscribe used to be thrown away" below).
+  Silently proceeding to subscribe anyway — on the theory that the earlier unsubscribe
+  frame probably still made it out despite the reported failure, which `FrameSender`'s own
+  moduledoc says is often true — would reintroduce exactly the risk this whole fix exists
+  to close, on the one path where this package cannot check.
+
+  **This does leave one gap open, not disclosed anywhere else in this file: a permanently
+  stranded unsubscribe.** If every retry of `removed`'s own unsubscribe fails and this
+  package gives up, `state.shards[key].symbols` still moves to `wanted` (the same
+  optimistic bookkeeping every other reconcile path in this module already uses — coverage
+  is driven by `state.delivering`, never by this bookkeeping, so nothing about `coverage/1`
+  goes dishonest). But the next unconditional resubscribe cycle only re-issues a plain
+  `subscribe` for whatever `state.shards[key].symbols` now says — it does not itself retry
+  the stranded unsubscribe. If `removed` genuinely never reached the venue in that failure
+  case, and the venue's ceiling is (per the measurement above) concurrent, a later
+  resubscribe adding `wanted` on top of a session that VENUE-SIDE still also holds
+  `removed` could in principle exceed the cap. This is disclosed rather than closed: this
+  package has no acknowledgement to wait on (see above), and building a cross-cycle
+  unsubscribe-retry ledger to close a gap this narrow — reachable only after a bounded
+  retry chain has already exhausted itself against a socket that is otherwise still
+  healthy enough to carry `subscribe` frames moments later — was judged not to clear its
+  own complexity bar, the same judgement this file already made once for an adaptive shard
+  size (see below, "an adaptive, self-shrinking shard size was considered and rejected").
+
+  **The reshuffle hazard that made this real in the first place is unchanged, and still
+  handled — just more cheaply now.** `reshard/1` still recomputes chunks on every
+  `subscribe/3`, `unsubscribe/2` and `update_symbols/2`, and a `MapSet`'s enumeration order
+  still shifts on almost any membership change (moving 8 of 406 symbols on one add, 3 on
+  one removal — the same proof as before, unchanged by this fix). What changed is what
+  happens when that reshuffle hands an already-open shard symbols it has never carried
+  before: it no longer costs a reconnect, a fresh snapshot for the shard's entire unchanged
+  membership, and a coverage gap while a brand-new socket comes up — it costs exactly two
+  frames, in order, on the connection that was already open.
+
+  *(This section used to end with two open probes recommended for a future consumer to
+  run — "attempt-counting" and "cumulative distinct-count." Probe 1 above IS the
+  attempt-counting probe; it is no longer open. The one thing still genuinely open is the
+  permanently-stranded-unsubscribe gap two paragraphs up — a different question from the
+  cumulative-vs-concurrent one this section closes.)*
 
   ## A refusal is not always a clean gate — observed, not explained
 
@@ -326,9 +436,16 @@ defmodule DpExchange.Coinbase.Feed do
   **At `@level2_pairs_per_socket` = 30 this package should never itself trigger a
   partial refusal, and that reasoning was checked, not assumed:** every subscribe this
   module sends for a `level2` shard carries at most 30 symbols — `wanted_symbols` per
-  shard is `≤ @level2_pairs_per_socket` by construction, and the fix above now also
-  bounds every socket's lifetime subscription count the same way. Nothing in this
-  package's own behaviour asks for 31 or more at once. Should the venue nonetheless
+  shard is `≤ @level2_pairs_per_socket` by construction — and the unsubscribe-before-
+  subscribe reconcile above (see "unsubscribe before subscribe") keeps every socket's
+  CONCURRENT count within that same bound at every instant of a reconcile, not only at
+  rest, regardless of which of Coinbase's two possible countings turns out to be real.
+  Nothing in this package's own behaviour asks for 31 or more at once. (These partial
+  refusals were themselves observed on SINGLE, oversized subscribes — the same shape as
+  the 2026-08-26 incident and the `level2_pairs_per_socket` option's own warning below,
+  neither of which this package's own behaviour triggers either — not on the cumulative
+  overage the 2026-09-07 probes above exercised; see "unsubscribe before subscribe" for why
+  those two shapes are not assumed to behave alike.) Should the venue nonetheless
   answer a `rate_limited` notice while some of that same shard's symbols are genuinely
   delivering — the exact shape DpCryptoManagement observed — `coverage/1` and
   `coverage_by_kind/1` need no special case to stay honest: both are built entirely from
@@ -779,16 +896,23 @@ defmodule DpExchange.Coinbase.Feed do
   @subscribe_retry_delay_ms 8_000
 
   # One initial attempt plus this many retries. Bounded deliberately — see "not every
-  # failure can be fixed by waiting" in the moduledoc.
+  # failure can be fixed by waiting" in the moduledoc. Shared between a plain channel
+  # subscribe and a reconcile's two phases (unsubscribe, then subscribe — see
+  # `attempt_channel_reconcile/6` and the moduledoc's "unsubscribe before subscribe"
+  # section), rather than each phase inventing its own bound for the identical
+  # underlying wait.
   #
   # The whole retry chain for one channel subscribe must finish well inside a resubscribe
   # cycle, or its tail would stack fresh frames onto a socket the next unconditional
-  # re-issue is about to hit again (see `next_resubscribe_delay/1`). Worst case:
-  # `@max_subscribe_retries * @subscribe_retry_delay_ms` = 16_000ms — comfortably inside
-  # the 60s default and inside any interval `next_resubscribe_delay/1` computes (which
-  # only ever extends the interval, never shortens it). No per-shard channel offset to add
-  # any more: each socket carries exactly one channel now, so there is no "second channel
-  # on this socket" delay to stack on top.
+  # re-issue is about to hit again (see `next_resubscribe_delay/1`). Worst case for a
+  # PLAIN subscribe: `@max_subscribe_retries * @subscribe_retry_delay_ms` = 16_000ms. A
+  # reconcile that both loses and gains symbols can pay this twice in sequence — the
+  # unsubscribe phase exhausting its own retries before the subscribe phase even starts
+  # its first attempt — for a worst case of 32_000ms. Both are comfortably inside the 60s
+  # default and inside any interval `next_resubscribe_delay/1` computes (which only ever
+  # extends the interval, never shortens it). No per-shard channel offset to add any more:
+  # each socket carries exactly one channel now, so there is no "second channel on this
+  # socket" delay to stack on top.
   @max_subscribe_retries 2
 
   # Backoff for a retried alias-map fetch — see the moduledoc's "the fetch has to wait,
@@ -924,9 +1048,14 @@ defmodule DpExchange.Coinbase.Feed do
           "module's own moduledoc, \"why 30\"). This value is honoured anyway: absorbing " <>
           "a venue-side change without a package release is the reason this option " <>
           "exists, and this package cannot verify whether the venue's ceiling has moved. " <>
-          "But if it has not, expect a level2 subscribe at this size to be refused and " <>
-          "close the socket — a total coverage loss for that whole shard, reported as a " <>
-          "`:rate_limited` Core.Notice, not merely the symbols past the old boundary."
+          "But if it has not, every ordinary level2 subscribe at this size is a single " <>
+          "subscribe over the venue's real limit — the shape that closed the whole " <>
+          "socket in the one incident on record for it (2026-08-26), a total coverage " <>
+          "loss for that shard, reported as a `:rate_limited` Core.Notice. A LATER " <>
+          "measurement (2026-09-07) found a refusal that did not close the socket, but " <>
+          "that was of cumulative overage across two smaller subscribes, not one " <>
+          "oversized one — see the moduledoc's \"unsubscribe before subscribe\" section. " <>
+          "Which of those applies here is not settled; plan for the worse one."
       )
     end
 
@@ -1272,46 +1401,25 @@ defmodule DpExchange.Coinbase.Feed do
     attempt_channel_subscribe(socket, channel, symbols, credentials, attempt, state)
   end
 
-  def handle_info({:channel_unsubscribe, socket, channel, symbols}, state) do
-    if Process.alive?(socket), do: Socket.unsubscribe(socket, channel, symbols)
-    {:noreply, state}
+  # `removed` is unsubscribed here before `added` is subscribed — see the moduledoc's
+  # "unsubscribe before subscribe" section for why this ONE deferred message, rather than
+  # the two independent `Process.send_after/3` calls this replaced, is what makes that
+  # order a property of ordinary sequential code instead of two timers firing at the same
+  # tick. `attempt_channel_reconcile/6` is the whole implementation; this clause and the
+  # one below it only supply the starting attempt number, the same two-clause shape
+  # `:channel_subscribe` already uses.
+  def handle_info({:channel_reconcile, socket, channel, removed, added, credentials}, state) do
+    attempt_channel_reconcile(socket, channel, removed, added, credentials, 1, state)
   end
 
-  # The deferred half of `replace_level2_shard/7`'s async clause — see the moduledoc's
-  # "cumulative vs. concurrent" section. `expected_current` is what this shard carried
-  # when the replace was scheduled; if `state.shards[key]` no longer matches it, something
-  # else already touched this shard (a later reshard, an unsubscribe that dropped it, a
-  # resubscribe cycle) and that change is authoritative — acting on this stale intent now
-  # would clobber it, so it is dropped instead.
-  def handle_info({:replace_shard_socket, channel, index, expected_current, wanted}, state) do
-    key = {channel, index}
-
-    case get_in(state.shards[key]) do
-      %{socket: old_socket, symbols: ^expected_current} ->
-        case get_socket(state) do
-          {:ok, new_socket, state} ->
-            terminate_socket(old_socket)
-            state = put_in(state.shards[key], %{socket: new_socket, symbols: wanted})
-            attempt_channel_subscribe(new_socket, channel, wanted, state.credentials, 1, state)
-
-          {:error, reason} ->
-            # The old socket is untouched and keeps serving `expected_current` — only the
-            # symbols this replace would have ADDED are what stays absent from coverage,
-            # so that (not the shard's whole target) is what gets reported missing here.
-            Logger.warning(
-              "[Coinbase Feed] #{channel} shard #{index} replacement socket did not open " <>
-                "(#{inspect(reason)}) — its existing socket keeps its current symbols; " <>
-                "the newly added ones stay on the internal poll until the next resubscribe " <>
-                "cycle retries this shard"
-            )
-
-            notify_shard_open_failed(state, channel, index, wanted -- expected_current, reason)
-            {:noreply, state}
-        end
-
-      _stale_or_gone ->
-        {:noreply, state}
-    end
+  # The retry this module schedules when the UNSUBSCRIBE half of a reconcile fails
+  # transiently — see `handle_unsubscribe_failure/8`. `attempt` starts at `2` here; the
+  # first attempt is always the 5-tuple clause above.
+  def handle_info(
+        {:channel_reconcile, socket, channel, removed, added, credentials, attempt},
+        state
+      ) do
+    attempt_channel_reconcile(socket, channel, removed, added, credentials, attempt, state)
   end
 
   def handle_info(:resubscribe, state) do
@@ -1546,6 +1654,7 @@ defmodule DpExchange.Coinbase.Feed do
   end
 
   defp touch_shard(state, key, new_shards, sync: sync?, delay: delay) do
+    {channel, _index} = key
     wanted_symbols = Map.fetch!(new_shards, key)
 
     case get_in(state.shards[key]) do
@@ -1553,7 +1662,16 @@ defmodule DpExchange.Coinbase.Feed do
         open_shard(state, key, wanted_symbols, sync?, delay)
 
       %{symbols: current, socket: socket} ->
-        reconcile_shard(state, key, socket, current, wanted_symbols, sync?, delay)
+        reconcile_shard_in_place(
+          state,
+          key,
+          channel,
+          socket,
+          current,
+          wanted_symbols,
+          sync?,
+          delay
+        )
     end
   end
 
@@ -1574,46 +1692,35 @@ defmodule DpExchange.Coinbase.Feed do
     {:ok, state}
   end
 
-  # `level2` gets its own clause — see the moduledoc's "cumulative vs. concurrent"
-  # section. `added` is computed here, once, purely to decide which path this shard takes:
-  # growing an already-open `level2` shard replaces the socket instead of mutating it, so
-  # no `level2` socket this module opens is ever asked, over its whole lifetime, to carry
-  # more distinct products than one shard's worth. A shard that only loses symbols cannot
-  # grow that count, so it keeps mutating its existing socket in place exactly as before.
-  defp reconcile_shard(state, {"level2", _index} = key, socket, current, wanted, sync?, delay) do
-    if wanted -- current == [] do
-      reconcile_shard_in_place(state, key, "level2", socket, current, wanted, sync?, delay)
-    else
-      replace_level2_shard(state, key, socket, current, wanted, sync?, delay)
-    end
-  end
-
-  # `ticker` has no known per-session ceiling (see the moduledoc), so there is nothing for
-  # it to cumulatively exceed — it keeps mutating its own already-open socket in place,
-  # exactly as every channel did before `level2` needed this distinction.
-  defp reconcile_shard(state, {"ticker", _index} = key, socket, current, wanted, sync?, delay) do
-    reconcile_shard_in_place(state, key, "ticker", socket, current, wanted, sync?, delay)
-  end
-
+  # `removed` is unsubscribed before `added` is subscribed, on the SAME already-open
+  # socket, for BOTH channels and in all three shapes a shard's membership can change
+  # (only losses, only gains, both at once) — see the moduledoc's "unsubscribe before
+  # subscribe" section for why this replaces the socket-replacement fix `level2` used to
+  # need here, and what guarantee the ordering actually rests on. Shrinking before growing
+  # is what keeps the socket's own concurrently-held product count at or under
+  # `state.level2_pairs_per_socket` at every instant of a reconcile, not merely at rest:
+  # the transient count is bounded by `max(length(current), length(wanted))`, both already
+  # bounded by shard construction. `ticker` takes the identical path — it has no known
+  # ceiling to protect, so the ordering costs it nothing and buys it nothing, but there is
+  # no longer a reason for the two channels to reconcile differently at all.
   defp reconcile_shard_in_place(state, key, channel, socket, current, wanted, true, _delay) do
     added = wanted -- current
     removed = current -- wanted
 
+    # `added` is never sent while `removed`'s own unsubscribe has not succeeded — see the
+    # moduledoc. No retry here, matching every other synchronous, call-reply branch in this
+    # module (`open_shard/5`'s own sync clause included): a caller subscribing to the
+    # primary shard gets back exactly what happened on this one attempt, not a hidden
+    # multi-second retry loop stealing its `@call_timeout` budget.
     result =
-      cond do
-        not Process.alive?(socket) ->
-          :ok
-
-        added != [] ->
-          result = Socket.subscribe(socket, channel, added, state.credentials)
-          if removed != [], do: Socket.unsubscribe(socket, channel, removed)
-          result
-
-        removed != [] ->
-          Socket.unsubscribe(socket, channel, removed)
-
-        true ->
-          :ok
+      if Process.alive?(socket) do
+        case unsubscribe_step(socket, channel, removed) do
+          :ok when added == [] -> :ok
+          :ok -> Socket.subscribe(socket, channel, added, state.credentials)
+          {:error, _reason} = error -> error
+        end
+      else
+        :ok
       end
 
     {result, put_in(state.shards[key], %{socket: socket, symbols: wanted})}
@@ -1621,29 +1728,26 @@ defmodule DpExchange.Coinbase.Feed do
 
   # `delay` staggers this shard's frames past every OTHER shard `reshard/1` is touching in
   # the same call, the same way `open_shard/5`'s async clause already staggers opening a
-  # brand-new socket — see `reshard/1`'s "position * shard_spacing_ms" comment. Before
-  # this fix `delay` was computed by `reshard/1` and then silently dropped here: a single
-  # `update_symbols/2` that reshuffled several ALREADY-OPEN shards at once scheduled every
-  # one of their subscribes at the same instant regardless. Because `Socket.subscribe/4`
-  # blocks THIS process (via `FrameSender`, up to `WebSockex.send_frame/2`'s 5s window)
-  # once `attempt_channel_subscribe/6` runs it, several such messages landing on this
-  # GenServer's mailbox together serialise into back-to-back blocking sends — a socket
-  # answering slowly stalls this shard's own subscribe AND every later one queued behind
-  # it in the SAME mailbox, taking `coverage/1`, `subscribe/3` and every other call to this
-  # `Feed` down with it for as long as the stall lasts. Staggering by `delay` spreads that
-  # risk out exactly as it already is for a newly-opened shard.
+  # brand-new socket — see `reshard/1`'s "position * shard_spacing_ms" comment. Before the
+  # staggering fix this replaced, `delay` was computed by `reshard/1` and then silently
+  # dropped here: a single `update_symbols/2` that reshuffled several ALREADY-OPEN shards
+  # at once scheduled every one of their frames at the same instant regardless.
+  #
+  # Unsubscribe and subscribe are ONE deferred message now, not two independent
+  # `Process.send_after/3` calls at the identical `delay` — see the moduledoc. Two timers
+  # scheduled for the same tick leave their relative firing order to however the BEAM's
+  # timer wheel happens to break the tie, which this module does not get to assume when
+  # that order is load-bearing. Folding both into the single `{:channel_reconcile, ...}`
+  # message `attempt_channel_reconcile/6` handles makes the order a property of ordinary,
+  # sequential Elixir code instead.
   defp reconcile_shard_in_place(state, key, channel, socket, current, wanted, false, delay) do
     added = wanted -- current
     removed = current -- wanted
 
-    if removed != [] and Process.alive?(socket) do
-      Process.send_after(self(), {:channel_unsubscribe, socket, channel, removed}, delay)
-    end
-
-    if added != [] and Process.alive?(socket) do
+    if (added != [] or removed != []) and Process.alive?(socket) do
       Process.send_after(
         self(),
-        {:channel_subscribe, socket, channel, added, state.credentials},
+        {:channel_reconcile, socket, channel, removed, added, state.credentials},
         delay
       )
     end
@@ -1651,43 +1755,143 @@ defmodule DpExchange.Coinbase.Feed do
     {:ok, put_in(state.shards[key], %{socket: socket, symbols: wanted})}
   end
 
-  # Replaces rather than mutates — see the moduledoc's "cumulative vs. concurrent"
-  # section. Synchronous only for the one shard `reshard/1` touches inline (`sync?:
-  # true`); a caller's reply must reflect whether the replacement actually landed.
-  # `state.shards[key]` is left untouched on failure, at either step, so a still-working
-  # old socket's symbols are never dropped for a replacement that never took — the caller
-  # sees `{:error, reason}`, exactly as any other failed synchronous subscribe, and can
-  # retry the same way.
-  defp replace_level2_shard(state, key, old_socket, _current, wanted, true, _delay) do
-    case get_socket(state) do
-      {:ok, new_socket, state} ->
-        case Socket.subscribe(new_socket, "level2", wanted, state.credentials) do
-          :ok ->
-            terminate_socket(old_socket)
-            {:ok, put_in(state.shards[key], %{socket: new_socket, symbols: wanted})}
+  defp unsubscribe_step(_socket, _channel, []), do: :ok
 
-          {:error, reason} ->
-            terminate_socket(new_socket)
-            {{:error, reason}, state}
-        end
+  defp unsubscribe_step(socket, channel, removed),
+    do: Socket.unsubscribe(socket, channel, removed)
 
-      {:error, reason} ->
-        {{:error, reason}, state}
+  # `Socket.subscribe/4` for `added` only ever runs once `unsubscribe_step/3` has returned
+  # `:ok` for THIS message's own `removed` list — see `reconcile_shard_in_place/7`'s async
+  # clause and the moduledoc's "unsubscribe before subscribe" section. A transient
+  # unsubscribe failure retries the unsubscribe itself, the same bounded backoff a channel
+  # subscribe already gets (`handle_unsubscribe_failure/8`), rather than risk sending
+  # `added` while `removed` may still be live on the venue's own session.
+  defp attempt_channel_reconcile(socket, channel, removed, added, credentials, attempt, state) do
+    if Process.alive?(socket) do
+      case unsubscribe_step(socket, channel, removed) do
+        :ok when added == [] ->
+          :ok
+
+        :ok ->
+          attempt_channel_subscribe(socket, channel, added, credentials, 1, state)
+
+        {:error, reason} ->
+          handle_unsubscribe_failure(
+            socket,
+            channel,
+            removed,
+            added,
+            credentials,
+            attempt,
+            reason,
+            state
+          )
+      end
+    end
+
+    {:noreply, state}
+  end
+
+  # Mirrors `handle_subscribe_failure/6`, for the unsubscribe half of a reconcile. Every
+  # reason `Socket.unsubscribe/3` can return comes from `FrameSender` alone — unlike a
+  # subscribe, it never builds a JWT or checks credentials — so `transient_frame_failure?/1`
+  # says `true` here in every case this module has ever observed; the non-transient branch
+  # exists for the same "do not assume a shape that happens to hold today" reason
+  # `handle_subscribe_failure/6` keeps its own.
+  #
+  # Exhausting the retries does NOT fall through to subscribing `added` anyway — that
+  # would be exactly the risk this whole change exists to avoid: sending `added` while
+  # `removed` was never confirmed to have left the venue's own session. The shard's
+  # bookkeeping still moves to `wanted` regardless (`reconcile_shard_in_place/7`), so the
+  # next unconditional resubscribe cycle re-issues a plain `subscribe` for the shard's
+  # whole current set — it does not itself retry this stranded unsubscribe. See the
+  # moduledoc for why that residual gap is disclosed rather than closed.
+  defp handle_unsubscribe_failure(
+         socket,
+         channel,
+         removed,
+         added,
+         credentials,
+         attempt,
+         reason,
+         state
+       ) do
+    cond do
+      not transient_frame_failure?(reason) ->
+        Logger.warning(
+          "[Coinbase Feed] #{channel} unsubscribe for #{length(removed)} symbol(s) failed " <>
+            "permanently (#{inspect(reason)}) — not retrying; withholding " <>
+            "#{length(added)} newly-added symbol(s) on this reconcile"
+        )
+
+        notify_unsubscribe_failed(
+          state,
+          channel,
+          removed,
+          added,
+          reason,
+          "this will keep failing every cycle until it is corrected"
+        )
+
+      attempt > @max_subscribe_retries ->
+        Logger.warning(
+          "[Coinbase Feed] #{channel} unsubscribe for #{length(removed)} symbol(s) failed " <>
+            "after #{attempt} attempt(s) (#{inspect(reason)}) — giving up; withholding " <>
+            "#{length(added)} newly-added symbol(s) on this reconcile"
+        )
+
+        notify_unsubscribe_failed(
+          state,
+          channel,
+          removed,
+          added,
+          reason,
+          "it may recover at the next unconditional resubscribe cycle"
+        )
+
+      true ->
+        Logger.warning(
+          "[Coinbase Feed] #{channel} unsubscribe for #{length(removed)} symbol(s) failed " <>
+            "(#{inspect(reason)}), attempt #{attempt}/#{@max_subscribe_retries + 1} — " <>
+            "retrying in #{state.subscribe_retry_delay_ms}ms before subscribing " <>
+            "#{length(added)} newly-added symbol(s)"
+        )
+
+        Process.send_after(
+          self(),
+          {:channel_reconcile, socket, channel, removed, added, credentials, attempt + 1},
+          state.subscribe_retry_delay_ms
+        )
     end
   end
 
-  # Deferred the same way `open_shard/5`'s async clause defers opening a brand-new socket
-  # — see `reshard/1`'s staggering. `current` travels in the `{:replace_shard_socket, ...}`
-  # message so the handler can tell whether anything else touched this shard since this
-  # was scheduled; if so, that later change is authoritative and this stale replace is
-  # dropped. `state.shards[key]` is deliberately left pointing at `old_socket` with its
-  # ACTUAL (not yet grown) symbol set until the replacement lands — recording `wanted`
-  # here early would tell a second, interleaved reshard call that the old socket already
-  # carries symbols it does not, which is exactly the false belief that let this module
-  # mutate a live `level2` session past its shard size in the first place.
-  defp replace_level2_shard(state, {channel, index}, _old_socket, current, wanted, false, delay) do
-    Process.send_after(self(), {:replace_shard_socket, channel, index, current, wanted}, delay)
-    {:ok, state}
+  # Same shape as `notify_subscribe_failed/5` — `:coverage_change` is Core's kind for
+  # exactly this fact: subscribed intent that did not become delivery. Phrased for the
+  # unsubscribe half specifically, and naming any withheld `added` symbols, rather than
+  # reusing `notify_subscribe_failed/5` and reporting "0 symbol(s)" for a shard that was
+  # only ever losing symbols in the first place.
+  defp notify_unsubscribe_failed(state, channel, removed, added, reason, outlook) do
+    message =
+      if added == [] do
+        "#{channel} unsubscribe for #{length(removed)} symbol(s) never took — #{outlook}"
+      else
+        "#{channel} unsubscribe for #{length(removed)} symbol(s) never took — #{outlook}; " <>
+          "#{length(added)} newly-added symbol(s) were withheld on this reconcile as a result"
+      end
+
+    notice =
+      Notice.new(:coverage_change, :coinbase,
+        severity: :warning,
+        message: message,
+        details: %{
+          channel: channel,
+          removed_count: length(removed),
+          added_count: length(added),
+          reason: inspect(reason)
+        }
+      )
+
+    fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})
   end
 
   # See the moduledoc's "a timed-out subscribe used to be thrown away" section. Re-checks
@@ -1712,15 +1916,19 @@ defmodule DpExchange.Coinbase.Feed do
 
   # Transient: the socket was busy decoding a burst or briefly unreachable, and the
   # identical request can reasonably succeed once it catches up — worth retrying.
-  # Everything else (chiefly `{:credentials_required, channel}`) is a fact about the
-  # request itself that no amount of waiting changes — retrying it would only loop.
-  defp transient_subscribe_failure?(:send_timeout), do: true
-  defp transient_subscribe_failure?({:send_exit, _reason}), do: true
-  defp transient_subscribe_failure?(_reason), do: false
+  # Everything else (chiefly `{:credentials_required, channel}`, only ever possible on a
+  # subscribe — see `Socket.subscription_message/3`) is a fact about the request itself
+  # that no amount of waiting changes — retrying it would only loop. Shared between a
+  # channel subscribe and the unsubscribe half of a reconcile
+  # (`handle_unsubscribe_failure/8`): both send frames through the identical
+  # `FrameSender` path and fail in the identical two shapes.
+  defp transient_frame_failure?(:send_timeout), do: true
+  defp transient_frame_failure?({:send_exit, _reason}), do: true
+  defp transient_frame_failure?(_reason), do: false
 
   defp handle_subscribe_failure(socket, channel, symbols, credentials, attempt, reason, state) do
     cond do
-      not transient_subscribe_failure?(reason) ->
+      not transient_frame_failure?(reason) ->
         Logger.warning(
           "[Coinbase Feed] #{channel} subscribe for #{length(symbols)} symbol(s) failed " <>
             "permanently (#{inspect(reason)}) — not retrying"
@@ -1817,16 +2025,6 @@ defmodule DpExchange.Coinbase.Feed do
       {:ok, socket} -> {:ok, socket, state}
       {:error, reason} -> {:error, reason}
     end
-  end
-
-  # Forces an old session closed rather than leaving it running unmanaged — see
-  # `replace_level2_shard/7` and `reconcile_shard/7`'s `"level2"` clause in the
-  # moduledoc's "cumulative vs. concurrent" section. WebSockex exposes no public graceful
-  # close, and `:kill` is the one exit reason no process can trap or ignore, so this is
-  # the one way to guarantee the old connection actually drops rather than lingering,
-  # still subscribed under a symbol set this module has already stopped tracking.
-  defp terminate_socket(socket) do
-    if Process.alive?(socket), do: Process.exit(socket, :kill)
   end
 
   # `Types.Quote`, `Types.OrderBook` and `Types.OrderBookDelta` all carry `:symbol`;
