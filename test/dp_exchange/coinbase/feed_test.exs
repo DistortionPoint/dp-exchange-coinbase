@@ -908,6 +908,117 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
   end
 
+  describe "level2_pairs_per_socket is a supervision option — DpCryptoManagement issue #22" do
+    # A hardcoded venue fact costs every consumer a package release and a redeploy when
+    # the venue's own ceiling moves; an option lets a consumer absorb that the same day.
+    # See feed.ex's own moduledoc, "level2_pairs_per_socket — a supervision option".
+    @credentials %{api_key: "k", api_secret: "s"}
+
+    test "the default matches the measured venue ceiling, 30" do
+      assert :sys.get_state(start_feed()).level2_pairs_per_socket == 30
+    end
+
+    test "an explicit nil falls back to the default rather than crashing at start" do
+      # The same nil-vs-absent trap `resubscribe_interval_ms` already guards against — a
+      # venue package forwards its own opts wholesale, and `nil` is a real value a caller
+      # (or a config layer) can hand through.
+      name = :"feed_#{System.unique_integer([:positive])}"
+
+      pid =
+        start_supervised!(
+          {Feed, name: name, alias_map_source: fn -> {:ok, %{}} end, level2_pairs_per_socket: nil}
+        )
+
+      assert :sys.get_state(pid).level2_pairs_per_socket == 30
+    end
+
+    test "an explicit override actually changes level2's shard composition" do
+      # 12 symbols at the default (30) would be a single level2 shard. At an explicit
+      # override of 5, `chunk_every(12, 5)` is `[5, 5, 2]` — three shards. Proven the same
+      # way the fixed-size sharding tests above are: the venue endpoint is unreachable, so
+      # every shard's own async connect fails and reports itself via `:coverage_change`,
+      # and the number and indices of those reports pin the actual chunking that ran.
+      symbols = for n <- 1..12, do: "SYM#{n}-USD"
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           url: "ws://127.0.0.1:1/nowhere",
+           credentials: @credentials,
+           level2_pairs_per_socket: 5,
+           alias_map_source: fn -> {:ok, %{}} end}
+        )
+
+      assert :sys.get_state(feed).level2_pairs_per_socket == 5
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      # The synchronous primary is the sole `ticker` shard (`shard_key_order/2` sorts it
+      # first); its failure is this call's own reply.
+      assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
+
+      for shard_index <- [0, 1, 2] do
+        assert_receive {:dp_exchange, :coinbase,
+                        %Notice{
+                          kind: :coverage_change,
+                          details: %{channel: "level2", shard: ^shard_index}
+                        }},
+                       6_000
+      end
+
+      assert Process.alive?(feed)
+    end
+
+    test "a value below 1 is refused at start, loudly, rather than coerced" do
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stacktrace}} =
+               Feed.start_link(
+                 name: :"feed_#{System.unique_integer([:positive])}",
+                 alias_map_source: fn -> {:ok, %{}} end,
+                 level2_pairs_per_socket: 0
+               )
+
+      assert message =~ "level2_pairs_per_socket must be a positive integer"
+    end
+
+    test "a non-integer value is refused at start, loudly, rather than coerced" do
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stacktrace}} =
+               Feed.start_link(
+                 name: :"feed_#{System.unique_integer([:positive])}",
+                 alias_map_source: fn -> {:ok, %{}} end,
+                 level2_pairs_per_socket: "30"
+               )
+
+      assert message =~ "level2_pairs_per_socket must be a positive integer"
+    end
+
+    test "a value above the measured ceiling is honoured, not capped, and warns loudly" do
+      # The consumer's whole reason for asking for this option: absorbing a venue-side
+      # change without a package release. Capping at 30 would silently defeat that on the
+      # day it is actually needed, so this package honours it instead — legibly, via a
+      # loud warning naming the measured ceiling and the concrete risk, never silently.
+      name = :"feed_#{System.unique_integer([:positive])}"
+
+      log =
+        capture_log(fn ->
+          pid =
+            start_supervised!(
+              {Feed,
+               name: name, alias_map_source: fn -> {:ok, %{}} end, level2_pairs_per_socket: 40}
+            )
+
+          assert :sys.get_state(pid).level2_pairs_per_socket == 40
+        end)
+
+      assert log =~ "level2_pairs_per_socket 40 is above the measured venue ceiling of 30"
+      assert log =~ "DpCryptoManagement, issue #22"
+    end
+  end
+
   describe "internal messages — the staggered async paths" do
     # These are the messages `reshard/1` schedules with `Process.send_after/3` for every
     # shard beyond the first, and for the resubscribe timer. Driven directly rather than

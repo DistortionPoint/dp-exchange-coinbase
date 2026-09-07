@@ -211,8 +211,10 @@ largest value with positive evidence of acceptance; `31` is the smallest with po
 evidence of refusal. No Coinbase document states this number even now — it is measured
 venue behaviour, not a documented figure.
 
-So `level2` groups symbols at **30 per socket**, independent of and smaller than
-`ticker`'s 100. A universe that needs 5 `ticker` sockets needs 14 `level2` sockets for the
+So `level2` groups symbols at **30 per socket by default**, independent of and smaller
+than `ticker`'s 100 — and, as of this version, that `30` is a supervision option you can
+change, not only a constant you have to wait on a release to see moved. A universe that
+needs 5 `ticker` sockets needs 14 `level2` sockets for the
 same 406-symbol scope (19 total), and every one of them — either channel — is staggered
 onto the same connect sequence `@shard_spacing_ms` already describes above, with every
 `ticker` shard ordered ahead of every `level2` shard so `ticker`'s own boot-time coverage
@@ -245,6 +247,46 @@ but it can mean a very brief coverage gap for the newly-added symbols on a shard
 while the new socket comes up, reported the same way any other failed-to-open shard is:
 `subscribe_notices/1` receives a `:coverage_change` notice, and `coverage/1` simply does
 not show them covered yet.
+
+### `level2_pairs_per_socket` — a supervision option, so a venue-side change doesn't need a release
+
+```elixir
+children = [{DpExchange.Coinbase, credentials: my_credentials(), level2_pairs_per_socket: 25}]
+```
+
+Default is **30** — DpCryptoManagement's own measured ceiling, live-bisected against the
+real venue on **2026-09-06** (see above). Pass a larger or smaller value and every
+`level2` shard chunks to it from boot instead.
+
+**Below 1, or not an integer, is refused at start** — `Feed.start_link/1` (and therefore
+your own supervision tree's `start_link/1`) fails with an `ArgumentError` rather than
+silently running with a value that could never have sized a shard.
+
+**Above 30 is honoured, not capped — with a loud warning, not a silent one.** This
+package cannot verify Coinbase's real ceiling itself (see above — that would be tier-3,
+authenticated, live probing, which this repo never runs), so it does not get to assume a
+value you set above today's measurement is wrong. It logs the measured ceiling, the date
+and source, and the concrete risk before proceeding: **a `level2` subscribe the venue
+refuses closes the whole socket, losing that entire shard's coverage — not just the
+symbols past the line.** If you are setting this above 30 because you have your own
+evidence the venue's limit moved, that is exactly what this option is for. If you are
+setting it above 30 without such evidence, expect the warning's risk to be the outcome.
+
+**The default is not shrunk for headroom, on purpose.** `30` is the actual boundary — `30`
+accepted, `31` refused, confirmed by interleaving and a contamination check — not merely
+"the largest value that hasn't failed yet" the way this package's superseded `6` was.
+Sitting exactly at a boundary that precise is a deliberate choice, not an oversight: see
+`feed.ex`'s own moduledoc, "`level2_pairs_per_socket` — a supervision option," for the
+full reasoning, including why headroom on shard size does not protect against this
+package's one still-open risk (whether the unconditional 60-second resubscribe counts
+toward a *cumulative*, attempt-shaped ceiling — see "cumulative vs. concurrent" in that
+same moduledoc). If you want margin below 30 for your own reasons, this option is exactly
+how you take it — pass a smaller value yourself.
+
+**`ticker`'s own shard size (100) has no equivalent option**, on purpose: it has no known
+per-session ceiling to tune against, measured or suspected. This option exists because
+`level2`'s ceiling is a real, located venue fact a consumer already hit in production, not
+because "every constant should also be an option."
 
 ## Testing against this package
 

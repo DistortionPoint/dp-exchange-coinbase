@@ -85,7 +85,9 @@ concurrent" section, for the full account. Two things came out of that check:
    exceeded it. This was real regardless of what Coinbase's actual ceiling semantics turn
    out to be, and is now fixed: such a shard gets a freshly opened socket instead, so no
    `level2` socket this package opens is ever asked, over its whole lifetime, to carry
-   more distinct products than one shard's worth (`@level2_pairs_per_socket`, `30`).
+   more distinct products than one shard's worth — `@default_level2_pairs_per_socket`,
+   `30`, or whatever a consumer overrides it to via the `level2_pairs_per_socket`
+   supervision option (added after this investigation; see `feed.ex`'s own moduledoc).
 
 2. **Still genuinely open, and not fixed here:** the unconditional 60-second resubscribe
    this package runs to recover from a silent WebSockex reconnect re-issues a shard's
@@ -131,11 +133,16 @@ rather than a single gate, and this is recorded here as an **observed, unexplain
 characteristic** — dated and attributed, not rationalised into a theory neither party has
 evidence for.
 
-**This package should never itself trigger this**, and that reasoning was checked, not
-assumed: every `level2` subscribe `Feed` sends carries at most `@level2_pairs_per_socket`
-(30) symbols, by construction, and the cumulative-growth fix above now bounds each
-socket's lifetime subscription count the same way. Nothing in this package's own behaviour
-asks the venue for 31 or more products at once. Should the venue nonetheless answer a
+**This package should never itself trigger this at the default.** Every `level2`
+subscribe `Feed` sends carries at most `state.level2_pairs_per_socket` symbols, by
+construction (`@default_level2_pairs_per_socket`, `30`, unless a consumer overrides it via
+the `level2_pairs_per_socket` supervision option added after this investigation), and the
+cumulative-growth fix above now bounds each socket's lifetime subscription count the same
+way. A consumer who overrides the option above `30` can trigger exactly this refusal
+shape on purpose — that risk is disclosed loudly at start (see `feed.ex`'s own moduledoc)
+rather than hidden, but it is no longer unconditionally true that "nothing in this
+package's own behaviour asks the venue for 31 or more products at once." Should the venue
+nonetheless answer a
 `rate_limited` notice while some of that same shard's symbols are genuinely delivering —
 the exact shape observed above — `coverage/1` and `coverage_by_kind/1` need no special
 case to stay honest: both are built entirely from symbols that actually delivered a

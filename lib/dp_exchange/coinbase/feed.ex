@@ -168,6 +168,68 @@ defmodule DpExchange.Coinbase.Feed do
   in this file, and lowering the constant is a one-line, reviewable change rather than a
   runtime decision this module made silently on its own.
 
+  ## `level2_pairs_per_socket` — a supervision option, not only a constant
+
+  What was rejected above is a *runtime, self-adjusting* resize — this module deciding on
+  its own, mid-flight, to shrink the shard size because the venue refused one. What ships
+  here instead is a *static, consumer-set* one: `30` is still the compiled-in default, but
+  a caller of `DpExchange.Coinbase` (or `Feed.start_link/1` directly) can pass
+  `level2_pairs_per_socket: n` and have every `level2` shard chunk to `n` from boot,
+  through `DpExchange.Coinbase.Supervisor`'s ordinary opts pass-through — no Supervisor
+  code change was needed, because `Feed` already reads its other diagnostic knobs
+  (`resubscribe_interval_ms`, `subscribe_retry_delay_ms`) the identical way.
+
+  This exists because the measured `30` is a fact about the venue on 2026-09-06, not a
+  fact about this package, and venue facts change. A hardcoded constant means a venue-side
+  change costs every consumer a package release and a redeploy; an option means a consumer
+  absorbs it the same day — DpCryptoManagement asked for exactly this
+  (`DistortionPoint/dp-exchange-core` issue #22) once they had already done the
+  measurement that justified it.
+
+  **Validated, not silently coerced — but only on the axis that is unconditionally
+  nonsense.** A non-integer or a value below `1` cannot chunk anything and is refused at
+  `init/1` (an `ArgumentError`, which fails `Feed.start_link/1` and therefore
+  `DpExchange.Coinbase.Supervisor.start_link/1`) rather than coerced into something that
+  happens to run. A value *above* the measured `30`, by contrast, is honoured, not
+  capped — deliberately.
+  Capping at `30` would quietly defeat the option's own stated purpose: a consumer setting
+  it above today's measurement is doing so *because* they believe the venue's own ceiling
+  has moved, which this package has no way to verify itself (see "why 30" above — this
+  repo cannot bisect an authenticated session live). Refusing to even try would leave the
+  option unable to do the one thing it was built for. What it gets instead is a loud
+  `Logger.warning` at start naming the measured ceiling, its date and source, and the
+  concrete risk: a `level2` subscribe over the venue's real limit is refused and closes
+  the socket, which drops that WHOLE shard's coverage, not merely the symbols past the
+  line — a materially worse failure than "the option did what it was told." The warning
+  makes that risk legible; it does not block it.
+
+  **The default stays at `30`, without injected headroom, and that was a deliberate
+  choice, not an oversight.** `30` is not "the largest value that has not yet failed"
+  (which `6` genuinely was, before this investigation) — it is the actual, located
+  boundary: `30` accepted, `31` refused, confirmed by interleaving and a contamination
+  check (see "why 30" above). Shrinking the *default* below a boundary that precise, on
+  this package's own initiative, would misrepresent what was measured — the whole point
+  of "declare what you measured, not what you assume." It would also buy nothing against
+  the one risk that is still genuinely open: the unconditional 60-second resubscribe
+  re-issuing unchanged symbols on an already-open socket forever (see "cumulative vs.
+  concurrent" below) is an *attempt*-shaped risk, not a *concurrent-membership*-shaped
+  one — a smaller shard does not reduce how many times that timer re-issues the same
+  request, so headroom on shard size does not address it. A consumer who nonetheless wants
+  margin against the concurrent ceiling — for reasons specific to their own scope or risk
+  tolerance — has exactly the lever to take it themselves: pass a smaller
+  `level2_pairs_per_socket`, e.g. `25`, and this package honours it precisely.
+
+  **`ticker` gets no equivalent option, on purpose, for now.** `@pairs_per_socket` (100)
+  is also a constant, also inherited rather than re-derived (see above), and also never
+  probed against this venue — the same three facts that motivated `level2`'s option. What
+  is different is that `level2`'s option answers a *known, located* venue ceiling a
+  consumer already hit in production; `ticker` has no known ceiling of any kind to tune
+  against, measured or suspected. An option with nothing to point it at is surface for a
+  problem that has not been demonstrated to exist — consistency-for-its-own-sake is not
+  this family's standard, evidence is. If `ticker` ever develops a measured ceiling the
+  way `level2` did, the fix is the same one this section documents, applied to
+  `@pairs_per_socket` instead: nothing about this design is `level2`-specific.
+
   ## Cumulative vs. concurrent — the ceiling this package cannot rule out by itself
 
   The consumer's own harness used a fresh `Socket.start_link/1` for every attempt **on
@@ -582,8 +644,8 @@ defmodule DpExchange.Coinbase.Feed do
   # sockets" section.
   @pairs_per_socket 100
 
-  # `level2`'s own shard size — deliberately NOT `@pairs_per_socket`. Not read from
-  # documentation: no Coinbase document states a per-session `level2` product ceiling
+  # `level2`'s own DEFAULT shard size — deliberately NOT `@pairs_per_socket`. Not read
+  # from documentation: no Coinbase document states a per-session `level2` product ceiling
   # (re-checked 2026-09-06), and this repo cannot probe an authenticated channel live to
   # find one itself (see the moduledoc). `30` is a live bisection DpCryptoManagement ran
   # against the real venue with real credentials — tier 3, structurally unavailable to
@@ -591,7 +653,15 @@ defmodule DpExchange.Coinbase.Feed do
   # boundary confirmed by interleaving and by a contamination check. See the moduledoc's
   # "why 30" section for the method and the "cumulative vs. concurrent" section for what
   # this number does and does not prove about a long-lived socket's own history.
-  @level2_pairs_per_socket 30
+  #
+  # Overridable via `:level2_pairs_per_socket` — see the moduledoc's own section on that
+  # option for why a hardcoded venue fact needed to become a supervision knob, what
+  # validation applies, and why the default here is not shrunk for headroom. The same
+  # "diagnostic knob, real default" shape as `@default_resubscribe_interval_ms` below,
+  # just validated at start where that one is not, because a nonsense value here (`0`, a
+  # float, a negative number) cannot chunk anything at all rather than merely picking an
+  # unwise cadence.
+  @default_level2_pairs_per_socket 30
 
   # Between opening each new socket, whichever channel it will carry. Opening several
   # connections in the same instant is a connect burst the venue answers with resets.
@@ -682,8 +752,9 @@ defmodule DpExchange.Coinbase.Feed do
 
   @doc """
   The scope split into one list per `ticker` socket. `level2` is chunked separately, at
-  its own, smaller size — see the moduledoc's "`level2` gets its own, smaller sockets"
-  section — and has no public function of its own, the same way it has no public
+  its own, smaller and independently configurable size — see the moduledoc's "`level2`
+  gets its own, smaller sockets" and "`level2_pairs_per_socket` — a supervision option"
+  sections — and has no public function of its own, the same way it has no public
   visibility anywhere else in this module.
   """
   @spec shards([String.t()]) :: [[String.t()]]
@@ -692,9 +763,11 @@ defmodule DpExchange.Coinbase.Feed do
 
   # `level2`'s own grouping — never exposed, for the same reason `shards/1` documents
   # itself as `ticker`-only above: this module's whole point is that a consumer cannot
-  # tell how data arrives, and per-channel shard sizes are exactly that.
-  defp level2_shards([]), do: []
-  defp level2_shards(symbols), do: Enum.chunk_every(symbols, @level2_pairs_per_socket)
+  # tell how data arrives, and per-channel shard sizes are exactly that. `size` is
+  # `state.level2_pairs_per_socket` at every call site — the caller-supplied or default
+  # value, already validated in `init/1`.
+  defp level2_shards([], _size), do: []
+  defp level2_shards(symbols, size), do: Enum.chunk_every(symbols, size)
 
   # Which channels this feed carries at all, given whether it has credentials — see
   # `Socket`'s `@authenticated_channels`. A credential-less caller only ever wanted the
@@ -705,9 +778,14 @@ defmodule DpExchange.Coinbase.Feed do
   defp active_channels(nil), do: ["ticker"]
   defp active_channels(_credentials), do: ["ticker", "level2"]
 
-  # Each channel's own grouping, at its own size — see `shards/1` and `level2_shards/1`.
-  defp shards_for(symbols, "ticker"), do: shards(symbols)
-  defp shards_for(symbols, "level2"), do: level2_shards(symbols)
+  # Each channel's own grouping, at its own size — see `shards/1` and `level2_shards/2`.
+  # `level2_pairs_per_socket` is unused for `ticker`, which has no per-channel size of
+  # its own to read from state (see the moduledoc's "ticker gets no equivalent option"
+  # paragraph).
+  defp shards_for(symbols, "ticker", _level2_pairs_per_socket), do: shards(symbols)
+
+  defp shards_for(symbols, "level2", level2_pairs_per_socket),
+    do: level2_shards(symbols, level2_pairs_per_socket)
 
   # `ticker` sorts ahead of `level2` wherever shard keys are ordered, so a call touching
   # both keeps its synchronous reply — and the front of any stagger sequence — on `ticker`,
@@ -719,6 +797,47 @@ defmodule DpExchange.Coinbase.Feed do
 
   defp shard_key_order({channel_a, index_a}, {channel_b, index_b}) do
     {channel_priority(channel_a), index_a} <= {channel_priority(channel_b), index_b}
+  end
+
+  # See the moduledoc's "`level2_pairs_per_socket` — a supervision option" section for
+  # the full reasoning; this is only the mechanism.
+  #
+  # Below `1` (or not an integer at all) is unconditionally nonsense — `Enum.chunk_every/2`
+  # cannot chunk anything to it — and is refused here, in `init/1`, rather than coerced
+  # into some nearby "safe" value: this family fails closed rather than substitutes.
+  # Raising here fails `GenServer.start_link/3` (and therefore `Feed.start_link/1` and
+  # `Supervisor.start_link/1`) synchronously with the exception, so a consumer sees why
+  # its own tree would not start rather than a `Feed` silently running with a value that
+  # could never have shaped a shard.
+  #
+  # A value ABOVE the measured `30` is deliberately NOT refused — capping it would defeat
+  # the option's own purpose (absorbing a venue-side change without a package release),
+  # and this repo has no way to verify whether such a change happened (see "why 30" in the
+  # moduledoc). It is instead honoured with a loud warning naming the measured ceiling,
+  # its date and source, and the concrete risk: an oversized `level2` subscribe is refused
+  # by the venue and closes the socket, losing that whole shard's coverage rather than
+  # only the symbols past the line.
+  defp validate_level2_pairs_per_socket!(value) when is_integer(value) and value >= 1 do
+    if value > @default_level2_pairs_per_socket do
+      Logger.warning(
+        "[Coinbase Feed] level2_pairs_per_socket #{value} is above the measured venue " <>
+          "ceiling of #{@default_level2_pairs_per_socket} (DpCryptoManagement, issue #22, " <>
+          "measured 2026-09-06 against the live venue with real credentials — see this " <>
+          "module's own moduledoc, \"why 30\"). This value is honoured anyway: absorbing " <>
+          "a venue-side change without a package release is the reason this option " <>
+          "exists, and this package cannot verify whether the venue's ceiling has moved. " <>
+          "But if it has not, expect a level2 subscribe at this size to be refused and " <>
+          "close the socket — a total coverage loss for that whole shard, reported as a " <>
+          "`:rate_limited` Core.Notice, not merely the symbols past the old boundary."
+      )
+    end
+
+    value
+  end
+
+  defp validate_level2_pairs_per_socket!(value) do
+    raise ArgumentError,
+          "level2_pairs_per_socket must be a positive integer, got: #{inspect(value)}"
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -763,6 +882,16 @@ defmodule DpExchange.Coinbase.Feed do
     resubscribe_interval_ms =
       Keyword.get(opts, :resubscribe_interval_ms) || @default_resubscribe_interval_ms
 
+    # See the moduledoc's "`level2_pairs_per_socket` — a supervision option" section.
+    # `Keyword.get/2 || default` is the same nil-vs-absent-safe shape
+    # `resubscribe_interval_ms` above uses; `validate_level2_pairs_per_socket!/1` is the
+    # part that IS new — a value here that cannot chunk anything (not a positive integer)
+    # fails `init/1` loudly rather than being coerced or ignored, per this family's "fail
+    # closed; never substitute" rule.
+    level2_pairs_per_socket =
+      (Keyword.get(opts, :level2_pairs_per_socket) || @default_level2_pairs_per_socket)
+      |> validate_level2_pairs_per_socket!()
+
     Process.send_after(self(), :resubscribe, resubscribe_interval_ms)
 
     credentials = Keyword.get(opts, :credentials)
@@ -796,6 +925,13 @@ defmodule DpExchange.Coinbase.Feed do
        # map rather than the bare timestamp it used to be.
        delivering: %{},
        resubscribe_interval_ms: resubscribe_interval_ms,
+       # See `@default_level2_pairs_per_socket` and the moduledoc's own section on this
+       # option. Read once, here, already validated — `level2_shards/2` (via
+       # `shards_for/3`) takes this as a plain argument rather than reaching back into
+       # `@default_level2_pairs_per_socket` itself, so every shard this process ever
+       # computes uses the value it started with, not a constant that ignores what the
+       # caller asked for.
+       level2_pairs_per_socket: level2_pairs_per_socket,
        # See `@subscribe_retry_delay_ms` — the same "diagnostic knob, real default" shape
        # as `resubscribe_interval_ms` above, for a test's benefit rather than a consumer's.
        subscribe_retry_delay_ms:
@@ -1136,7 +1272,7 @@ defmodule DpExchange.Coinbase.Feed do
     |> active_channels()
     |> Enum.flat_map(fn channel ->
       wanted_list
-      |> shards_for(channel)
+      |> shards_for(channel, state.level2_pairs_per_socket)
       |> Enum.with_index()
       |> Enum.map(fn {symbols, index} -> {{channel, index}, symbols} end)
     end)
@@ -1189,7 +1325,7 @@ defmodule DpExchange.Coinbase.Feed do
       |> active_channels()
       |> Enum.flat_map(fn channel ->
         wanted_list
-        |> shards_for(channel)
+        |> shards_for(channel, state.level2_pairs_per_socket)
         |> Enum.with_index()
         |> Enum.map(fn {symbols, index} -> {{channel, index}, symbols} end)
       end)

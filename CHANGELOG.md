@@ -20,6 +20,34 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`level2_pairs_per_socket` is now a supervision option**, not only the internal
+  `@default_level2_pairs_per_socket` constant it defaults to:
+
+  ```elixir
+  children = [{DpExchange.Coinbase, credentials: my_credentials(), level2_pairs_per_socket: 25}]
+  ```
+
+  Default is unchanged — **30**, DpCryptoManagement's own live bisection against the real
+  venue on 2026-09-06 (`n = 6/12/25/30` accepted, `n = 31/35/50/100` refused; adopted as
+  the constant in `9139881`) — the measurement is not being re-opened, only made
+  adjustable. A value below `1`, or a non-integer, fails `Feed.start_link/1` at start with
+  an `ArgumentError` rather than being coerced. A value above `30` is honoured, not
+  capped — with a `Logger.warning` naming the measured ceiling, its date, and the concrete
+  risk: an oversized `level2` subscribe is refused by the venue and closes the whole
+  socket, losing that shard's entire coverage rather than only the symbols past the line.
+  Capping it would have quietly defeated the option's own purpose, which is letting a
+  consumer absorb a venue-side ceiling change without a package release; this repo has no
+  way to verify such a change itself (tier-3, authenticated, live probing is out of scope
+  for this repo — see the testing strategy). The default is deliberately **not** shrunk
+  for headroom: `30` is the actual, located boundary, not a value merely bounded from
+  below, and a consumer wanting margin below it can pass a smaller value themselves.
+  `ticker`'s own 100-per-socket size gets no equivalent option — it has no known ceiling
+  to tune against. See `feed.ex`'s own moduledoc, `"level2_pairs_per_socket — a
+  supervision option"`, and `usage-rules.md` for the full reasoning
+  (`DistortionPoint/dp-exchange-core` issue #22).
+
 ### Changed
 
 - **BREAKING: `Socket` no longer maintains a `level2` order book. An `update` frame now
