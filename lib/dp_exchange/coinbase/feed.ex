@@ -201,20 +201,42 @@ defmodule DpExchange.Coinbase.Feed do
   `Logger.warning` at start naming the measured ceiling, its date and source, and the
   concrete risk — stated as what has actually been observed, not more than that.
 
-  **What "the concrete risk" is, precisely, is not fully settled — say so, don't round it
-  off.** Setting this option above `30` means every ordinary `level2` subscribe this
-  package sends for that shard is, by itself, a SINGLE subscribe over the venue's real
-  limit. The one incident on record for exactly that shape (2026-08-26, see "level2 gets
-  its own, smaller sockets" above) is a refusal that also closed the socket — a total
-  coverage gap for the whole shard, not merely the symbols past the line. A later
-  measurement (2026-09-07, see "unsubscribe before subscribe" below) found a refusal that
-  did NOT close the socket — but that measurement was of CUMULATIVE overage across two
-  separate, smaller subscribes on one socket, not one single oversized subscribe, and
-  nobody has re-run the single-oversized case since 2026-08-26 to see whether it still
-  closes the socket. The two may be different venue behaviours, or the same one described
-  from two different angles; this file does not resolve that either direction, and neither
-  does the warning. What the warning states is the worse of the two observed outcomes —
-  whole-shard coverage loss — as the risk to plan for, not a claim that it is certain.
+  **What "the concrete risk" is, precisely, is now settled — DpCryptoManagement re-ran
+  exactly this case.** Setting this option above `30` means every ordinary `level2`
+  subscribe this package sends for that shard is, by itself, a SINGLE subscribe over the
+  venue's real limit. **DpCryptoManagement measured that shape directly, 2026-09-07**
+  (issue #22 continuing): one socket, `Socket.subscribe/4` for `n = 30` (accepted,
+  `books=30`, `deltas=4258`, all 30 symbols delivering), then `n = 60` and `n = 120`
+  (both **REFUSED** — `rate_limited`, `"too many L2 streams requested in a single
+  session"` — `books=0`, `deltas=0`, nothing delivering), tried in both ascending and
+  largest-first order. The refusal is **wholesale**, not a partial grant: `n = 60` and
+  `n = 120` both delivered nothing at all, not the first 30, in either ordering — the
+  shard's entire coverage is lost. And **the socket survives**: no `:DOWN` on a monitor,
+  `Process.alive?/1` true after a 40-second drain, both orderings. Cumulative overage (two
+  smaller subscribes releasing nothing in between — see "the ceiling is concurrent, not
+  cumulative" below) and a single oversized subscribe now read as the SAME behaviour:
+  refused wholesale, socket alive. See
+  `docs/reference/coinbase/level2-session-limit.md` for the full, dated account.
+
+  **That makes this risk harder to notice than the warning used to say, not easier.** A
+  socket that closes, the way the 2026-08-26 incident below describes, at least announces
+  itself — a `:link_down` notice, a reconnect, a liveness gap a consumer can watch for. A
+  refusal on a socket that stays alive announces nothing of the kind: the venue's refusal
+  still reaches `subscribe_notices/1` as a `:rate_limited` `Core.Notice` (`Socket`'s own
+  `error_kind/1` already classifies "too many" this way), but liveness itself looks
+  perfect and the oversized shard simply never starts delivering. `coverage/1` and
+  `coverage_by_kind/1` are the only things that reveal it — both report only symbols that
+  actually delivered a payload, so a shard that never delivers never counts as covered,
+  but nothing about the socket itself signals the loss the way a disconnect would.
+
+  **The 2026-08-26 incident record stays — it is not overturned, it is unexplained.** That
+  incident (see "level2 gets its own, smaller sockets" above, measured 2026-08-27)
+  reported the refusal closing the socket: 355 of 405 pairs stale, 1,480 refusals logged
+  in one window. The 2026-09-07 measurement above could not reproduce that outcome, under
+  either ordering. Neither this file nor DpCryptoManagement's own report resolves why:
+  either the venue's behaviour changed between the two dates, or the 2026-08-26 incident
+  had a second, unidentified cause. Both readings stay on record, dated and attributed,
+  rather than one being asserted over the other.
 
   **The default stays at `30`, without injected headroom, and that was a deliberate
   choice, not an oversight.** `30` is not "the largest value that has not yet failed"
@@ -551,8 +573,13 @@ defmodule DpExchange.Coinbase.Feed do
   refusals were themselves observed on SINGLE, oversized subscribes — the same shape as
   the 2026-08-26 incident and the `level2_pairs_per_socket` option's own warning below,
   neither of which this package's own behaviour triggers either — not on the cumulative
-  overage the 2026-09-07 probes above exercised; see "unsubscribe before subscribe" for why
-  those two shapes are not assumed to behave alike.) Should the venue nonetheless
+  overage the 2026-09-07 probes above exercised. The two shapes are now known, 2026-09-07,
+  to behave alike on whether the socket survives a refusal — both do, see the option's own
+  warning above — but that does not extend to the partial-delivery spectrum this section
+  is about: the 2026-09-07 single-oversized re-test saw clean refusals, `books=0`, at
+  every size it tried, not the partial delivery this section describes, so the spectrum
+  observed here stays its own, separate, unexplained venue characteristic.) Should the
+  venue nonetheless
   answer a `rate_limited` notice while some of that same shard's symbols are genuinely
   delivering — the exact shape DpCryptoManagement observed — `coverage/1` and
   `coverage_by_kind/1` need no special case to stay honest: both are built entirely from
@@ -1144,8 +1171,10 @@ defmodule DpExchange.Coinbase.Feed do
   # and this repo has no way to verify whether such a change happened (see "why 30" in the
   # moduledoc). It is instead honoured with a loud warning naming the measured ceiling,
   # its date and source, and the concrete risk: an oversized `level2` subscribe is refused
-  # by the venue and closes the socket, losing that whole shard's coverage rather than
-  # only the symbols past the line.
+  # by the venue WHOLESALE — not truncated to the first 30 — losing that whole shard's
+  # coverage. The socket itself survives (measured 2026-09-07, see the moduledoc's own
+  # "concrete risk" section), which makes this quieter than a disconnect, not louder: no
+  # link-down, no reconnect, just a shard that silently never delivers.
   defp validate_level2_pairs_per_socket!(value) when is_integer(value) and value >= 1 do
     if value > @default_level2_pairs_per_socket do
       Logger.warning(
@@ -1156,13 +1185,13 @@ defmodule DpExchange.Coinbase.Feed do
           "a venue-side change without a package release is the reason this option " <>
           "exists, and this package cannot verify whether the venue's ceiling has moved. " <>
           "But if it has not, every ordinary level2 subscribe at this size is a single " <>
-          "subscribe over the venue's real limit — the shape that closed the whole " <>
-          "socket in the one incident on record for it (2026-08-26), a total coverage " <>
-          "loss for that shard, reported as a `:rate_limited` Core.Notice. A LATER " <>
-          "measurement (2026-09-07) found a refusal that did not close the socket, but " <>
-          "that was of cumulative overage across two smaller subscribes, not one " <>
-          "oversized one — see the moduledoc's \"unsubscribe before subscribe\" section. " <>
-          "Which of those applies here is not settled; plan for the worse one."
+          "subscribe over the venue's real limit, which DpCryptoManagement measured " <>
+          "directly (2026-09-07, issue #22 continuing): the refusal is WHOLESALE, not " <>
+          "truncated — the whole shard delivers nothing — and the socket SURVIVES, no " <>
+          "disconnect, reported only as a `:rate_limited` Core.Notice. That is quieter " <>
+          "than the 2026-08-26 incident this option's warning used to describe (a " <>
+          "disconnect at least announces itself); a live socket delivering nothing does " <>
+          "not. Watch `coverage/1` or `coverage_by_kind/1` for this shard, not liveness."
       )
     end
 

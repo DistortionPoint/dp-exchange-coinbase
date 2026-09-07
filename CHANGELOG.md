@@ -35,8 +35,10 @@ acceptable changelog line.
   adjustable. A value below `1`, or a non-integer, fails `Feed.start_link/1` at start with
   an `ArgumentError` rather than being coerced. A value above `30` is honoured, not
   capped — with a `Logger.warning` naming the measured ceiling, its date, and the concrete
-  risk: an oversized `level2` subscribe is refused by the venue and closes the whole
-  socket, losing that shard's entire coverage rather than only the symbols past the line.
+  risk: an oversized `level2` subscribe is refused by the venue WHOLESALE, losing that
+  shard's entire coverage — and the socket SURVIVES the refusal (measured 2026-09-07, see
+  the "corrected claim" entry below), which makes it quieter than a disconnect, not
+  louder: no link-down, no reconnect, just a shard that silently never delivers.
   Capping it would have quietly defeated the option's own purpose, which is letting a
   consumer absorb a venue-side ceiling change without a package release; this repo has no
   way to verify such a change itself (tier-3, authenticated, live probing is out of scope
@@ -227,6 +229,48 @@ acceptable changelog line.
   `Venue` behaviour or documented as consumer-facing in `usage-rules.md`.
 
 ### Fixed
+
+- **Corrected claim: a single oversized `level2` subscribe does not close the socket. It
+  is refused wholesale, and the socket survives — which is worse to detect, not better.**
+  Same issue #22. The `level2_pairs_per_socket` warning and
+  `docs/reference/coinbase/level2-session-limit.md` used to leave this open: the
+  2026-08-26 incident recorded the refusal closing the socket, but the 2026-09-07
+  cumulative-overage probe (see the entry below) showed a refusal that did NOT close it —
+  and nobody had re-run the *single*-oversized shape since 2026-08-26 to know whether that
+  distinction mattered. **DpCryptoManagement ran it, 2026-09-07:** one socket,
+  `Socket.subscribe/4` for `n = 30` (accepted, `books=30`), then `n = 60` and `n = 120`
+  (both REFUSED — `rate_limited`, `books=0`, nothing delivering), in both ascending and
+  largest-first order; `Process.alive?/1` stayed `true` through a 40-second drain after
+  every refusal, no `:DOWN` on a monitor, either ordering.
+
+  The refusal is wholesale (the whole shard's coverage is lost, not truncated to the
+  first 30) and the socket survives (no disconnect at all) — the identical shape the
+  cumulative-overage probe already showed, so the two readings this package could not
+  choose between turn out to be the same behaviour. The 2026-08-26 incident record is
+  kept, dated, as unexplained rather than overturned: this measurement could not
+  reproduce it, and neither this package nor DpCryptoManagement knows why. **The risk is
+  restated as more dangerous to notice, not less:** a closed socket announces itself
+  through a disconnect and a reconnect; a refusal on a socket that stays alive announces
+  nothing beyond the `:rate_limited` `Core.Notice` `Socket`'s `error_kind/1` already
+  emits — liveness looks perfect, and the oversized shard simply never delivers.
+  `coverage/1` / `coverage_by_kind/1` are the only things that reveal it, unchanged by
+  this correction: both already report only symbols that actually delivered a payload.
+
+  The consumer's first attempt at this probe hit a harness defect worth recording for
+  future probing with this package's own `Socket`: tearing a socket down with
+  `Process.exit(socket, :normal)` is ignored by a process not trapping exits, so
+  "closed" sockets stayed alive and leaked into the next attempt's count; fixing that to
+  `:kill` then killed the probe itself, because `Socket.start_link/1` links the socket to
+  its caller — `Process.unlink/1` first was needed. Recorded, dated and attributed, in
+  `docs/reference/coinbase/level2-session-limit.md`.
+
+  `lib/dp_exchange/coinbase/feed.ex`'s moduledoc (the `level2_pairs_per_socket` section
+  and its `validate_level2_pairs_per_socket!/1` warning text), `usage-rules.md`, and
+  `docs/reference/coinbase/level2-session-limit.md` are all updated; no code behaviour
+  changed, only the documented and logged claim. No new `Core.Notice` was added:
+  `Socket`'s existing `:rate_limited` notice already names the venue's own refusal
+  message verbatim, which already carries this specific cause — a second notice would
+  duplicate one already firing.
 
 - **`Socket` full-re-sorted BOTH sides of the maintained level2 book on EVERY `l2_data`
   frame, including an `update` changing a single price level** —
@@ -812,7 +856,8 @@ acceptable changelog line.
   consumer has offered to test the single-oversized case specifically; until that runs,
   both observations are stated and the conflict is left open, and the warning text states
   the worse of the two outcomes as the risk to plan for rather than asserting it as
-  certain.
+  certain. *(That test ran the same day — see the "Corrected claim" entry above this
+  section for the result: refused wholesale, socket survives, same as probe 2.)*
 
   New tests in `feed_test.exs` replace the socket-replacement suite: a growing `level2`
   shard reconciles on its existing socket (never replaced, never killed); a shard that

@@ -282,15 +282,25 @@ value you set above today's measurement is wrong. It logs the measured ceiling, 
 and source, and the concrete risk before proceeding — stated as what has actually been
 observed, not more than that. Setting this above `30` means every ordinary `level2`
 subscribe this package sends for that shard is, by itself, a single subscribe over the
-venue's real limit. The one incident on record for exactly that shape (2026-08-26) is a
-refusal that also closed the socket — a total coverage gap for the whole shard. A later
-measurement (2026-09-07) found a refusal that did *not* close the socket, but that was of
-*cumulative* overage across two smaller subscribes, not one oversized one — whether a
-single oversized subscribe still closes the socket has not been re-tested since 2026-08-26,
-and this package does not resolve that either direction. The warning states the worse of
-the two observed outcomes — whole-shard coverage loss — as the risk to plan for, not a
-guarantee it recurs. If you are setting this above 30 because you have your own evidence
-the venue's limit moved, that is exactly what this option is for.
+venue's real limit. DpCryptoManagement measured exactly that shape, 2026-09-07 (issue #22
+continuing): one socket, `n = 30` accepted, then `n = 60` and `n = 120` both **REFUSED**
+— `rate_limited`, `books=0`, nothing delivering, in both ascending and largest-first
+order. The refusal is **wholesale**, not truncated to the first 30 — the whole shard's
+coverage is lost — and **the socket survives**: no disconnect, `Process.alive?/1` true
+after a 40-second drain, both orderings. That is the same behaviour cumulative overage
+already showed (two smaller subscribes, refused but alive) — the two shapes this package
+used to distinguish between now read as one. It also makes the risk *harder* to notice
+than the original 2026-08-26 incident implied, not easier: a closed socket announces
+itself through a disconnect and a reconnect; a refused subscribe on a socket that stays
+alive announces nothing — no error beyond the `:rate_limited` `Core.Notice`, liveness
+looks perfect, and the shard simply never starts delivering. `coverage/1` and
+`coverage_by_kind/1` are what reveal it, because they report only symbols that actually
+delivered a payload. The 2026-08-26 incident itself (a refusal that *did* close the
+socket) stays on record — the 2026-09-07 measurement could not reproduce it, and neither
+this package nor DpCryptoManagement resolves why; it is left unexplained, not overturned.
+See `docs/reference/coinbase/level2-session-limit.md` for the full, dated account. If you
+are setting this above 30 because you have your own evidence the venue's limit moved,
+that is exactly what this option is for.
 
 **The default is not shrunk for headroom, on purpose.** `30` is the actual boundary — `30`
 accepted, `31` refused, confirmed by interleaving and a contamination check — not merely

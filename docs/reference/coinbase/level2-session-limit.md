@@ -139,9 +139,12 @@ rather than a single gate, and this is recorded here as an **observed, unexplain
 characteristic** — dated and attributed, not rationalised into a theory neither party has
 evidence for. These refusals were themselves all on a SINGLE, oversized subscribe (one
 `Socket.subscribe/4` call for `n` symbols, `n > 30`) — the same shape as the 2026-08-26
-incident below, not the cumulative-overage shape probes 2 and 3 above exercised; see the
-open correction two sections down for why those two shapes are not assumed to behave
-alike.
+incident below, not the cumulative-overage shape probes 2 and 3 above exercised. The two
+shapes are now known (2026-09-07, see below) to behave alike on whether the socket
+survives a refusal — both do — but that does not extend to the partial-delivery spectrum
+this section is about: the 2026-09-07 single-oversized re-test saw clean refusals,
+`books=0`, at every size it tried, not the partial delivery recorded above, so the
+spectrum here stays its own, separate, unexplained venue characteristic.
 
 **This package should never itself trigger this at the default.** Every `level2`
 subscribe `Feed` sends carries at most `state.level2_pairs_per_socket` symbols, by
@@ -164,28 +167,89 @@ refusal; a symbol that delivered nothing stays `:not_covered` regardless. See
 the two facts (delivery, refusal) were never coupled in this package's own bookkeeping in
 the first place.
 
-## OPEN: does a single oversized subscribe still close the socket, or was that specific to the 2026-08-26 incident?
+## RESOLVED, 2026-09-07: a single oversized subscribe is refused wholesale, socket alive
 
-**Do not resolve this either direction from what is on record.** Two observations exist,
-from two different investigations, and they describe two different SHAPES of overage —
-this section states both and leaves the conflict open rather than picking a side.
+**Method, DpCryptoManagement, issue #22 continuing.** The consumer offered to test this
+case specifically, and ran it the same day as the concurrent-vs-cumulative probes above.
+One socket, `Socket.start_link/1` once, then raw `Socket.subscribe/4` — not `Feed` or
+`update_symbols/2` — for `n = 30`, `n = 60`, `n = 120` in turn on that one socket: the
+single-oversized shape, not the cumulative shape probe 2 above exercised. The sequence
+was run in both ascending order and largest-first, to rule out ordering as a confound.
+Each attempt drained continuously; `socket_alive` was read from `Process.alive?/1` after a
+40-second drain following each refusal, and no monitor ever reported `:DOWN`, in either
+ordering.
 
-- **2026-08-26 (the original incident that first shipped `@pairs_per_socket` sharding for
-  `level2`):** a `level2` subscribe over the venue's per-session limit was refused with
-  `"too many L2 streams requested in a single session"`, and the socket **closed** —
-  measured against a real ~400-symbol universe: 355 of 405 pairs went stale and 1,480
-  refusals were logged in one window. This was a total data gap for the whole shard, not
-  degraded coverage.
-- **2026-09-07 (probe 2 above):** a refusal from **cumulative overage across two separate,
-  smaller subscribes** on one socket did **not** close the socket — the first batch kept
-  delivering, and only the second, unreleased batch was rejected.
+| `n` | verdict | socket_alive | books | deltas | distinct delivering |
+|---|---|---|---|---|---|
+| 30 | accepted | true | 30 | 4258 | 30 |
+| 60 | **REFUSED** | true | 0 | 0 | 0 |
+| 120 | **REFUSED** | true | 0 | 0 | 0 |
 
-These may be different venue behaviours (a single request that itself exceeds the limit
-closes the connection; a request that merely pushes the session's running total over the
-limit does not) or the same behaviour seen from two angles that have not yet been reconciled
-by a matched pair of probes. **The consumer has offered to test the single-oversized case
-specifically** — until that runs, this package's own `level2_pairs_per_socket` warning
-text states the worse of the two observed outcomes (whole-shard coverage loss) as the risk
-to plan for, without asserting it is certain to recur. See
+Refusal is `rate_limited` / `"too many L2 streams requested in a single session"` — the
+identical message the 2026-08-26 incident and the cumulative-overage probe both reported.
+
+**A single oversized subscribe is rejected wholesale, not truncated.** `n = 60` and
+`n = 120` both delivered nothing at all — not the first 30, not any partial set — the
+shard's entire coverage is lost, at either size, in either ordering.
+
+**The socket survives.** No `:DOWN`, no reconnect, `Process.alive?/1` stayed `true`
+through a 40-second drain after every refusal, in both orderings — no gap in liveness at
+all.
+
+**Single-oversized and cumulative overage now read as the same behaviour.** The two
+readings this file previously could not choose between — refused-and-closed versus
+refused-but-alive — turn out not to be a live choice: this measurement is of the
+single-oversized shape specifically, and it too is refused-but-alive, indistinguishable in
+kind from probe 2's cumulative-overage result above.
+
+**The 2026-08-26 incident record is not overturned by this — it is now unexplained.** That
+incident reported the refusal closing the socket: 355 of 405 pairs stale, 1,480 refusals
+logged in one window — a total data gap for the whole shard, not degraded coverage. The
+2026-09-07 measurement above could not reproduce that outcome, under either ordering.
+Neither this file nor DpCryptoManagement's own report resolves why: either the venue's own
+behaviour changed between 2026-08-26 and 2026-09-07, or the 2026-08-26 incident had a
+second, unidentified cause. Both readings stay on record, dated and attributed; this file
+does not pick one over the other.
+
+**This makes the risk harder to notice than the original incident implied, not easier.**
+A closed socket announces itself — `:link_down`, a reconnect attempt, a liveness gap a
+consumer can watch `subscribe_notices/1` for. A refused subscribe on a socket that stays
+alive announces nothing comparable: the venue's refusal still reaches
+`subscribe_notices/1` as a `Core.Notice` (`Socket`'s own `error_kind/1` already classifies
+"too many" as `:rate_limited`), but liveness itself looks perfect and the shard simply
+never starts delivering. `coverage/1` and `coverage_by_kind/1` are the only things that
+reveal it, because they report only symbols that actually delivered a payload — a shard
+that never delivers never counts as covered. This is the same silent shape as the
+bare-additive-subscribe hazard `lib/dp_exchange/coinbase/feed.ex`'s "unsubscribe before
+subscribe" section already designs against, and it is why this package's own
+`level2_pairs_per_socket` warning states it plainly rather than as a caveat: see
 `lib/dp_exchange/coinbase/feed.ex`'s `validate_level2_pairs_per_socket!/1` and its
 moduledoc section on the option for the current wording.
+
+### A harness defect in the consumer's first attempt at this probe
+
+DpCryptoManagement's first run of the single-oversized probe reported
+`n = 120 refused_but_partially_delivering, distinct_delivering=28` — an artifact of two
+bugs in the probe harness itself, not a fourth venue behaviour, disclosed by the consumer
+and worth recording here because it is a real hazard for anyone probing this venue with
+this package's own `Socket` directly:
+
+1. Each socket was torn down between attempts with `Process.exit(socket, :normal)`. A
+   process not trapping exits **ignores** a `:normal` exit signal sent from another
+   process, so every "closed" socket in that run stayed alive and kept streaming into the
+   mailbox the *next* run counted from.
+2. Fixing that to `Process.exit(socket, :kill)` then killed the probe itself:
+   `Socket.start_link/1` links the new socket to its caller, so an unlinked `:kill` sent
+   from the caller's own process brought the caller down with it too. `Process.unlink/1`
+   before the kill was needed.
+
+**The tell was non-monotonicity** — `n = 60` delivered nothing but `n = 120` delivered 28,
+and a ceiling that rejects less as you ask for more is not a ceiling. That inconsistency
+is what prompted the re-run with corrected teardown, which produced the clean table above.
+
+This does not implicate the three probes in "the ceiling is concurrent, not cumulative"
+above: each of those used one socket, created once, before its own loop, with no teardown
+between attempts and so no prior socket to contaminate a later one. The defect is specific
+to a harness that opens and tears down a fresh socket per attempt in a loop — exactly the
+single-oversized probe's own shape, and exactly the shape a future consumer probing this
+venue with `Socket` directly is likely to reach for again.
