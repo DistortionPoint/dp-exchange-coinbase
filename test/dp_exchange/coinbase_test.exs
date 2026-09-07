@@ -34,6 +34,17 @@ defmodule DpExchange.CoinbaseTest do
       # that has never traded declaring it would be the exact dishonesty D15 prevents.
       assert Capabilities.endpoints_at(Coinbase.capabilities(), :proven) == []
     end
+
+    test "the order types and time-in-force values place_order actually builds are declared" do
+      # This defaulted to `[]` on both fields — "accepts no order type, no time-in-force at
+      # all" — while `{:place_order, 3}` is `:experimental` and `Rest.order_configuration/1`
+      # builds three types across four time-in-force values. `Capabilities.new/1` validates
+      # the contents of these lists but never that an active `place_order/3` declared
+      # anything, so the empty lists passed every check.
+      caps = Coinbase.capabilities()
+      assert caps.supported_order_types == [:market, :limit, :stop_limit]
+      assert caps.supported_time_in_force == [:ioc, :fok, :gtc, :gtd]
+    end
   end
 
   describe "the ceilings are declared honestly" do
@@ -191,6 +202,13 @@ defmodule DpExchange.CoinbaseTest do
 
       assert %{id: :my_coinbase} = Coinbase.child_spec(name: :my_coinbase)
       assert %{id: Coinbase} = Coinbase.child_spec([])
+    end
+
+    test "declares :supervisor, not OTP's default :worker shutdown" do
+      # `start_link/1` starts a `Supervisor`. Without `type: :supervisor` OTP defaults
+      # `:shutdown` to 5_000ms instead of `:infinity`, giving the whole nested tree only
+      # five seconds to unwind gracefully before `:kill`.
+      assert %{type: :supervisor} = Coinbase.child_spec([])
     end
   end
 

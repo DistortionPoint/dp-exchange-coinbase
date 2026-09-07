@@ -164,7 +164,18 @@ defmodule DpExchange.Coinbase do
 
   @impl true
   def child_spec(opts) do
-    %{id: Keyword.get(opts, :name, __MODULE__), start: {__MODULE__, :start_link, [opts]}}
+    # `type: :supervisor`: `start_link/1` starts an OTP `Supervisor`, and without this key
+    # OTP defaults `:type` to `:worker`, which also defaults `:shutdown` to `5_000`ms
+    # instead of `:infinity`. A consumer terminating this child would then give the whole
+    # nested tree — socket shards, rate limiter, and everything under them — only five
+    # seconds to shut down gracefully before `:kill`, instead of letting it unwind on its
+    # own terms. Found by a cross-package audit comparing `child_spec/1` across all five
+    # venues; `dp_exchange_schwab` was the only one that already declared this.
+    %{
+      id: Keyword.get(opts, :name, __MODULE__),
+      start: {__MODULE__, :start_link, [opts]},
+      type: :supervisor
+    }
   end
 
   @impl true
@@ -213,6 +224,18 @@ defmodule DpExchange.Coinbase do
       # was creating by not implementing the endpoint that avoids it.
       supports_order_preview: true,
       supports_order_replace: true,
+
+      # `Rest.order_configuration/1`'s own `@configurations` cross-product, read back —
+      # not invented here. Left undeclared, this defaulted to `[]`, which reads as
+      # "this venue accepts no order type at all" on a package where `{:place_order, 3}`
+      # is `:experimental` and actually builds three. Found by a cross-package audit;
+      # `dp_exchange_robinhood` defaulted the same two fields the same way for the same
+      # reason. `:stop` and `:post_only` are not here: the venue's `@configurations` has
+      # no `:stop` entry (only `:stop_limit`) and Advanced Trade has no post-only flag in
+      # this endpoint's schema — declaring either would be a claim this package cannot
+      # honour.
+      supported_order_types: [:market, :limit, :stop_limit],
+      supported_time_in_force: [:ioc, :fok, :gtc, :gtd],
       # `level2` was recognised and decoded but never subscribed — `Socket` already had
       # the auth machinery for it, and the only thing standing between that and a real
       # declaration was `Feed` asking for it. Now sharded and subscribed on every shard.

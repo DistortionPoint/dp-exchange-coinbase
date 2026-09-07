@@ -22,6 +22,26 @@ acceptable changelog line.
 
 ### Fixed
 
+- **BREAKING: `supported_order_types` and `supported_time_in_force` were both `[]` while
+  `{:place_order, 3}` is `:experimental` and `Rest.order_configuration/1`'s own
+  `@configurations` cross-product builds three order types across four time-in-force
+  values.** `Capabilities.new/1` validates the *contents* of these lists but never that a
+  venue with an active `place_order/3` declared anything, so two empty lists passed every
+  check. Now `supported_order_types: [:market, :limit, :stop_limit]` and
+  `supported_time_in_force: [:ioc, :fok, :gtc, :gtd]` — read directly off
+  `@configurations`, not invented. `:stop` and `:post_only` are deliberately absent:
+  the venue's cross-product has no `:stop` entry (only `:stop_limit`) and Advanced Trade's
+  order endpoint has no post-only flag. Found by a cross-package audit;
+  `dp_exchange_robinhood` defaulted the same two fields the same way for the same reason.
+
+- **`child_spec/1` did not declare `type: :supervisor`, so OTP defaulted it to `:worker`**
+  — which also defaults `:shutdown` to `5_000`ms instead of `:infinity`. A consumer
+  terminating this child gave the whole nested tree (socket shards, rate limiter, and
+  everything under them) only five seconds to shut down gracefully before `:kill`, rather
+  than letting it unwind on its own terms. Invisible to any single-package review, and
+  found only by diffing `child_spec/1` across all five venue packages against each other;
+  `dp_exchange_schwab` was the only one that already declared it.
+
 - **`get_top_of_book/2` answered a missing local credential with `{:refused, :missing_credentials}`** — in the real `Rest` client and in `Fake` alike — even though the credential never left this process and nothing at Coinbase ever saw a request to decline. `DpExchange.Core.Venue`'s own moduledoc reserves `:refused` for the venue's own permanent word about a request it actually received; a locally-detected precondition is an `:error`. Found by a cross-package audit: Gemini, Robinhood and Schwab's real facades already used `{:error, {:missing_credentials, venue}}` for this exact condition — this package and Schwab's `Fake` (see that package's own changelog) were the two hold-outs. Now `{:error, {:missing_credentials, :coinbase}}`, matching the rest of the family.
 
 - **A credential that could not sign produced an unauthenticated request that was actually
