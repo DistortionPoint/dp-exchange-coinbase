@@ -38,7 +38,7 @@ defmodule DpExchange.Coinbase.AdminTest do
 
   @credentials %{
     api_key: "organizations/x/apiKeys/y",
-    api_secret: "-----BEGIN EC PRIVATE KEY-----"
+    api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="
   }
 
   @permissions %{
@@ -165,7 +165,13 @@ defmodule DpExchange.Coinbase.AdminTest do
         |> Plug.Conn.resp(401, Jason.encode!(%{"error" => "unauthorized"}))
       end
 
-      assert {:error, _reason} =
+      # This asserted `{:error, _}` while its own name — and `test_connection/2`'s
+      # moduledoc, "a credential that reaches the venue and is rejected comes back
+      # `{:refused, _}`" — both said refusal. Both were right, and the assertion was
+      # pinning the bug: `classify/1` recovered the status by searching the flattened
+      # message for "404", so a 401 never matched and a rejected key read as
+      # possibly-transient. The venue received this request and declined it.
+      assert {:refused, {:venue_error, 401, "unauthorized"}} =
                Rest.test_connection(@credentials, plug: plug, retry_attempts: 0)
     end
   end

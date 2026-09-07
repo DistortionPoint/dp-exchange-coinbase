@@ -1339,20 +1339,25 @@ defmodule DpExchange.Coinbase.Rest do
     seconds
   end
 
+  # A signing failure stops the request here rather than sending it unsigned — `Auth`
+  # returns `{:ok, headers} | {:error, reason}` for exactly that. An unsigned
+  # `Authorization` looks like a credential problem at the venue rather than at us.
+  #
+  # The `nil` branch is a different case and is not a failure: Coinbase serves market
+  # data anonymously, so a call made deliberately without credentials takes the public
+  # path with no headers at all.
   defp request(method, path, credentials, opts, params \\ %{}) do
-    headers =
-      if credentials do
-        HttpClient.build_auth_headers(
-          method,
-          @api_path <> path,
-          nil,
-          credentials,
-          &Auth.rest_headers/4
-        )
-      else
-        []
-      end
+    with {:ok, headers} <- request_headers(method, @api_path <> path, credentials) do
+      send_request(method, path, headers, opts, params)
+    end
+  end
 
+  defp request_headers(_method, _path, nil), do: {:ok, []}
+
+  defp request_headers(method, path, credentials),
+    do: Auth.rest_headers(method, path, nil, credentials)
+
+  defp send_request(method, path, headers, opts, params) do
     url = @base_url <> @api_path <> path
 
     # `:rate_limit_blocking` reaches `Core.HttpClient` from here now — a family-wide gap
@@ -1373,11 +1378,28 @@ defmodule DpExchange.Coinbase.Rest do
         :rate_limit_blocking
       ])
       |> Keyword.put(:provider, :coinbase)
+      # A 4xx comes back intact rather than flattened into a message string, so
+      # `classify/1` can match the status exactly instead of searching the body for it.
+      |> Keyword.put(:raw_status, true)
       # This venue's own limiter, configured from its own declared ceiling.
       |> Keyword.put_new(:limiter, Keyword.get(opts, :limiter, DpExchange.Coinbase.RateLimiter))
 
-    HttpClient.request(method, url <> query(params), headers, nil, request_opts)
+    method
+    |> HttpClient.request(url <> query(params), headers, nil, request_opts)
+    |> split_status()
   end
+
+  # `raw_status: true` hands a 4xx back as `{:ok, response}`, which is the right shape for
+  # deciding what it means and the wrong shape for a caller matching `{:ok, _}` as success.
+  # Splitting it here keeps every call site's `{:ok, %{body: _}}` clause meaning "the venue
+  # answered", and routes everything else through `classify/1` with the status intact.
+  defp split_status({:ok, %{status: status} = response}) when status in 200..299,
+    do: {:ok, response}
+
+  defp split_status({:ok, %{status: status, body: body}}),
+    do: {:error, {:http_status, status, body}}
+
+  defp split_status(other), do: other
 
   defp query(params) when params == %{}, do: ""
 
@@ -1387,18 +1409,48 @@ defmodule DpExchange.Coinbase.Rest do
 
   # A 404 from this venue means the product is not listed — a permanent answer, and the
   # distinction a caller needs: a refusal is not retried, an error is.
-  # The reason arrives already unwrapped from `{:error, reason}`, so it is either a bare
-  # message or the venue-tagged form — never `{:error, _}` again. A clause for the
-  # double-wrapped shape was here and could never match; dialyzer said so as soon as
-  # Core's spec was accurate enough to tell.
-  defp classify({:exchange_error, _venue, message}) when is_binary(message),
-    do: refusal_or_error(message)
+  #
+  # ## This used to string-match the status out of a flattened message, and that was wrong
+  #
+  # `Core.HttpClient` flattens a 4xx into `"Client error (404): <body>"` unless a caller
+  # asks it not to, and this module used to recover the status with
+  # `String.contains?(message, "404")`. Core's own moduledoc names that exact expression
+  # as the reason `raw_status: true` was added, and it fails in both directions:
+  #
+  #   * **False positive.** Any 4xx whose *body* happens to contain "404" — an order id, a
+  #     price, an embedded vendor code — became `{:refused, :not_listed}`: permanent, never
+  #     retried, for something that may well have been transient.
+  #   * **False negative.** A 400, 401 or 403 contains no "404" anywhere, so a bad request
+  #     or a rejected key fell through to `{:error, message}` and read as *possibly
+  #     transient* to every caller — a rotated credential retried instead of refused.
+  #
+  # The other four venue packages in this family all pass `raw_status: true` and match the
+  # status exactly. This one now does too, and the statuses are named rather than inferred.
+  defp classify({:http_status, 404, _body}), do: {:refused, :not_listed}
 
-  defp classify(message) when is_binary(message), do: refusal_or_error(message)
+  # Permanent for the request as sent. A caller whose key was rotated signs again with the
+  # new one, which is a different request rather than a retry of this one.
+  defp classify({:http_status, status, body}) when status in [400, 401, 403],
+    do: {:refused, refusal(status, body)}
+
+  defp classify({:http_status, status, body}),
+    do: {:error, {:exchange_error, :coinbase, "HTTP #{status}: #{inspect(body)}"}}
+
+  defp classify({:exchange_error, _venue, message}) when is_binary(message),
+    do: {:error, message}
+
+  defp classify(message) when is_binary(message), do: {:error, message}
   defp classify(reason), do: {:error, reason}
 
-  defp refusal_or_error(message) do
-    if String.contains?(message, "404"), do: {:refused, :not_listed}, else: {:error, message}
+  # The venue's own words where it gave any, so a caller can see why it refused rather
+  # than only that it did.
+  defp refusal(status, body) do
+    case body do
+      %{"message" => message} when is_binary(message) -> {:venue_error, status, message}
+      %{"error_details" => detail} when is_binary(detail) -> {:venue_error, status, detail}
+      %{"error" => error} when is_binary(error) -> {:venue_error, status, error}
+      _other -> {:venue_error, status}
+    end
   end
 
   # ONE shape, not two. The adapter this was ported from branched on whether credentials
@@ -1524,9 +1576,12 @@ defmodule DpExchange.Coinbase.Rest do
       GET /api/v3/brokerage/best_bid_ask?product_ids=BTC-USD         -> 401
       GET /api/v3/brokerage/market/best_bid_ask?product_ids=BTC-USD  -> 404
 
-  Without credentials this returns `{:refused, :missing_credentials}` before sending
-  anything. Sending the request anyway would come back as an opaque 401 that reads like a
-  venue outage rather than what it is — a call that needed a credential it was not given.
+  Without credentials this returns `{:error, {:missing_credentials, :coinbase}}` before
+  sending anything — never `{:refused, _}`: the credential never left this process, so the
+  venue never received a request to decline. `DpExchange.Core.Venue`'s own moduledoc
+  reserves `:refused` for the venue's own permanent word about a request it actually got;
+  sending the request anyway would come back as an opaque 401 that reads like a venue
+  outage rather than what it is — a call that needed a credential it was not given.
 
   ## An empty `pricebooks` array is silence, not a statement — DpCryptoManagement issue #25
 
@@ -1558,7 +1613,7 @@ defmodule DpExchange.Coinbase.Rest do
     credentials = Keyword.get(opts, :credentials)
 
     if is_nil(credentials) do
-      {:refused, :missing_credentials}
+      {:error, {:missing_credentials, :coinbase}}
     else
       observed_at = DateTime.utc_now()
 
@@ -1957,16 +2012,18 @@ defmodule DpExchange.Coinbase.Rest do
   defp put_json(path, body, credentials, opts),
     do: json_request(:put, path, body, credentials, opts)
 
+  # **Every caller of this function is a write, and there is no public path for one.** So
+  # unlike `request/5` there is no anonymous branch here: credentials that cannot sign
+  # refuse locally, by name, rather than producing an unauthenticated POST for the venue
+  # to reject as an opaque 401. A malformed `api_secret` reaching `place_order/3` used to
+  # do exactly that.
   defp json_request(method, path, body, credentials, opts) do
-    headers =
-      HttpClient.build_auth_headers(
-        method,
-        @api_path <> path,
-        nil,
-        credentials,
-        &Auth.rest_headers/4
-      )
+    with {:ok, headers} <- Auth.rest_headers(method, @api_path <> path, nil, credentials) do
+      send_json_request(method, path, headers, body, opts)
+    end
+  end
 
+  defp send_json_request(method, path, headers, body, opts) do
     request_opts =
       opts
       |> Keyword.take([
@@ -1978,15 +2035,17 @@ defmodule DpExchange.Coinbase.Rest do
         :rate_limit_blocking
       ])
       |> Keyword.put(:provider, :coinbase)
+      |> Keyword.put(:raw_status, true)
       |> Keyword.put_new(:limiter, Keyword.get(opts, :limiter, DpExchange.Coinbase.RateLimiter))
 
-    HttpClient.request(
-      method,
+    method
+    |> HttpClient.request(
       @base_url <> @api_path <> path,
       headers,
       Jason.encode!(body),
       request_opts
     )
+    |> split_status()
   end
 
   # A v4 UUID from the VM's own CSPRNG, rather than a dependency.

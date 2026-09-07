@@ -20,7 +20,9 @@ defmodule DpExchange.Coinbase do
   tells you what the difference bought. **`get_top_of_book/2` is the one exception**: the
   venue publishes no public form of `/best_bid_ask` — confirmed live, `401` authenticated
   and `404` at the `/market/...` path a caller would expect — so this one call is
-  `{:refused, :missing_credentials}` without them rather than a nearer substitute.
+  `{:error, {:missing_credentials, :coinbase}}` without them rather than a nearer
+  substitute. Not `{:refused, _}`: the credential never left this process, so nothing at
+  Coinbase ever saw the request to decline it.
 
   **Nine candle widths, and `12h` is not one of them.** The shared vocabulary models it;
   Coinbase does not serve it. Asking for a width Coinbase does not serve is an **error**,
@@ -220,6 +222,18 @@ defmodule DpExchange.Coinbase do
       # on 2026-09-06. See `Feed`'s moduledoc and
       # `docs/reference/coinbase/level2-session-limit.md`.
       streamable: [:quotes, :order_book],
+
+      # **`:order_book` needs a credential here and `:quotes` does not**, which is exactly
+      # the distinction this field exists to carry. `Socket`'s `@authenticated_channels`
+      # names `level2`, and `Feed.active_channels/1` subscribes `["ticker"]` without
+      # credentials and `["ticker", "level2"]` with them — so an anonymous consumer gets
+      # quotes and no book.
+      #
+      # This was left at its `[]` default, which reads as "nothing here needs a
+      # credential". A host deciding whether it must obtain one before it can stream book
+      # data was told no, and the true answer is yes — it would have found out from a book
+      # stream that simply never arrived, which is the silent shape this family refuses.
+      authenticated_streamable: [:order_book],
       historical_timeframes: Rest.granularities(),
       max_candles_per_request: Rest.max_candles(),
       reports_trade_volume: true,

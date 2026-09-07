@@ -22,24 +22,41 @@ defmodule DpExchange.Coinbase.Auth do
   """
 
   @doc """
-  Builds authentication headers for a REST call, as `Core.HttpClient`'s auth hook.
+  Builds authentication headers for a REST call.
 
-  Pass it where an auth type would go:
+  Returns `{:ok, headers}` or `{:error, reason}`, so a caller gates on it with `with`
+  the way every other venue package in this family gates on its own `Auth.headers`.
 
-      HttpClient.build_auth_headers(:get, path, body, credentials, &Auth.rest_headers/4)
+  ## Why this returns a tuple rather than a bare header list
 
-  On a signing failure it returns the content-type header alone rather than an
-  unsigned `Authorization`. **An unsigned token is worse than none**: it looks like a
-  credential problem at the venue rather than at us, and sends the reader looking in the
-  wrong place. The caller decides whether an unauthenticated request is acceptable.
+  **An unsigned token is worse than none**: it looks like a credential problem at the
+  venue rather than at us, and sends the reader looking in the wrong place. That reason
+  has always been right, but the shape this function used to have could not act on it.
+
+  It was written as `Core.HttpClient`'s 4-arity auth hook, which may only return a
+  header list — it has no way to say "abort, do not send". So on a signing failure it
+  returned the content-type header alone and documented that "the caller decides whether
+  an unauthenticated request is acceptable". **No caller ever decided.** `Rest.request/5`
+  and `Rest.json_request/5` both handed whatever came back straight to
+  `HttpClient.request/5` without ever checking for `Authorization`.
+
+  For a GET on a public market-data path that is harmless — Coinbase serves those
+  anonymously. For `json_request/5` there is **no public path**: every caller of it is a
+  write. So a malformed `api_secret` turned a live `place_order/3` into an
+  *unauthenticated* POST, sent to the venue to fail there as an opaque 401 — which is
+  precisely the failure the paragraph above exists to prevent, produced by the mechanism
+  that documented it.
+
+  Returning a tuple is what makes the stated rule true. The signing failure now stops
+  the request here, locally, with the reason that caused it.
   """
-  @spec rest_headers(atom(), String.t(), String.t() | nil, map()) :: [{String.t(), String.t()}]
+  @spec rest_headers(atom(), String.t(), String.t() | nil, map()) ::
+          {:ok, [{String.t(), String.t()}]} | {:error, term()}
   def rest_headers(method, path, _body, credentials) do
     uri = "#{method |> to_string() |> String.upcase()} api.coinbase.com#{path}"
 
-    case jwt(credentials, uris: [uri]) do
-      {:ok, token} -> [{"Authorization", "Bearer #{token}"}, {"Content-Type", "application/json"}]
-      {:error, _reason} -> [{"Content-Type", "application/json"}]
+    with {:ok, token} <- jwt(credentials, uris: [uri]) do
+      {:ok, [{"Authorization", "Bearer #{token}"}, {"Content-Type", "application/json"}]}
     end
   end
 
@@ -58,20 +75,35 @@ defmodule DpExchange.Coinbase.Auth do
   Short by design, and **not cached**: the streaming side rebuilds one per subscribe. A
   token that outlives its window fails in exactly the silent way the incident above was
   about — the connection is up, the subscribe is accepted, and no data arrives.
+
+  ## Credentials that cannot sign are refused here, by name
+
+  A map without `:api_key` and `:api_secret` — `nil`, `%{}`, or one assembled with a
+  typo'd key — answers `{:error, {:missing_credentials, :coinbase}}`, the same shape
+  every other venue package in this family returns for the same condition.
+
+  This clause used to be absent, and `credentials.api_key` was read unconditionally, so
+  the same input raised `KeyError` from inside signing instead. That reached every write
+  endpoint through `Rest.json_request/5`, which — unlike `Rest.request/5` — carries no
+  `nil` guard of its own, and it surfaced as a crash in the caller's process rather than
+  as the refusal the contract asks for.
   """
   @spec jwt(map(), keyword()) :: {:ok, String.t()} | {:error, term()}
-  def jwt(credentials, opts \\ []) do
+  def jwt(credentials, opts \\ [])
+
+  def jwt(%{api_key: api_key, api_secret: api_secret}, opts)
+      when is_binary(api_key) and is_binary(api_secret) do
     now = DateTime.utc_now() |> DateTime.to_unix(:second)
     nonce = 16 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
 
     header =
-      %{"alg" => "EdDSA", "kid" => credentials.api_key, "nonce" => nonce, "typ" => "JWT"}
+      %{"alg" => "EdDSA", "kid" => api_key, "nonce" => nonce, "typ" => "JWT"}
       |> Jason.encode!()
       |> Base.url_encode64(padding: false)
 
     claims =
       %{
-        "sub" => credentials.api_key,
+        "sub" => api_key,
         "iss" => "coinbase-cloud",
         "aud" => ["retail_rest_api_proxy"],
         "nbf" => now,
@@ -83,7 +115,7 @@ defmodule DpExchange.Coinbase.Auth do
 
     signing_input = "#{header}.#{claims}"
 
-    with {:ok, private_bytes} <- decode_private_key(credentials.api_secret) do
+    with {:ok, private_bytes} <- decode_private_key(api_secret) do
       signature =
         :eddsa
         |> :crypto.sign(:none, signing_input, [private_bytes, :ed25519])
@@ -92,6 +124,8 @@ defmodule DpExchange.Coinbase.Auth do
       {:ok, "#{signing_input}.#{signature}"}
     end
   end
+
+  def jwt(_credentials, _opts), do: {:error, {:missing_credentials, :coinbase}}
 
   defp maybe_put_uris(claims, nil), do: claims
   defp maybe_put_uris(claims, uris), do: Map.put(claims, "uris", uris)

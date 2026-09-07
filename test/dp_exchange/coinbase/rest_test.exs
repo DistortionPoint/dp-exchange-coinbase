@@ -33,7 +33,10 @@ defmodule DpExchange.Coinbase.RestTest do
   # `/best_bid_ask` has no public form — unlike every other market-data endpoint this
   # module reads, it genuinely requires a credential. See `get_top_of_book/2`'s own doc.
   defp credentials do
-    %{api_key: "organizations/x/apiKeys/y", api_secret: "-----BEGIN EC PRIVATE KEY-----"}
+    %{
+      api_key: "organizations/x/apiKeys/y",
+      api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="
+    }
   end
 
   @ticker %{
@@ -93,7 +96,7 @@ defmodule DpExchange.Coinbase.RestTest do
         Req.Test.json(conn, %{"pricebooks" => []})
       end
 
-      assert {:refused, :missing_credentials} =
+      assert {:error, {:missing_credentials, :coinbase}} =
                Rest.get_top_of_book("BTC-USD", plug: plug, retry_attempts: 0)
 
       refute_received :request_sent
@@ -226,7 +229,7 @@ defmodule DpExchange.Coinbase.RestTest do
 
       credentials = %{
         api_key: "organizations/x/apiKeys/y",
-        api_secret: "-----BEGIN EC PRIVATE KEY-----"
+        api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="
       }
 
       assert {:ok, _private} =

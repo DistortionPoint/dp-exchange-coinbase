@@ -33,7 +33,7 @@ defmodule DpExchange.Coinbase.PositionAndEditPreviewTest do
 
   @credentials %{
     api_key: "organizations/x/apiKeys/y",
-    api_secret: "-----BEGIN EC PRIVATE KEY-----"
+    api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="
   }
 
   defp responding(body) do

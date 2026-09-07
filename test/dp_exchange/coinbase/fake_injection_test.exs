@@ -183,7 +183,10 @@ defmodule DpExchange.Coinbase.FakeInjectionTest do
       # Credentials are required here — see the real client's own moduledoc: this is the
       # one endpoint with no public form, and the fake refuses without them exactly as
       # the venue does.
-      opts = [credentials: %{api_key: "k", api_secret: "s"}]
+      opts = [
+        credentials: %{api_key: "k", api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="}
+      ]
+
       assert Fake.get_top_of_book("BTC-USD", opts) == {:error, :injected}
       assert {:ok, _tob} = Fake.get_top_of_book("ETH-USD", opts)
     end

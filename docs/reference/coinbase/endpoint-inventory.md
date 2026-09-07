@@ -221,7 +221,7 @@ serves both; this one does not:
     GET /api/v3/brokerage/market/best_bid_ask?product_ids=BTC-USD  -> 404 Route Not Found
 
 `get_top_of_book/2` therefore requires credentials and fails closed
-(`{:refused, :missing_credentials}`) rather than sending an unauthenticated request that
+(`{:error, {:missing_credentials, :coinbase}}`) rather than sending an unauthenticated request that
 would come back as an opaque 401. `/product_book` is not the same case: `market/product_book`
 is real and public, and `get_order_book/2` reads it exactly like every other
 public/private pair in this table.

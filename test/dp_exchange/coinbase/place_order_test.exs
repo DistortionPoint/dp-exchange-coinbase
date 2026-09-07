@@ -32,7 +32,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
 
   @credentials %{
     api_key: "organizations/x/apiKeys/y",
-    api_secret: "-----BEGIN EC PRIVATE KEY-----"
+    api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="
   }
 
   defp responding(body, status \\ 200) do
@@ -157,6 +157,48 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
         limit_request(%{order_type: :market, time_in_force: :ioc}) |> Map.delete(:quantity)
 
       assert {:error, :missing_order_size} = place(request, responding(accepted()))
+    end
+  end
+
+  describe "a write that cannot be signed is refused here, never sent unsigned" do
+    # `place_order/3` has no public path — every caller of `json_request/5` is a write.
+    # A malformed secret used to produce an *unauthenticated* POST that was actually
+    # sent, because `Auth.rest_headers/4` swallowed the signing error and returned the
+    # content-type header alone, and neither `Rest.request/5` nor `Rest.json_request/5`
+    # ever checked whether an `Authorization` header came back. The venue answers that
+    # with an opaque 401, which reads as a credential problem at Coinbase rather than a
+    # malformed key here.
+    test "a malformed api_secret refuses locally rather than posting an unsigned order" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, :request_was_sent)
+        Plug.Conn.resp(conn, 200, "{}")
+      end
+
+      assert {:error, :invalid_base64} =
+               Rest.place_order(
+                 %{@credentials | api_secret: "not base64 !!"},
+                 limit_request(),
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      refute_receive :request_was_sent
+    end
+
+    test "credentials that cannot sign at all are refused by name" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, :request_was_sent)
+        Plug.Conn.resp(conn, 200, "{}")
+      end
+
+      assert {:error, {:missing_credentials, :coinbase}} =
+               Rest.place_order(%{}, limit_request(), plug: plug, retry_attempts: 0)
+
+      refute_receive :request_was_sent
     end
   end
 

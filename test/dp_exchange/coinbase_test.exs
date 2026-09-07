@@ -56,7 +56,7 @@ defmodule DpExchange.CoinbaseTest do
   end
 
   describe "unsupported endpoints return the atom and do not raise" do
-    @credentials %{api_key: "k", api_secret: "cw=="}
+    @credentials %{api_key: "k", api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="}
 
     test "every endpoint declared :unsupported actually refuses" do
       caps = Coinbase.capabilities()
@@ -287,7 +287,7 @@ defmodule DpExchange.CoinbaseTest do
   end
 
   describe "the fake's order lifecycle matches the venue's" do
-    @fake_credentials %{api_key: "k", api_secret: "s"}
+    @fake_credentials %{api_key: "k", api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="}
 
     test "placing an order the venue would accept succeeds" do
       request = %{
@@ -392,7 +392,10 @@ defmodule DpExchange.CoinbaseTest do
   describe "the facade delegates the order surface" do
     # These go through DpExchange.Coinbase rather than Rest, which is the module a consumer
     # actually calls. A delegate wired to the wrong function would pass every Rest test.
-    @creds %{api_key: "organizations/x/apiKeys/y", api_secret: "-----BEGIN EC PRIVATE KEY-----"}
+    @creds %{
+      api_key: "organizations/x/apiKeys/y",
+      api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="
+    }
 
     defmodule FacadeLimiter do
       @moduledoc false

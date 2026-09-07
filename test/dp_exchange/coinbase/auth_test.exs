@@ -82,18 +82,34 @@ defmodule DpExchange.Coinbase.AuthTest do
 
   describe "rest_headers/4" do
     test "returns a bearer token scoped to the call" do
-      assert [{"Authorization", "Bearer " <> token}, {"Content-Type", "application/json"}] =
+      assert {:ok, [{"Authorization", "Bearer " <> token}, {"Content-Type", "application/json"}]} =
                Auth.rest_headers(:get, "/api/v3/brokerage/accounts", nil, @credentials)
 
       assert claims_of(token)["uris"] == ["GET api.coinbase.com/api/v3/brokerage/accounts"]
     end
 
-    test "a signing failure yields NO Authorization header rather than an unsigned one" do
+    test "a signing failure refuses the call rather than letting it be sent unsigned" do
       # An unsigned token is worse than none: it looks like a credential problem at the
       # venue rather than at us, and sends the reader looking in the wrong place.
-      headers = Auth.rest_headers(:get, "/x", nil, %{@credentials | api_secret: "!!"})
+      #
+      # This used to return the content-type header alone and document that "the caller
+      # decides whether an unauthenticated request is acceptable". No caller ever
+      # decided — `Rest` handed the headers straight to `HttpClient.request/5` — so a
+      # malformed secret became an unauthenticated POST on a write endpoint that has no
+      # public path to fall back to. The error shape is what makes the rule enforceable.
+      assert {:error, :invalid_base64} =
+               Auth.rest_headers(:get, "/x", nil, %{@credentials | api_secret: "!!"})
+    end
 
-      assert headers == [{"Content-Type", "application/json"}]
+    test "credentials that cannot sign are refused by name, not with a KeyError" do
+      # The shape every other venue package in this family returns for this condition.
+      # `jwt/2` used to read `credentials.api_key` unconditionally and raise instead,
+      # which reached every write endpoint through `Rest.json_request/5`.
+      assert {:error, {:missing_credentials, :coinbase}} =
+               Auth.rest_headers(:get, "/x", nil, %{})
+
+      assert {:error, {:missing_credentials, :coinbase}} = Auth.jwt(nil)
+      assert {:error, {:missing_credentials, :coinbase}} = Auth.jwt(%{api_key: "k"})
     end
   end
 

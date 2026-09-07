@@ -20,6 +20,71 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A credential that could not sign produced an unauthenticated request that was actually
+  sent — on write endpoints, `place_order/3` included.** `Auth.rest_headers/4` was written
+  as `Core.HttpClient`'s 4-arity auth hook, which may only return a header list and has no
+  way to say "abort, do not send". So on a signing failure it returned the content-type
+  header alone and documented that "the caller decides whether an unauthenticated request
+  is acceptable". **No caller ever decided**: `Rest.request/5` and `Rest.json_request/5`
+  both handed the result straight to `HttpClient.request/5` without checking whether an
+  `Authorization` header came back.
+
+  For a public market-data `GET` that was harmless — Coinbase serves those anonymously.
+  For `json_request/5` there is no public path: every caller of it is a write, so a
+  malformed `api_secret` turned a live order into an unauthenticated POST that the venue
+  answered with an opaque `401`, which reads as a credential problem *at Coinbase* rather
+  than a malformed key here. That is precisely the failure the function's own moduledoc
+  existed to prevent, produced by the mechanism documenting it.
+
+  `Auth.rest_headers/4` now returns `{:ok, headers} | {:error, reason}` and both request
+  paths gate on it with `with`, the way every other venue package in this family already
+  gated on its own `Auth.headers`. The `nil`-credentials branch is unchanged and is not
+  this case: a call made deliberately without credentials still takes the public path.
+
+  The test suite was green throughout, because the fixtures used an `api_secret` of
+  `"-----BEGIN EC PRIVATE KEY-----"` — unparseable, and therefore never signing anything.
+  Every fixture now carries a real 32-byte Ed25519 seed, so the suite exercises the
+  signing path it was previously bypassing.
+
+- **`Auth.jwt/2` raised `KeyError` on credentials it could not read**, rather than
+  refusing by name. It read `credentials.api_key` unconditionally, so `nil`, `%{}` or a
+  map assembled with a typo'd key crashed inside signing — reachable from every write
+  endpoint through `Rest.json_request/5`, which carries no `nil` guard of its own, and
+  from `Feed`'s unattended alias-map fetch. It now answers
+  `{:error, {:missing_credentials, :coinbase}}`, the shape the other four venue packages
+  in this family return for the same condition.
+
+- **4xx statuses were recovered by searching the error message for `"404"`**, which was
+  wrong in both directions. `Core.HttpClient`'s own moduledoc names that exact expression
+  as the reason its `raw_status: true` option exists:
+
+  - **False positive** — any 4xx whose *body* contained `"404"` (an order id, a price, an
+    embedded vendor code) became `{:refused, :not_listed}`: permanent, never retried, for
+    something that may have been transient.
+  - **False negative** — a `400`, `401` or `403` contains no `"404"`, so a bad request or
+    a **rejected credential** fell through to `{:error, message}` and read as
+    possibly-transient. A rotated key was retried instead of refused.
+
+  `Rest` now passes `raw_status: true` and matches the status exactly, as the other four
+  venue packages already did. `404` remains `{:refused, :not_listed}`; `400`/`401`/`403`
+  are now `{:refused, {:venue_error, status, message}}` carrying the venue's own words.
+
+  One existing test asserted `{:error, _}` for a rejected credential while its own name —
+  and `test_connection/2`'s moduledoc — both said refusal. Both were right; the assertion
+  was pinning the bug.
+
+### Changed
+
+- **`capabilities/0` now declares `authenticated_streamable: [:order_book]`.** It was left
+  at its `[]` default, which reads as "no streamed kind here needs a credential". That is
+  not true: `Socket`'s `@authenticated_channels` names `level2`, and `Feed` subscribes
+  `["ticker"]` without credentials and `["ticker", "level2"]` with them — so an anonymous
+  consumer gets quotes and no book. A host asking whether it needed a credential before it
+  could stream book data was told no, and would have learned otherwise from a book stream
+  that never arrived.
+
 ### Added
 
 - **`level2_pairs_per_socket` is now a supervision option**, not only the internal

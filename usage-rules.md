@@ -43,8 +43,9 @@ Declared as `credential_benefit: :higher_ceiling` — a boolean could only have 
 **`get_top_of_book/2` is the one exception.** The venue publishes no public form of
 `/best_bid_ask` — confirmed live, `401` authenticated and `404` at the `/market/...` path
 every other reader here has. Call it without credentials and it returns
-`{:refused, :missing_credentials}` before sending anything, rather than surfacing the
-venue's 401 as an opaque error.
+`{:error, {:missing_credentials, :coinbase}}` before sending anything, rather than
+surfacing the venue's 401 as an opaque error. Not `{:refused, _}`: the credential never
+left this process, so nothing at Coinbase ever saw a request to decline.
 
 ## Nine candle widths, and `12h` is not one of them
 
@@ -85,9 +86,46 @@ If you have better numbers, that field is where to correct them.
 ## Refusal versus error
 
 - `{:refused, :not_listed}` — Coinbase does not carry this symbol. Permanent. Stop asking.
+- `{:refused, {:venue_error, status, message}}` — a `400`, `401` or `403`: the venue
+  received the request and declined it, in its own words. Permanent **for the request as
+  sent** — a caller whose key was rotated signs again with the new one, which is a
+  different request rather than a retry of this one.
 - `{:error, {:unsupported_timeframe, tf}}` — a width it does not serve. Your mistake, not
   a transient one.
+- `{:error, {:missing_credentials, :coinbase}}` — this call needs a credential and was not
+  given one, detected here before anything was sent. Never `{:refused, _}`: the venue
+  received no request to decline.
 - `{:error, reason}` — everything else. Retry as your policy allows.
+
+### The 4xx statuses are read from the status, not from the message text
+
+Worth stating because the previous behaviour was wrong in both directions and a consumer
+may have built around it. This package used to recover the HTTP status by searching the
+flattened error string for `"404"`, which meant:
+
+- a 4xx whose **body** happened to contain `"404"` — an order id, a price, a vendor
+  code — came back `{:refused, :not_listed}`: permanent, never retried, for something that
+  may well have been transient; and
+- a `400`, `401` or `403` contains no `"404"` anywhere, so a bad request or a **rejected
+  credential** fell through to a bare `{:error, message}` and read as possibly-transient —
+  a rotated key retried instead of refused.
+
+Both are fixed; the status is now matched exactly, as the other four venue packages in
+this family already did. **If you were matching `{:error, message}` for authentication
+failures, they now arrive as `{:refused, {:venue_error, 401, _}}`.**
+
+## Signing failures stop here, rather than being sent unsigned
+
+A credential that cannot produce a signature — a malformed `api_secret`, or a map missing
+`:api_key` / `:api_secret` — refuses **locally**, before anything is sent:
+`{:error, :invalid_base64}`, `{:error, {:unsupported_key_size, n}}`, or
+`{:error, {:missing_credentials, :coinbase}}`.
+
+This package used to drop the `Authorization` header and send the request anyway. On a
+public market-data `GET` that is harmless — Coinbase serves those anonymously. On a
+**write** there is no public path, so `place_order/3` and every other POST went to the
+venue unauthenticated and came back an opaque `401` that reads like a problem with your
+account rather than with the key you passed. **An unsigned token is worse than none.**
 
 ## Streaming
 
@@ -99,6 +137,17 @@ Public channels carry no token. Attaching one is actively harmful: Coinbase answ
 bogus token with an authentication failure, which is how a book channel once produced
 nothing while the public ticker worked fine — a venue half-delivering looks like a quiet
 market rather than a broken credential.
+
+### `:order_book` needs a credential; `:quotes` does not
+
+`capabilities/0` now says so: `streamable` is `[:quotes, :order_book]` and
+`authenticated_streamable` is `[:order_book]`. Without credentials this package subscribes
+`ticker` alone, so you get quotes and **no book**.
+
+That second field was left empty until now, which reads as "nothing here needs a
+credential". A host deciding whether it had to obtain one before it could stream book data
+was told no, and would have discovered otherwise from a book stream that simply never
+arrived — ask `capabilities/0` rather than waiting to find out from `coverage/1`.
 
 ### Frames are tagged with the symbol you subscribed, not whatever the venue renamed it to
 
@@ -365,10 +414,11 @@ is a real implementation of the facade that answers from memory, models Coinbase
 refusals — unlisted symbols, `12h`, the 350 boundary — and passes the same conformance
 suite as the real adapter.
 
-**`get_top_of_book/2` refuses without `opts[:credentials]`, in the fake too** — the one
+**`get_top_of_book/2` errors without `opts[:credentials]`, in the fake too** — the one
 call this venue genuinely requires them for (see above). A test calling it with none gets
-`{:refused, :missing_credentials}` against both the fake and the real client, on purpose:
-a fake that answered `:ok` regardless would pass a suite that then refuses in production.
+`{:error, {:missing_credentials, :coinbase}}` against both the fake and the real client,
+on purpose: a fake that answered `:ok` regardless would pass a suite that then refuses in
+production.
 
 **Do not point tests at the live venue.** This package's own tier-2 tests do that, tagged
 and excluded, run by hand. A venue that sees a package polling it on a timer will

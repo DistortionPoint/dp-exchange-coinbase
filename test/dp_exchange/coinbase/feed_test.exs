@@ -901,7 +901,7 @@ defmodule DpExchange.Coinbase.FeedTest do
     # longer share a shard, `level2`'s grouping is smaller (`@level2_pairs_per_socket`,
     # not `@pairs_per_socket`), and `ticker`'s own boot-time coverage stays exactly as
     # fast as it was — its shard is still the call's synchronous primary.
-    @credentials %{api_key: "k", api_secret: "s"}
+    @credentials %{api_key: "k", api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="}
 
     test "35 symbols is one ticker shard and two level2 shards, ticker first" do
       # 35 symbols: one `ticker` shard (`shards/1` at 100/socket never splits it) against
@@ -976,7 +976,7 @@ defmodule DpExchange.Coinbase.FeedTest do
     # A hardcoded venue fact costs every consumer a package release and a redeploy when
     # the venue's own ceiling moves; an option lets a consumer absorb that the same day.
     # See feed.ex's own moduledoc, "level2_pairs_per_socket — a supervision option".
-    @credentials %{api_key: "k", api_secret: "s"}
+    @credentials %{api_key: "k", api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="}
 
     test "the default matches the measured venue ceiling, 30" do
       assert :sys.get_state(start_feed()).level2_pairs_per_socket == 30
@@ -1910,10 +1910,15 @@ defmodule DpExchange.Coinbase.FeedTest do
     # shrinking one already did, with `removed` unsubscribed before `added` is subscribed —
     # never the other way round, and never both at once.
     #
-    # A real, JWT-signing credential — not the connect-failure-only `%{api_key: "k",
-    # api_secret: "s"}` used elsewhere in this file — because these tests exercise an
-    # actual successful `Socket.subscribe/4` call, which builds a real Ed25519 JWT (see
-    # `Auth.jwt/1`) rather than failing before it gets that far.
+    # A freshly generated Ed25519 seed, because these tests exercise an actual successful
+    # `Socket.subscribe/4` call, which builds a real JWT (see `Auth.jwt/2`) rather than
+    # failing before it gets that far.
+    #
+    # This used to be contrasted with a connect-failure-only fixture whose `api_secret`
+    # could not be decoded at all. Every fixture in this suite now carries a real 32-byte
+    # seed, because `Auth.rest_headers/4` returns `{:error, reason}` on a signing failure
+    # instead of silently dropping the `Authorization` header — so a credential that
+    # cannot sign no longer reaches the venue as an unauthenticated request.
     defp valid_credentials do
       %{api_key: "k", api_secret: :crypto.strong_rand_bytes(32) |> Base.encode64()}
     end

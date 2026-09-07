@@ -275,7 +275,10 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
     test "the CDP key pair the rest of this package uses is not accepted" do
       assert {:error, :missing_prime_credentials} =
                Prime.staking_status(
-                 %{api_key: "organizations/x", api_secret: "pem"},
+                 %{
+                   api_key: "organizations/x",
+                   api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="
+                 },
                  "p",
                  "w",
                  []

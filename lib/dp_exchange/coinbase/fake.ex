@@ -117,17 +117,20 @@ defmodule DpExchange.Coinbase.Fake do
 
   # **`get_top_of_book/2` is the one endpoint on this venue with no public form** — see
   # `DpExchange.Coinbase.Rest.get_top_of_book/2`'s moduledoc: `/best_bid_ask` answers `401`
-  # unauthenticated and has no `/market/...` counterpart, so the real client refuses with
-  # `{:refused, :missing_credentials}` before a request is even built. A fake that answered
-  # `:ok` regardless of `opts[:credentials]` would be *more* capable than the venue on
-  # exactly the one call where that gap matters — a consumer's test would pass without
-  # credentials and the same call would refuse in production, which is the silent
-  # "differently capable" divergence this module's own moduledoc says it exists to prevent.
+  # unauthenticated and has no `/market/...` counterpart, so the real client errors with
+  # `{:error, {:missing_credentials, :coinbase}}` before a request is even built — never
+  # `{:refused, _}`, which `DpExchange.Core.Venue`'s own moduledoc reserves for the venue's
+  # own permanent word about a request it actually received; a credential that never left
+  # this process was never seen by anything at Coinbase. A fake that answered `:ok`
+  # regardless of `opts[:credentials]` would be *more* capable than the venue on exactly
+  # the one call where that gap matters — a consumer's test would pass without credentials
+  # and the same call would refuse in production, which is the silent "differently
+  # capable" divergence this module's own moduledoc says it exists to prevent.
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
     with_injection(symbol, fn ->
       if is_nil(Keyword.get(opts, :credentials)) do
-        {:refused, :missing_credentials}
+        {:error, {:missing_credentials, :coinbase}}
       else
         case Map.fetch(@price, symbol) do
           {:ok, price} ->

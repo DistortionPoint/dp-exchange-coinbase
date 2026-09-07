@@ -10,5 +10,8 @@ defmodule DpExchange.CoinbaseContractTest do
     fake: DpExchange.Coinbase.Fake,
     symbol_format: DpExchange.Coinbase.SymbolFormat,
     sample_pairs: ~w(BTC-USD ETH-USD BTC-USDC),
-    credentials: %{api_key: "test-key", api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyE="}
+    credentials: %{
+      api_key: "test-key",
+      api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="
+    }
 end

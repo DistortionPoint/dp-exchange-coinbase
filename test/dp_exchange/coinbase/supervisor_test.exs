@@ -49,7 +49,11 @@ defmodule DpExchange.Coinbase.SupervisorTest do
       # `public_ceiling` regardless of `opts[:credentials]`, which throttled a
       # credentialed consumer's authenticated traffic to a third of what the venue
       # actually allows it, silently.
-      opts = start_venue(credentials: %{api_key: "k", api_secret: "cw=="})
+      opts =
+        start_venue(
+          credentials: %{api_key: "k", api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="}
+        )
+
       limiter = VenueSupervisor.limiter_name(opts)
 
       caps = DpExchange.Coinbase.capabilities()
