@@ -386,23 +386,15 @@ defmodule DpExchange.Coinbase.Feed do
   moduledoc says is often true — would reintroduce exactly the risk this whole fix exists
   to close, on the one path where this package cannot check.
 
-  **This does leave one gap open, not disclosed anywhere else in this file: a permanently
-  stranded unsubscribe.** If every retry of `removed`'s own unsubscribe fails and this
-  package gives up, `state.shards[key].symbols` still moves to `wanted` (the same
-  optimistic bookkeeping every other reconcile path in this module already uses — coverage
-  is driven by `state.delivering`, never by this bookkeeping, so nothing about `coverage/1`
-  goes dishonest). But the next unconditional resubscribe cycle only re-issues a plain
-  `subscribe` for whatever `state.shards[key].symbols` now says — it does not itself retry
-  the stranded unsubscribe. If `removed` genuinely never reached the venue in that failure
-  case, and the venue's ceiling is (per the measurement above) concurrent, a later
-  resubscribe adding `wanted` on top of a session that VENUE-SIDE still also holds
-  `removed` could in principle exceed the cap. This is disclosed rather than closed: this
-  package has no acknowledgement to wait on (see above), and building a cross-cycle
-  unsubscribe-retry ledger to close a gap this narrow — reachable only after a bounded
-  retry chain has already exhausted itself against a socket that is otherwise still
-  healthy enough to carry `subscribe` frames moments later — was judged not to clear its
-  own complexity bar, the same judgement this file already made once for an adaptive shard
-  size (see below, "an adaptive, self-shrinking shard size was considered and rejected").
+  **This used to leave one gap open: a permanently stranded unsubscribe. It does not any
+  more — see "a stranded unsubscribe is not silently forgotten" below**, which was closed
+  after this file first shipped this section, on a coordinator's own trace rather than a
+  self-report: `reconcile_shard_in_place/7` recorded `state.shards[key].symbols = wanted`
+  unconditionally, on both its sync and deferred clauses, regardless of whether the
+  unsubscribe underneath it ever actually succeeded. `removed`'s symbols vanished from
+  this module's own bookkeeping the moment retries gave up, even though they were never
+  released at the venue — a real, permanent budget leak, closed by
+  `state.pending_unsubscribes` and the mechanism the next section documents.
 
   **The reshuffle hazard that made this real in the first place is unchanged, and still
   handled — just more cheaply now.** `reshard/1` still recomputes chunks on every
@@ -416,9 +408,124 @@ defmodule DpExchange.Coinbase.Feed do
 
   *(This section used to end with two open probes recommended for a future consumer to
   run — "attempt-counting" and "cumulative distinct-count." Probe 1 above IS the
-  attempt-counting probe; it is no longer open. The one thing still genuinely open is the
-  permanently-stranded-unsubscribe gap two paragraphs up — a different question from the
-  cumulative-vs-concurrent one this section closes.)*
+  attempt-counting probe; it is no longer open. Nothing on the cumulative-vs-concurrent
+  axis this section is about remains open. What was, for a time, a genuinely open gap on a
+  DIFFERENT axis — a permanently stranded unsubscribe — is the next section's subject, and
+  it is closed too.)*
+
+  ## A stranded unsubscribe is not silently forgotten
+
+  **Traced, not merely reviewed.** The withheld-`added` recovery two sections up was
+  checked by following what `reconcile_shard_in_place/7` actually records, not by trusting
+  the summary of it: the WITHHELD side (`added`) does recover — the 60-second cycle
+  re-issues `state.shards[key].symbols`, which already equals `wanted`, so those symbols
+  get subscribed on the next tick regardless of whether this reconcile's own unsubscribe
+  ever succeeded. The STRANDED side (`removed`) did not — nothing re-issued an unsubscribe
+  for it, and this module's own bookkeeping had already stopped tracking it as owed. Left
+  alone, a shard that hit this even once would degrade into exactly the failure this whole
+  file exists to prevent: the venue's live count for that session sitting at
+  `old ∪ wanted` rather than `wanted`, eventually exceeding the shard's own cap, at which
+  point every later subscribe for that shard is refused — quietly, per DpCryptoManagement's
+  own probe 2: socket alive, existing symbols still flowing, new ones silently absent. The
+  recovery path for `added` makes this WORSE in a sense, not better, because it keeps
+  re-issuing subscribes into a budget the stranded slots guarantee cannot fit.
+
+  **`state.pending_unsubscribes` — `%{{channel, index} => [symbol, ...]}` — is that
+  record.** `strand_unsubscribe/7` writes to it whenever a reconcile gives up on releasing
+  some `removed` symbols, on EITHER the synchronous clause (no retry chain of its own — one
+  attempt, then straight to stranding, the same "no retry in the primary path" shape
+  `open_shard/5`'s sync clause already has) or the deferred one's bounded retry chain
+  exhausting (`handle_unsubscribe_failure/8`). `handle_info(:resubscribe, _)` reads it back
+  on the SAME unconditional cadence `retry_missing_shards/1` already uses to recover a
+  shard whose socket never opened at all — the governing principle is that function's own
+  comment, word for word: a shard with "NO automatic recovery path at all, ever" is "a
+  silent, permanent coverage gap indistinguishable from a quiet market, on a venue this
+  coordinator's OWN moduledoc says must never go unretried." A stranded unsubscribe is the
+  identical defect in a different place, and gets the identical fix.
+
+  **Ordering still applies, and it is reached through the SAME machinery, not a parallel
+  one.** Each resubscribe tick now sends `{:channel_reconcile, key, socket, channel,
+  pending, symbols, credentials}` per shard — `pending` (a shard's own
+  `state.pending_unsubscribes` entry, `[]` in the ordinary case) as `removed`, and
+  `symbols` (the shard's WHOLE current membership, not a delta — matching exactly what an
+  unconditional resubscribe already re-issued before this fix) as `added`. This is the
+  identical `attempt_channel_reconcile/6` an ordinary `subscribe/3`, `unsubscribe/2` or
+  `update_symbols/2` reconcile already runs, so the retried unsubscribe precedes that
+  shard's resubscribe on the same tick for the same reason it precedes one anywhere else in
+  this file — not a second, separately-reasoned code path that could drift from the first.
+  For the ordinary case (`pending == []`) this costs nothing beyond what a plain
+  `Socket.subscribe/4` already cost: `unsubscribe_step/3` short-circuits an empty list
+  without sending anything.
+
+  **What clears an entry: a successful send of exactly those symbols, per symbol, not per
+  shard.** `clear_pending_unsubscribe/3` computes `pending -- removed` rather than deleting
+  the whole key, because a shard can be carrying a stranded release from one reconcile
+  while an unrelated, still-outstanding one from an earlier reconcile also sits there —
+  only the symbols THIS successful send actually covered are removed. `strand_unsubscribe/7`
+  is symmetric: it merges (`Enum.uniq(&1 ++ removed)`), never overwrites, so a later,
+  unrelated stranding does not erase an earlier one still waiting on its own retry.
+
+  **What clears an entry the other way: the shard itself going away.**
+  `drop_unwanted_shards/3` now drops a shard's `pending_unsubscribes` entry in the same
+  breath it drops the shard from `state.shards` — necessary, not cosmetic:
+  `handle_info(:resubscribe, _)` walks `Map.keys(state.shards)` specifically, so a key
+  absent from `state.shards` is a key nothing ever revisits. Without this, a shard that
+  vanished (every symbol unsubscribed, or churned away entirely) while still carrying a
+  stranded release would leave that bookkeeping orphaned — retried by nothing — forever.
+  This answers "can `state.pending_unsubscribes` grow without bound": bounded by however
+  many currently-OPEN shards carry an unresolved stranding, not by this module's all-time
+  history of failures, because a dropped shard's own entry is dropped with it.
+
+  **A stranded symbol re-added to the same shard while still pending is not a hazard,
+  because `added` is always the shard's WHOLE current set, never a delta.** Ordinary churn
+  can plausibly move a symbol out (stranding its release) and back in before the next tick
+  retries it. Whatever the retried `unsubscribe` does to that symbol, the SAME reconcile's
+  `subscribe` — for the shard's full, current membership — puts it right back if it is
+  still wanted, in the same message, in order. At worst this costs one redundant
+  unsubscribe/resubscribe pair for that one symbol; it never leaves the shard short a
+  symbol it currently wants.
+
+  **What is not built, and the honest reason: correlating a stranding to a socket
+  RECONNECT specifically.** A socket that dies and reconnects gets a fresh session with the
+  venue — every stranded slot on the OLD session is released along with it, whether this
+  module notices or not. But `Socket` deliberately holds no shard-correlating identity in
+  its `:link_up`/`:link_down` notices (see this module's own `handle_info({:dp_exchange,
+  :coinbase, %Notice{}}, _)` — every socket's notices arrive through the identical,
+  unattributed shape, matching `Socket`'s own moduledoc: "`Socket` holds no book to key by
+  anything"), and WebSockex's own reconnect keeps the same pid, so pid identity cannot
+  substitute either. Building that correlation would mean widening `Socket`'s own contract
+  — real, cross-module surface — for a case whose cost, left as is, is bounded and low: a
+  stale `pending_unsubscribes` entry retried against a fresh session sends one
+  `unsubscribe` for a symbol the venue no longer has subscribed, which this family's stated
+  idempotency assumption (`FrameSender`'s own moduledoc: "subscribes are idempotent on
+  every venue in this family, so a duplicate is harmless") extends to as a working
+  assumption for `unsubscribe` too, though NOT independently measured against an
+  unsubscribed symbol specifically — an honestly-labelled gap, not a silent one. And
+  because that stale unsubscribe is immediately followed, in the SAME reconcile, by a
+  subscribe of the shard's whole current membership, a stale entry costs at most one wasted
+  frame and self-corrects the same tick — it cannot leave the shard under-subscribed. There
+  is also a practical reason the stale case rarely persists at all: whatever made the
+  earlier sends fail (a busy, backed-up socket) is usually exactly what a reconnect clears,
+  so the very next retry after a reconnect is likely to simply succeed and clear the entry
+  normally, not because the reconnect was detected, but because reconnecting tends to
+  un-wedge the condition that caused the stranding in the first place.
+
+  **What `transient_frame_failure?/1`'s real reach turns out to be, stated plainly rather
+  than assumed generous.** Every reason `Socket.unsubscribe/3` can return comes from
+  `FrameSender` alone — `:send_timeout` or `{:send_exit, reason}` — and both are classified
+  transient. `Socket.unsubscribe/3` has no analogue of a subscribe's
+  `{:credentials_required, channel}`: it builds no JWT and checks no credentials, per its
+  own definition (contrast `Socket.subscribe/4`'s `subscription_message/3`). So the
+  non-transient `cond` branch in `handle_unsubscribe_failure/8` does not fire against the
+  real venue today — "permanently stranded" is reached, in practice, only by EXHAUSTING the
+  bounded retry chain against a socket that keeps answering `:send_timeout` or
+  `{:send_exit, _}` without ever dying outright (`Process.alive?/1` staying `true`
+  throughout — a socket that is genuinely dead short-circuits every reconcile path before
+  it reaches this branch at all, matching every other dead-socket guard in this module).
+  The non-transient branch is kept anyway, wired to the identical stranding-and-retry
+  behaviour as an exhausted chain, for the same "do not assume a shape that happens to hold
+  today" reason `handle_subscribe_failure/6` keeps its own — but it is not what this
+  mechanism was actually built to close in production; the retry-exhaustion branch is.
 
   ## A refusal is not always a clean gate — observed, not explained
 
@@ -1193,6 +1300,15 @@ defmodule DpExchange.Coinbase.Feed do
        # delay, or the connect failed) is simply absent — its symbols stay on whatever
        # this package's REST poll answers until the socket comes up.
        shards: %{},
+       # {channel, index} => [symbol, ...] — departing symbols whose unsubscribe could
+       # not be confirmed sent, believed still live on the venue. See the moduledoc's "a
+       # stranded unsubscribe is not silently forgotten" section: written by
+       # `strand_unsubscribe/7` when a reconcile gives up on releasing them, read and
+       # retried by `handle_info(:resubscribe, _)` on the same unconditional cadence
+       # `retry_missing_shards/1` already uses for a shard that never got a socket at
+       # all, and cleared (per symbol) the moment a retry actually sends. Absent from a
+       # key entirely is the ordinary case — this map is normally empty.
+       pending_unsubscribes: %{},
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
@@ -1405,21 +1521,27 @@ defmodule DpExchange.Coinbase.Feed do
   # "unsubscribe before subscribe" section for why this ONE deferred message, rather than
   # the two independent `Process.send_after/3` calls this replaced, is what makes that
   # order a property of ordinary sequential code instead of two timers firing at the same
-  # tick. `attempt_channel_reconcile/6` is the whole implementation; this clause and the
+  # tick. `attempt_channel_reconcile/7` is the whole implementation; this clause and the
   # one below it only supply the starting attempt number, the same two-clause shape
-  # `:channel_subscribe` already uses.
-  def handle_info({:channel_reconcile, socket, channel, removed, added, credentials}, state) do
-    attempt_channel_reconcile(socket, channel, removed, added, credentials, 1, state)
+  # `:channel_subscribe` already uses. `key` travels alongside so a failure that gives up
+  # can record `removed` against the right shard in `state.pending_unsubscribes` — see
+  # `strand_unsubscribe/7` and the moduledoc's "a stranded unsubscribe is not silently
+  # forgotten" section. This same message shape is also what `handle_info(:resubscribe,
+  # _)` sends for every shard on its own unconditional cadence — see below — so a shard
+  # with nothing pending and one that is retrying a stranded release both flow through
+  # the identical code.
+  def handle_info({:channel_reconcile, key, socket, channel, removed, added, credentials}, state) do
+    attempt_channel_reconcile(key, socket, channel, removed, added, credentials, 1, state)
   end
 
   # The retry this module schedules when the UNSUBSCRIBE half of a reconcile fails
   # transiently — see `handle_unsubscribe_failure/8`. `attempt` starts at `2` here; the
-  # first attempt is always the 5-tuple clause above.
+  # first attempt is always the 6-tuple clause above.
   def handle_info(
-        {:channel_reconcile, socket, channel, removed, added, credentials, attempt},
+        {:channel_reconcile, key, socket, channel, removed, added, credentials, attempt},
         state
       ) do
-    attempt_channel_reconcile(socket, channel, removed, added, credentials, attempt, state)
+    attempt_channel_reconcile(key, socket, channel, removed, added, credentials, attempt, state)
   end
 
   def handle_info(:resubscribe, state) do
@@ -1431,17 +1553,25 @@ defmodule DpExchange.Coinbase.Feed do
     # boot. `ticker` shards sort first — see `shard_key_order/2` — so an already-open
     # `ticker` shard's re-issue is never pushed behind the (likely far more numerous)
     # `level2` shards'.
+    #
+    # `pending` — this shard's own `state.pending_unsubscribes` entry, `[]` for the
+    # ordinary case — travels with it so the eventual reconcile releases anything still
+    # stranded BEFORE it re-issues the shard's current symbols, the same ordering
+    # guarantee every other reconcile in this module keeps. See the moduledoc's "a
+    # stranded unsubscribe is not silently forgotten" section for why this is read here
+    # rather than tracked on a separate timer of its own.
     state.shards
     |> Map.keys()
     |> Enum.sort(&shard_key_order/2)
     |> Enum.with_index()
     |> Enum.each(fn {{channel, _index} = key, position} ->
       %{socket: socket, symbols: symbols} = Map.fetch!(state.shards, key)
+      pending = Map.get(state.pending_unsubscribes, key, [])
 
       if Process.alive?(socket) do
         Process.send_after(
           self(),
-          {:resubscribe_shard, socket, channel, symbols, state.credentials},
+          {:resubscribe_shard, key, socket, channel, pending, symbols, state.credentials},
           position * state.shard_spacing_ms
         )
       end
@@ -1463,9 +1593,23 @@ defmodule DpExchange.Coinbase.Feed do
     {:noreply, state}
   end
 
-  def handle_info({:resubscribe_shard, socket, channel, symbols, credentials}, state) do
+  # Reissues this shard's full current membership through the SAME unsubscribe-before-
+  # subscribe machinery an ordinary reconcile uses — `pending` is `removed`, `symbols`
+  # (the shard's WHOLE current set, not a delta) is `added`. For the ordinary case
+  # (`pending == []`) this is exactly as cheap as the plain `Socket.subscribe/4` it
+  # replaces: `unsubscribe_step/3` short-circuits on an empty list without sending
+  # anything. For a shard carrying a stranded release, this is what actually retries it —
+  # see the moduledoc's "a stranded unsubscribe is not silently forgotten" section.
+  def handle_info(
+        {:resubscribe_shard, key, socket, channel, pending, symbols, credentials},
+        state
+      ) do
     if Process.alive?(socket) do
-      Process.send_after(self(), {:channel_subscribe, socket, channel, symbols, credentials}, 0)
+      Process.send_after(
+        self(),
+        {:channel_reconcile, key, socket, channel, pending, symbols, credentials},
+        0
+      )
     end
 
     {:noreply, state}
@@ -1649,8 +1793,23 @@ defmodule DpExchange.Coinbase.Feed do
     end
   end
 
+  # Also drops any `pending_unsubscribes` entry for a shard that no longer exists — see
+  # the moduledoc's "a stranded unsubscribe is not silently forgotten" section for why
+  # this map could otherwise accumulate orphaned entries for shards `state.shards` has
+  # already forgotten: nothing walks a key that is not in `state.shards` (the
+  # `handle_info(:resubscribe, _)` walk below is keyed off `Map.keys(state.shards)`
+  # specifically), so a dropped shard's own stranding would otherwise sit here forever,
+  # retried by nothing. A dropped shard's socket is left running unmanaged either way
+  # (see `reshard/1`'s own comment on why it is not torn down here) — this only stops
+  # this module's own bookkeeping about it from growing without bound.
   defp drop_unwanted_shards(state, existing_keys, wanted_keys) do
-    %{state | shards: Map.drop(state.shards, existing_keys -- wanted_keys)}
+    dropped_keys = existing_keys -- wanted_keys
+
+    %{
+      state
+      | shards: Map.drop(state.shards, dropped_keys),
+        pending_unsubscribes: Map.drop(state.pending_unsubscribes, dropped_keys)
+    }
   end
 
   defp touch_shard(state, key, new_shards, sync: sync?, delay: delay) do
@@ -1708,19 +1867,40 @@ defmodule DpExchange.Coinbase.Feed do
     removed = current -- wanted
 
     # `added` is never sent while `removed`'s own unsubscribe has not succeeded — see the
-    # moduledoc. No retry here, matching every other synchronous, call-reply branch in this
+    # moduledoc. No RETRY here, matching every other synchronous, call-reply branch in this
     # module (`open_shard/5`'s own sync clause included): a caller subscribing to the
     # primary shard gets back exactly what happened on this one attempt, not a hidden
-    # multi-second retry loop stealing its `@call_timeout` budget.
-    result =
+    # multi-second retry loop stealing its `@call_timeout` budget. A failed unsubscribe is
+    # not simply dropped, though — it is stranded into `state.pending_unsubscribes`, the
+    # same record-and-recover-on-the-next-tick shape the async clause's own bounded retry
+    # chain falls back to once IT gives up — see `strand_unsubscribe/7` and the moduledoc's
+    # "a stranded unsubscribe is not silently forgotten" section.
+    {result, state} =
       if Process.alive?(socket) do
         case unsubscribe_step(socket, channel, removed) do
-          :ok when added == [] -> :ok
-          :ok -> Socket.subscribe(socket, channel, added, state.credentials)
-          {:error, _reason} = error -> error
+          :ok when added == [] ->
+            {:ok, clear_pending_unsubscribe(state, key, removed)}
+
+          :ok ->
+            state = clear_pending_unsubscribe(state, key, removed)
+            {Socket.subscribe(socket, channel, added, state.credentials), state}
+
+          {:error, reason} = error ->
+            state =
+              strand_unsubscribe(
+                state,
+                key,
+                channel,
+                removed,
+                added,
+                reason,
+                "it will be retried on the next unconditional resubscribe cycle"
+              )
+
+            {error, state}
         end
       else
-        :ok
+        {:ok, state}
       end
 
     {result, put_in(state.shards[key], %{socket: socket, symbols: wanted})}
@@ -1747,7 +1927,7 @@ defmodule DpExchange.Coinbase.Feed do
     if (added != [] or removed != []) and Process.alive?(socket) do
       Process.send_after(
         self(),
-        {:channel_reconcile, socket, channel, removed, added, state.credentials},
+        {:channel_reconcile, key, socket, channel, removed, added, state.credentials},
         delay
       )
     end
@@ -1760,57 +1940,96 @@ defmodule DpExchange.Coinbase.Feed do
   defp unsubscribe_step(socket, channel, removed),
     do: Socket.unsubscribe(socket, channel, removed)
 
+  # `pending -- removed` rather than dropping the whole key: a shard can accumulate a
+  # stranded release from one reconcile while an UNRELATED, still-outstanding one from an
+  # earlier reconcile is also sitting here — see `strand_unsubscribe/7`'s own comment on
+  # why entries are merged, never overwritten. Only the symbols THIS successful send
+  # actually covered are removed; anything else pending for this shard stays, to be
+  # retried on its own account.
+  defp clear_pending_unsubscribe(state, _key, []), do: state
+
+  defp clear_pending_unsubscribe(state, key, removed) do
+    update_in(state.pending_unsubscribes, fn pending ->
+      case Map.get(pending, key, []) -- removed do
+        [] -> Map.delete(pending, key)
+        remaining -> Map.put(pending, key, remaining)
+      end
+    end)
+  end
+
   # `Socket.subscribe/4` for `added` only ever runs once `unsubscribe_step/3` has returned
   # `:ok` for THIS message's own `removed` list — see `reconcile_shard_in_place/7`'s async
   # clause and the moduledoc's "unsubscribe before subscribe" section. A transient
   # unsubscribe failure retries the unsubscribe itself, the same bounded backoff a channel
   # subscribe already gets (`handle_unsubscribe_failure/8`), rather than risk sending
-  # `added` while `removed` may still be live on the venue's own session.
-  defp attempt_channel_reconcile(socket, channel, removed, added, credentials, attempt, state) do
+  # `added` while `removed` may still be live on the venue's own session. A successful
+  # send clears whatever THIS `removed` list covers from `state.pending_unsubscribes` —
+  # see `clear_pending_unsubscribe/3` — which is how a shard's own stranding self-heals
+  # once this same message is later replayed by `handle_info(:resubscribe, _)`.
+  defp attempt_channel_reconcile(
+         key,
+         socket,
+         channel,
+         removed,
+         added,
+         credentials,
+         attempt,
+         state
+       ) do
     if Process.alive?(socket) do
       case unsubscribe_step(socket, channel, removed) do
-        :ok when added == [] ->
-          :ok
-
         :ok ->
-          attempt_channel_subscribe(socket, channel, added, credentials, 1, state)
+          state = clear_pending_unsubscribe(state, key, removed)
+
+          if added == [] do
+            {:noreply, state}
+          else
+            attempt_channel_subscribe(socket, channel, added, credentials, 1, state)
+          end
 
         {:error, reason} ->
           handle_unsubscribe_failure(
+            key,
             socket,
             channel,
-            removed,
-            added,
+            {removed, added},
             credentials,
             attempt,
             reason,
             state
           )
       end
+    else
+      {:noreply, state}
     end
-
-    {:noreply, state}
   end
 
-  # Mirrors `handle_subscribe_failure/6`, for the unsubscribe half of a reconcile. Every
-  # reason `Socket.unsubscribe/3` can return comes from `FrameSender` alone — unlike a
-  # subscribe, it never builds a JWT or checks credentials — so `transient_frame_failure?/1`
-  # says `true` here in every case this module has ever observed; the non-transient branch
-  # exists for the same "do not assume a shape that happens to hold today" reason
-  # `handle_subscribe_failure/6` keeps its own.
+  # Mirrors `handle_subscribe_failure/6`, for the unsubscribe half of a reconcile.
+  #
+  # **In practice, the non-transient branch below never fires against the real venue.**
+  # Every reason `Socket.unsubscribe/3` can return comes from `FrameSender` alone —
+  # `Socket.unsubscribe/3` builds no JWT and checks no credentials the way
+  # `subscription_message/3` does for a subscribe, so it has no analogue of
+  # `{:credentials_required, channel}` to return. `FrameSender.send/3`'s only two error
+  # shapes, `:send_timeout` and `{:send_exit, reason}`, are both `transient_frame_failure?/1`
+  # `true`. The branch is kept anyway, for the same "do not assume a shape that happens to
+  # hold today" reason `handle_subscribe_failure/6` keeps its own non-transient branch —
+  # if `Socket.unsubscribe/3`'s own contract ever grows a real permanent-failure reason,
+  # this is already wired to handle it identically to an exhausted retry chain, not
+  # silently.
   #
   # Exhausting the retries does NOT fall through to subscribing `added` anyway — that
   # would be exactly the risk this whole change exists to avoid: sending `added` while
-  # `removed` was never confirmed to have left the venue's own session. The shard's
-  # bookkeeping still moves to `wanted` regardless (`reconcile_shard_in_place/7`), so the
-  # next unconditional resubscribe cycle re-issues a plain `subscribe` for the shard's
-  # whole current set — it does not itself retry this stranded unsubscribe. See the
-  # moduledoc for why that residual gap is disclosed rather than closed.
+  # `removed` was never confirmed to have left the venue's own session. `removed` is
+  # instead stranded into `state.pending_unsubscribes` (`strand_unsubscribe/7`) and
+  # retried on the next unconditional resubscribe cycle — see the moduledoc's "a stranded
+  # unsubscribe is not silently forgotten" section for the mechanism and what it does and
+  # does not close.
   defp handle_unsubscribe_failure(
+         key,
          socket,
          channel,
-         removed,
-         added,
+         {removed, added},
          credentials,
          attempt,
          reason,
@@ -1818,36 +2037,32 @@ defmodule DpExchange.Coinbase.Feed do
        ) do
     cond do
       not transient_frame_failure?(reason) ->
-        Logger.warning(
-          "[Coinbase Feed] #{channel} unsubscribe for #{length(removed)} symbol(s) failed " <>
-            "permanently (#{inspect(reason)}) — not retrying; withholding " <>
-            "#{length(added)} newly-added symbol(s) on this reconcile"
-        )
+        state =
+          strand_unsubscribe(
+            state,
+            key,
+            channel,
+            removed,
+            added,
+            reason,
+            "it will be picked back up on the next unconditional resubscribe cycle"
+          )
 
-        notify_unsubscribe_failed(
-          state,
-          channel,
-          removed,
-          added,
-          reason,
-          "this will keep failing every cycle until it is corrected"
-        )
+        {:noreply, state}
 
       attempt > @max_subscribe_retries ->
-        Logger.warning(
-          "[Coinbase Feed] #{channel} unsubscribe for #{length(removed)} symbol(s) failed " <>
-            "after #{attempt} attempt(s) (#{inspect(reason)}) — giving up; withholding " <>
-            "#{length(added)} newly-added symbol(s) on this reconcile"
-        )
+        state =
+          strand_unsubscribe(
+            state,
+            key,
+            channel,
+            removed,
+            added,
+            reason,
+            "it will be picked back up on the next unconditional resubscribe cycle"
+          )
 
-        notify_unsubscribe_failed(
-          state,
-          channel,
-          removed,
-          added,
-          reason,
-          "it may recover at the next unconditional resubscribe cycle"
-        )
+        {:noreply, state}
 
       true ->
         Logger.warning(
@@ -1859,10 +2074,34 @@ defmodule DpExchange.Coinbase.Feed do
 
         Process.send_after(
           self(),
-          {:channel_reconcile, socket, channel, removed, added, credentials, attempt + 1},
+          {:channel_reconcile, key, socket, channel, removed, added, credentials, attempt + 1},
           state.subscribe_retry_delay_ms
         )
+
+        {:noreply, state}
     end
+  end
+
+  # Records `removed` as still (believed) live on the venue after a failed, retry-
+  # exhausted unsubscribe — see the moduledoc's "a stranded unsubscribe is not silently
+  # forgotten" section. Merged into whatever this shard already has pending
+  # (`Enum.uniq(&1 ++ removed)`), never overwritten, so an earlier, still-unresolved
+  # stranding on this same shard is not lost by a later, unrelated one. Picked back up by
+  # `handle_info(:resubscribe, _)` on the same unconditional cadence
+  # `retry_missing_shards/1` already gives a shard whose socket never opened at all, and
+  # cleared per symbol the moment a retry actually sends (`clear_pending_unsubscribe/3`).
+  defp strand_unsubscribe(state, key, channel, removed, added, reason, outlook) do
+    Logger.warning(
+      "[Coinbase Feed] #{channel} unsubscribe for #{length(removed)} symbol(s) could not " <>
+        "be confirmed sent (#{inspect(reason)}) — #{outlook}; withholding " <>
+        "#{length(added)} newly-added symbol(s) on this reconcile"
+    )
+
+    notify_unsubscribe_failed(state, channel, removed, added, reason, outlook)
+
+    update_in(state.pending_unsubscribes, fn pending ->
+      Map.update(pending, key, removed, &Enum.uniq(&1 ++ removed))
+    end)
   end
 
   # Same shape as `notify_subscribe_failed/5` — `:coverage_change` is Core's kind for

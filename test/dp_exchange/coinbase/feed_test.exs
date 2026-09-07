@@ -1679,7 +1679,11 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed = start_feed()
       socket = frame_reporting_socket(self())
 
-      send(feed, {:channel_reconcile, socket, "ticker", ["OLD-USD"], ["NEW-USD"], nil})
+      send(
+        feed,
+        {:channel_reconcile, {"ticker", 0}, socket, "ticker", ["OLD-USD"], ["NEW-USD"], nil}
+      )
+
       :sys.get_state(feed)
 
       assert_receive {:frame, type1, ids1}, 500
@@ -1694,7 +1698,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed = start_feed()
       socket = frame_reporting_socket(self())
 
-      send(feed, {:channel_reconcile, socket, "ticker", [], ["NEW-USD"], nil})
+      send(feed, {:channel_reconcile, {"ticker", 0}, socket, "ticker", [], ["NEW-USD"], nil})
       :sys.get_state(feed)
 
       assert_receive {:frame, "subscribe", ["NEW-USD"]}, 500
@@ -1706,7 +1710,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed = start_feed()
       socket = frame_reporting_socket(self())
 
-      send(feed, {:channel_reconcile, socket, "ticker", ["OLD-USD"], [], nil})
+      send(feed, {:channel_reconcile, {"ticker", 0}, socket, "ticker", ["OLD-USD"], [], nil})
       :sys.get_state(feed)
 
       assert_receive {:frame, "unsubscribe", ["OLD-USD"]}, 500
@@ -1718,7 +1722,11 @@ defmodule DpExchange.Coinbase.FeedTest do
       feed = start_feed()
       dead = dead_pid()
 
-      send(feed, {:channel_reconcile, dead, "ticker", ["OLD-USD"], ["NEW-USD"], nil})
+      send(
+        feed,
+        {:channel_reconcile, {"ticker", 0}, dead, "ticker", ["OLD-USD"], ["NEW-USD"], nil}
+      )
+
       :sys.get_state(feed)
 
       assert Process.alive?(feed)
@@ -1745,7 +1753,8 @@ defmodule DpExchange.Coinbase.FeedTest do
       # logic under test works at all.
       send(
         feed,
-        {:channel_reconcile, socket, "level2", ["OLD-USD"], ["NEW-USD"], valid_credentials()}
+        {:channel_reconcile, {"level2", 0}, socket, "level2", ["OLD-USD"], ["NEW-USD"],
+         valid_credentials()}
       )
 
       # Wait for the FIRST (failing) unsubscribe attempt, and check the subscribe has not
@@ -1787,7 +1796,8 @@ defmodule DpExchange.Coinbase.FeedTest do
           # would leave `sub_counter == 0` true even if the withholding logic were broken.
           send(
             feed,
-            {:channel_reconcile, socket, "level2", ["OLD-USD"], ["NEW-USD"], valid_credentials()}
+            {:channel_reconcile, {"level2", 0}, socket, "level2", ["OLD-USD"], ["NEW-USD"],
+             valid_credentials()}
           )
 
           assert_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change} = notice},
@@ -1800,7 +1810,8 @@ defmodule DpExchange.Coinbase.FeedTest do
           assert notice.details.reason =~ "send_timeout"
         end)
 
-      assert log =~ "giving up"
+      assert log =~ "could not be confirmed sent"
+      assert log =~ "picked back up on the next unconditional resubscribe cycle"
 
       # One initial attempt plus @max_subscribe_retries (2) retries for the unsubscribe —
       # three sends — and the subscribe NEVER sent at all, proving it was genuinely
@@ -2036,7 +2047,7 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(
         feed,
-        {:channel_reconcile, reporting_socket, "level2", ~w(EXTRA1-USD EXTRA2-USD),
+        {:channel_reconcile, {"level2", 0}, reporting_socket, "level2", ~w(EXTRA1-USD EXTRA2-USD),
          ~w(NEW1-USD NEW2-USD NEW3-USD), valid_credentials()}
       )
 
@@ -2096,6 +2107,147 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert count_after_unsubscribe <= cap
       assert count_after_subscribe <= cap
       assert count_after_subscribe == length(wanted_list)
+    end
+  end
+
+  describe "a stranded unsubscribe is retried, not silently forgotten" do
+    # The coordinator traced a real gap in the fix above: `reconcile_shard_in_place/7`
+    # recorded `state.shards[key].symbols = wanted` unconditionally, so a permanently
+    # failed unsubscribe's `removed` symbols vanished from THIS module's own bookkeeping
+    # even though they were never actually released at the venue. The unconditional
+    # resubscribe cycle only ever re-issued `subscribe` for the shard's current set — it
+    # never retried the departure — so a shard that hit this even once would leak budget
+    # forever: the venue's live count for that session would sit at `old ∪ wanted`,
+    # eventually exceeding the shard's own cap and making every later subscribe fail
+    # quietly (per DpCryptoManagement's own probe 2 — socket alive, existing symbols still
+    # flowing, new ones silently absent). `state.pending_unsubscribes` and
+    # `handle_info(:resubscribe, _)`'s own retry of it close that. See `feed.ex`'s
+    # moduledoc, "a stranded unsubscribe is not silently forgotten," for the full account.
+
+    test "the resubscribe tick retries a shard's pending unsubscribe before it resubscribes, " <>
+           "and a successful retry clears it" do
+      socket = frame_reporting_socket(self())
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | credentials: valid_credentials(),
+            shards: %{{"level2", 0} => %{socket: socket, symbols: ["A-USD", "B-USD"]}},
+            pending_unsubscribes: %{{"level2", 0} => ["STRANDED-USD"]}
+        }
+      end)
+
+      send(feed, :resubscribe)
+
+      # `:sys.get_state/1` is a call, so it queues behind the tick's own (synchronous,
+      # blocking-on-the-socket) frame sends and is answered only once both have gone out.
+      :sys.get_state(feed)
+
+      assert_receive {:frame, type1, ids1}, 500
+      assert_receive {:frame, type2, ids2}, 500
+
+      # Order is load-bearing here too, for the identical reason it is everywhere else in
+      # this file: the stranded release has to reach the venue before the shard's own
+      # symbols are re-issued, or the resubscribe recreates the bare-additive-subscribe
+      # hazard on a socket this module already knows may be over budget.
+      assert type1 == "unsubscribe"
+      assert ids1 == ["STRANDED-USD"]
+      assert type2 == "subscribe"
+      assert Enum.sort(ids2) == ~w(A-USD B-USD)
+
+      # Cleared — the venue accepted the release, so this shard has nothing left pending.
+      assert :sys.get_state(feed).pending_unsubscribes == %{}
+    end
+
+    test "a resubscribe-tick retry that also fails leaves the pending entry in place" do
+      unsub_counter = :counters.new(1, [])
+      sub_counter = :counters.new(1, [])
+      socket = unsubscribe_always_fails_socket(unsub_counter, sub_counter)
+
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           alias_map_source: fn -> {:ok, %{}} end,
+           subscribe_retry_delay_ms: 5}
+        )
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | shards: %{{"level2", 0} => %{socket: socket, symbols: ["A-USD"]}},
+            pending_unsubscribes: %{{"level2", 0} => ["STRANDED-USD"]}
+        }
+      end)
+
+      send(feed, :resubscribe)
+
+      # One initial attempt plus @max_subscribe_retries (2) retries — three sends —
+      # before this cycle's own retry chain gives up on the SAME still-failing socket.
+      wait_until(fn -> :counters.get(unsub_counter, 1) == 3 end)
+
+      # Still pending — a failed retry is not an unconfirmed one; it stays recorded so
+      # the NEXT unconditional tick tries again, matching `retry_missing_shards/1`'s own
+      # "retry forever until it resolves" shape for a shard whose socket never opened.
+      assert :sys.get_state(feed).pending_unsubscribes == %{{"level2", 0} => ["STRANDED-USD"]}
+
+      # And the shard's own (unrelated) symbols were never subscribed either — withheld,
+      # not merely delayed, the same guarantee an ordinary reconcile's own failure keeps.
+      assert :counters.get(sub_counter, 1) == 0
+    end
+
+    test "a synchronous (primary-shard) unsubscribe failure is stranded, not dropped" do
+      unsub_counter = :counters.new(1, [])
+      sub_counter = :counters.new(1, [])
+      socket = unsubscribe_always_fails_socket(unsub_counter, sub_counter)
+      ticker_socket = fake_socket()
+
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | credentials: valid_credentials(),
+            wanted: MapSet.new(["KEEP-USD"]),
+            shards: %{
+              {"ticker", 0} => %{socket: ticker_socket, symbols: ["KEEP-USD"]},
+              {"level2", 0} => %{socket: socket, symbols: ["KEEP-USD", "GONE-USD"]}
+            }
+        }
+      end)
+
+      # `{"ticker", 0}` already matches `wanted` exactly, so it is not touched; `{"level2",
+      # 0}` is the only touched key and therefore reshard/1's synchronous primary — the
+      # path with NO retry chain of its own (see `open_shard/5`'s own sync clause).
+      assert {:error, _reason} = Feed.subscribe(feed, [], to: self())
+
+      assert :sys.get_state(feed).pending_unsubscribes == %{{"level2", 0} => ["GONE-USD"]}
+      assert :counters.get(sub_counter, 1) == 0
+    end
+
+    test "dropping a shard entirely also drops its own pending_unsubscribes entry" do
+      # An orphan check, not a recovery check: this entry is unrelated to whatever caused
+      # `{"ticker", 0}` to be dropped, proving `drop_unwanted_shards/3`'s own cleanup runs
+      # regardless of why the shard vanished — see the moduledoc: nothing walks a key that
+      # is not in `state.shards`, so without this cleanup a dropped shard's own stranding
+      # would sit here forever, retried by nothing.
+      socket = fake_socket()
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | wanted: MapSet.new(["A-USD"]),
+            shards: %{{"ticker", 0} => %{socket: socket, symbols: ["A-USD"]}},
+            pending_unsubscribes: %{{"ticker", 0} => ["STALE-USD"]}
+        }
+      end)
+
+      assert :ok = Feed.unsubscribe(feed, ["A-USD"])
+
+      assert :sys.get_state(feed).shards == %{}
+      assert :sys.get_state(feed).pending_unsubscribes == %{}
     end
   end
 

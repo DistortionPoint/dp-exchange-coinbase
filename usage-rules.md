@@ -250,6 +250,17 @@ it retries, reported the same way any other failed subscribe is: `subscribe_noti
 receives a `:coverage_change` notice, and `coverage/1` simply does not show them covered
 yet.
 
+**A departure that could not be confirmed sent is retried on the unconditional
+60-second cycle, not silently forgotten.** If a shard's own unsubscribe keeps failing
+until this package gives up on it (rare — a socket has to keep refusing to accept the
+frame at all, not merely refuse the request), those symbols are recorded internally as
+still owed a release and retried automatically on the same unconditional resubscribe
+cadence `resubscribe_interval_ms` already governs, always ordered ahead of that shard's
+own resubscribe on the same tick. You do not manage this yourself; it exists so a
+stranded release cannot quietly consume a shard's budget forever. `subscribe_notices/1`
+reports the give-up the same way any other failed subscribe is reported, and reports
+nothing further once the retry succeeds.
+
 ### `level2_pairs_per_socket` — a supervision option, so a venue-side change doesn't need a release
 
 ```elixir
