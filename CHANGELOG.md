@@ -22,6 +22,15 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`Auth.jwt/2`'s two-minute CDP token expiry (`now + 120`) had no citation anywhere** —
+  correct, but unlabelled, in a file where every other numeric venue claim carries one.
+  Found by a family-wide sweep for the `@pairs_per_socket`/`@shard_spacing_ms` defect
+  class this package's own `Feed` moduledoc already documents. Coinbase's own JWT
+  Authentication page states "your JWT is only valid for a period of 2 minutes," and
+  separately that this is the SDK samples' *default* rather than a server-enforced
+  ceiling — now `docs/reference/coinbase/jwt-auth.md`, cited from `Auth`'s own `@doc`.
+  No value changed.
+
 - **BREAKING: `capabilities/0` declared `has_staking: false` (the default — the field was
   never set) while `stake/3` and `unstake/3` were already `:experimental` and genuinely
   reach Coinbase Prime.** Found by `dp_exchange_core`'s conformance-coverage audit, which

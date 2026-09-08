@@ -76,6 +76,13 @@ defmodule DpExchange.Coinbase.Auth do
   token that outlives its window fails in exactly the silent way the incident above was
   about — the connection is up, the subscribe is accepted, and no data arrives.
 
+  `120` matches Coinbase's own documented default (`docs/reference/coinbase/jwt-auth.md`
+  quotes "your JWT is only valid for a period of 2 minutes" verbatim), not a ceiling the
+  venue enforces regardless of what a caller requests — the page states 120s as the SDK
+  samples' default and leaves the actual duration to the caller. This package's own choice
+  to use that default, for the reason above, is doc-derived rather than an arbitrary
+  number that happens to match.
+
   ## Credentials that cannot sign are refused here, by name
 
   A map without `:api_key` and `:api_secret` — `nil`, `%{}`, or one assembled with a
@@ -107,6 +114,7 @@ defmodule DpExchange.Coinbase.Auth do
         "iss" => "coinbase-cloud",
         "aud" => ["retail_rest_api_proxy"],
         "nbf" => now,
+        # 120s — Coinbase's own documented default, see this function's own @doc.
         "exp" => now + 120
       }
       |> maybe_put_uris(Keyword.get(opts, :uris))
