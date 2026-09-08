@@ -22,6 +22,33 @@ acceptable changelog line.
 
 ### Fixed
 
+- **BREAKING: three defects in `level2`'s unsubscribe-before-subscribe reconcile, all
+  found by re-tracing the mechanism as a whole rather than as the sequence of fixes that
+  built it, none caught by the existing suite.** (1) A vanishing shard's stranded
+  unsubscribe could be recorded and discarded in the same `reshard/1` call —
+  `drop_unwanted_shards/3` dropped `state.pending_unsubscribes[key]` unconditionally for
+  every shard no longer wanted, including one `strand_unsubscribe/7` had just populated
+  moments earlier, or one an in-flight deferred reconcile would populate a moment later —
+  silently contradicting the notice text's own promise that it would be "picked back up
+  on the next unconditional resubscribe cycle." (2) An ORDINARY reconcile
+  (`subscribe/2`, `unsubscribe/2`, `update_symbols/2`) never consulted
+  `state.pending_unsubscribes` at all — only the 60-second `:resubscribe` tick did — so a
+  shard carrying one unconfirmed release could accept a plain additive subscribe for an
+  unrelated new symbol on the very next ordinary call, the "quiet overflow"
+  DpCryptoManagement's own probe 2 describes, reached through the path this whole design
+  exists to close. (3) `isolate_crashed_shard/5`'s reopen and an ordinary reconcile's own
+  recovery of the same now-missing shard key could race: the deferred
+  `{:open_shard, _, _}` handler always opened a fresh socket unconditionally, so whichever
+  attempt's `put_in` ran last won `state.shards[key]`'s slot and the other's socket —
+  still alive, still linked, still holding a live venue subscription — was leaked, never
+  referenced by this module again. `drop_unwanted_shards/4` now only drops a vanishing
+  shard whose release is confirmed clear; `reconcile_shard_in_place/8` folds
+  `pending_unsubscribes` into what it treats as "current" on every reconcile, not only the
+  60-second cycle; `handle_info({:open_shard, _, _}, _)` now no-ops if the key already
+  exists rather than opening a second socket. Breaking in the narrow sense that a shard
+  whose vanishing release is still pending, or whose newly-added symbol was withheld
+  behind one, now behaves differently (correctly) than before — no public API changed.
+
 - **A crash of `Feed` or `Socket` printed the CDP `api_key`/`api_secret` pair in
   cleartext, in OTP's own crash report.** Both processes hold `:credentials` for their
   entire lifetime — `Feed` to keep resharding and resubscribing, `Socket` to sign every

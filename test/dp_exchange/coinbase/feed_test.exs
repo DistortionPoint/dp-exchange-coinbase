@@ -865,6 +865,41 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       {feed, socket}
     end
+
+    test "a deferred :open_shard message for a key someone else already reopened " <>
+           "does not open a second socket and orphan one of them" do
+      # Traced regression: `isolate_crashed_shard/5` deletes `state.shards[key]` and
+      # schedules `Process.send_after(self(), {:open_shard, channel, index, symbols}, 0)`
+      # to reopen it. Between that deletion and this message actually firing, an ordinary
+      # `subscribe/2`/`update_symbols/2` call landing on the SAME `Feed` sees the key
+      # absent and recovers it independently through its own `reshard/1` — and the old,
+      # unconditional `{:open_shard, _, _}` handler had no way to notice: it always called
+      # `get_socket/1` and `put_in`, so whichever attempt's `put_in` ran last won
+      # `state.shards[key]`'s slot and the other's freshly-opened, freshly-linked socket
+      # was never referenced by this module again — leaked, not merely stale.
+      existing_socket = fake_socket()
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{state | shards: %{{"ticker", 0} => %{socket: existing_socket, symbols: ["A-USD"]}}}
+      end)
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      # The stale reopen for the identical key — what `isolate_crashed_shard/5`'s own
+      # deferred message looks like once something else won the race.
+      send(feed, {:open_shard, "ticker", 0, ["A-USD"]})
+      :sys.get_state(feed)
+
+      # No shard-open-failed notice — proof this never even reached `get_socket/1` for a
+      # second attempt (this `Feed` was started with no injected socket and no real
+      # transport configured, so a genuine second open would have failed loudly).
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change}}, 200
+
+      # The entry already present — the same socket pid — is untouched.
+      assert :sys.get_state(feed).shards ==
+               %{{"ticker", 0} => %{socket: existing_socket, symbols: ["A-USD"]}}
+    end
   end
 
   describe "shards/1 — the whole reason this module exists again" do
@@ -2323,13 +2358,16 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert :counters.get(sub_counter, 1) == 0
     end
 
-    test "dropping a shard entirely also drops its own pending_unsubscribes entry" do
-      # An orphan check, not a recovery check: this entry is unrelated to whatever caused
-      # `{"ticker", 0}` to be dropped, proving `drop_unwanted_shards/3`'s own cleanup runs
-      # regardless of why the shard vanished — see the moduledoc: nothing walks a key that
-      # is not in `state.shards`, so without this cleanup a dropped shard's own stranding
-      # would sit here forever, retried by nothing.
-      socket = fake_socket()
+    test "a shard that vanishes with an unrelated stranding pending actually releases " <>
+           "it, rather than discarding the record of owing it" do
+      # This entry is unrelated to why `{"ticker", 0}` itself vanishes here — it proves
+      # `reconcile_shard_in_place/8` folds a shard's own `pending_unsubscribes` into what
+      # it treats as "current" on EVERY reconcile, including one that empties the shard
+      # entirely, not only on the 60-second cycle. `drop_unwanted_shards/4` no longer
+      # drops a vanishing shard's own stranding sight unseen (see its moduledoc): earlier,
+      # this same setup left `STALE-USD` un-unsubscribed at the venue forever, the exact
+      # leak "a stranded unsubscribe is not silently forgotten" was supposed to close.
+      socket = frame_reporting_socket(self())
       feed = start_feed()
 
       :sys.replace_state(feed, fn state ->
@@ -2343,8 +2381,104 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       assert :ok = Feed.unsubscribe(feed, ["A-USD"])
 
+      assert_receive {:frame, "unsubscribe", ids}, 500
+      assert Enum.sort(ids) == ~w(A-USD STALE-USD)
+
       assert :sys.get_state(feed).shards == %{}
       assert :sys.get_state(feed).pending_unsubscribes == %{}
+    end
+
+    test "a vanishing shard's failed unsubscribe is not orphaned — it stays live for " <>
+           "the next resubscribe cycle instead of being dropped with the shard" do
+      # Traced regression: `drop_unwanted_shards/3` used to run unconditionally right
+      # after `touch_shard/4` and delete BOTH `state.shards[key]` and
+      # `state.pending_unsubscribes[key]` for every vanishing key, including the one
+      # `strand_unsubscribe/7` had just populated moments earlier in this SAME call. The
+      # stranding was recorded and discarded in the same breath, and
+      # `handle_info(:resubscribe, _)` only ever walks `Map.keys(state.shards)` — a key
+      # dropped from there is a key nothing ever revisits, silently contradicting the
+      # notice text's own promise that it "will be picked back up on the next
+      # unconditional resubscribe cycle."
+      unsub_counter = :counters.new(1, [])
+      sub_counter = :counters.new(1, [])
+      socket = unsubscribe_flaky_socket(1, unsub_counter, sub_counter)
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | wanted: MapSet.new(["GONE-USD"]),
+            shards: %{{"ticker", 0} => %{socket: socket, symbols: ["GONE-USD"]}}
+        }
+      end)
+
+      # `{"ticker", 0}` is the only touched key — its whole symbol set is departing — so
+      # this is `reshard/1`'s synchronous primary, whose one attempt fails.
+      assert {:error, _reason} = Feed.unsubscribe(feed, ["GONE-USD"])
+
+      # Not dropped: the shard stays tracked, empty, with its stranding intact.
+      assert %{{"ticker", 0} => %{symbols: []}} = :sys.get_state(feed).shards
+      assert :sys.get_state(feed).pending_unsubscribes == %{{"ticker", 0} => ["GONE-USD"]}
+
+      send(feed, :resubscribe)
+      wait_until(fn -> :counters.get(unsub_counter, 1) == 2 end)
+      :sys.get_state(feed)
+
+      # The retry succeeded, so there is nothing left to track — `finalize_shard/4`
+      # retires the now fully-resolved vanished shard right here.
+      assert :sys.get_state(feed).pending_unsubscribes == %{}
+      assert :sys.get_state(feed).shards == %{}
+      assert :counters.get(sub_counter, 1) == 0
+    end
+
+    test "an ordinary reconcile does not add a new symbol to a shard while an earlier " <>
+           "release on the same shard is still unconfirmed" do
+      # Traced regression: `reconcile_shard_in_place/8` computed `added`/`removed` from
+      # `current -- wanted` / `wanted -- current` alone, never consulting
+      # `state.pending_unsubscribes`. A shard sitting at its own cap with one symbol
+      # stranded (unsubscribe failed, never confirmed released at the venue) would accept
+      # a plain additive subscribe for an unrelated new symbol on the very next ordinary
+      # `subscribe/2`/`update_symbols/2` call — the exact "quiet overflow" DpCryptoManagement's
+      # own probe 2 describes, and the reason `unsubscribe-before-subscribe` exists at all.
+      #
+      # `{"ticker", 0}` is pre-seeded to already match what `reshard/1` computes for
+      # `wanted` as given — unchanged, so it is not touched — leaving `{"level2", 0}` the
+      # only touched key and therefore `reshard/1`'s synchronous primary, the same
+      # isolation trick the stranding test above this one uses.
+      unsub_counter = :counters.new(1, [])
+      sub_counter = :counters.new(1, [])
+      socket = unsubscribe_always_fails_socket(unsub_counter, sub_counter)
+      ticker_socket = fake_socket()
+      feed = start_feed()
+
+      wanted = MapSet.new(["KEEP-USD", "NEW-USD"])
+      ticker_symbols = MapSet.to_list(wanted)
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | credentials: valid_credentials(),
+            wanted: wanted,
+            shards: %{
+              {"ticker", 0} => %{socket: ticker_socket, symbols: ticker_symbols},
+              {"level2", 0} => %{socket: socket, symbols: ["KEEP-USD"]}
+            },
+            pending_unsubscribes: %{{"level2", 0} => ["STRANDED-USD"]}
+        }
+      end)
+
+      # No new ask — `wanted` above already carries `NEW-USD` — so this only surfaces
+      # `{"level2", 0}`'s own staleness against the `wanted` it already has: `NEW-USD` is
+      # an ordinary additive subscribe on that one shard while `STRANDED-USD` is still, as
+      # far as this module can tell, unconfirmed at the venue.
+      assert {:error, _reason} = Feed.subscribe(feed, [], to: self())
+
+      # The stranded release was retried on THIS reconcile, not withheld until the next
+      # 60-second tick — and it failed again on this still-failing socket, so `NEW-USD`
+      # was correctly withheld rather than sent while `STRANDED-USD` might still be live.
+      assert :counters.get(unsub_counter, 1) == 1
+      assert :counters.get(sub_counter, 1) == 0
+      assert :sys.get_state(feed).pending_unsubscribes == %{{"level2", 0} => ["STRANDED-USD"]}
     end
   end
 
