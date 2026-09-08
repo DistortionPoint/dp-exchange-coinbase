@@ -217,6 +217,39 @@ defmodule DpExchange.Coinbase do
       # the venue standing in for one about the package.
       supported_instrument_types: [:spot, :future],
       supports_short_selling: false,
+
+      # **Was left undeclared (defaulting to `false`) while `stake/3` and `unstake/3`**
+      # — see `DpExchange.Coinbase.Prime` — **were already `:experimental` in the
+      # endpoint map below**, a declaration contradicting its own endpoint map in
+      # exactly the shape `validate_orders!/1` already guards for the order-shape
+      # fields. Found by `dp_exchange_core`'s conformance-coverage audit; the same
+      # defect this package's own `dp_exchange_gemini` sibling had for staking and
+      # margin together.
+      #
+      # This is a Kind 2 (domain) field — "can the venue do this at all" — not a Kind 1
+      # (activation/maturity) one, and the two answer different questions. Coinbase
+      # Prime genuinely publishes nine custodial staking endpoints — a portfolio- and a
+      # wallet-scoped form of stake, unstake, unstake-status, claim-rewards and
+      # validator-query, plus a wallet-scoped unstake preview — reached from `stake/3`,
+      # `unstake/3` and this module's own `query_transaction_validators/3`,
+      # `claim_rewards/4`, `staking_status/4`, `unstake_status/4` and
+      # `preview_unstake_wallet/6`. Every one of those paths is read from Prime's own
+      # documentation, not from a live call: this repository holds no Prime credential,
+      # and D7 tier 4 (money-moving) is answered in production by a consumer, never by
+      # a test here. So `has_staking: true` is honest at the same maturity as the rest
+      # of this `:0.x` package — `:experimental`, exactly what `endpoint_maturities/0`
+      # already assigns `{:stake, 3}` and `{:unstake, 3}` because neither is in
+      # `@unsupported` — not a claim that Prime has been run.
+      #
+      # This does NOT reopen `get_staking_rates/1`, `get_staking_balances/1`,
+      # `get_staking_rewards/1` or `get_staking_history/1` in `venue_does_not_serve/0`:
+      # those four fail for reasons specific to their own shape (no published rate
+      # schedule, `staking/status` naming one wallet rather than every position,
+      # `claim_rewards` being a write rather than a report, no history endpoint at
+      # either scope) that `has_staking` does not touch. A venue can genuinely stake —
+      # can move money into and out of a staked position — without also answering
+      # every generic query shape the shared vocabulary happens to name for it.
+      has_staking: true,
       # Both were `false`, on an unchecked claim that the venue publishes neither endpoint.
       # It publishes `/orders/preview` and `/orders/edit`, and the second matters more than
       # a convenience: `supports_order_replace: false` told a caller to cancel and re-place,
@@ -277,11 +310,16 @@ defmodule DpExchange.Coinbase do
       # are inherited from the prior adapter's moduledoc, because the vendor's
       # rate-limit page could not be located and probing a limit means deliberately
       # exceeding a third party's. An unlabelled number would be worse than a missing one.
-      measured_at: ~D[2026-08-28],
+      measured_at: ~D[2026-09-08],
       measured_against:
         "granularities and the 350-candle boundary measured live against " <>
-          "api.coinbase.com/api/v3/brokerage; ceilings NOT measured and NOT confirmed " <>
-          "against Coinbase documentation — inherited from the prior adapter"
+          "api.coinbase.com/api/v3/brokerage, 2026-08-28; ceilings NOT measured and NOT " <>
+          "confirmed against Coinbase documentation — inherited from the prior adapter. " <>
+          "has_staking is NOT measured live — this repo holds no Prime credential — and " <>
+          "rests on api.prime.coinbase.com's own published paths, deduplicated " <>
+          "2026-08-31 from thirteen documentation pages to the nine endpoints " <>
+          "DpExchange.Coinbase.Prime implements; read from documentation, not probed, " <>
+          "and said so rather than implied otherwise"
     )
   end
 

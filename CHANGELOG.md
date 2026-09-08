@@ -22,6 +22,35 @@ acceptable changelog line.
 
 ### Fixed
 
+- **BREAKING: `capabilities/0` declared `has_staking: false` (the default — the field was
+  never set) while `stake/3` and `unstake/3` were already `:experimental` and genuinely
+  reach Coinbase Prime.** Found by `dp_exchange_core`'s conformance-coverage audit, which
+  added a cross-check (`Capabilities.new/1`, assertion 2 in the shared suite) requiring
+  `has_staking` to agree with the six staking endpoints it summarises — the same rule
+  already applied to `supports_order_preview`/`supports_order_replace`. Against Core
+  0.1.71 this package's own contract suite failed 23 of 42 tests, every one of them the
+  same `ArgumentError` raised inside `capabilities/0` itself, not 23 independent defects.
+  Confirmed rather than assumed which side was wrong: `DpExchange.Coinbase.Prime`'s nine
+  endpoints are real paths against `api.prime.coinbase.com`, signed with Prime's own HMAC
+  scheme, reached from `stake/3`, `unstake/3` and this module's own
+  `query_transaction_validators/3`, `claim_rewards/4`, `staking_status/4`,
+  `unstake_status/4` and `preview_unstake_wallet/6` — not documentation describing a
+  capability nobody wired up. `has_staking` is now `true`, at the same `:experimental`
+  maturity as the rest of this `:0.x` package: the paths are read from Prime's own
+  documentation, not probed live — this repository holds no Prime credential, and D7 tier
+  4 (money-moving) is answered in production by a consumer, never by a test here.
+  `measured_against` says so explicitly. **This is a behaviour change for a consumer
+  routing on `has_staking`**: it used to read `false` and now reads `true`, honestly,
+  for a venue that has always been able to move money into and out of a staked position
+  through this package. `get_staking_rates/1`, `get_staking_balances/1`,
+  `get_staking_rewards/1` and `get_staking_history/1` stay `:unsupported` in
+  `venue_does_not_serve/0` — that reasoning is about their own shape (no published rate
+  schedule, a status endpoint naming one wallet rather than every position, a rewards
+  claim being a write not a report, no history endpoint at either scope) and `has_staking`
+  becoming `true` does not reopen it. The same defect class already fixed in
+  `dp_exchange_gemini` (`has_staking: false`/`supports_margin: false` beside six staking
+  and three margin endpoints already `:experimental`).
+
 - **BREAKING: three defects in `level2`'s unsubscribe-before-subscribe reconcile, all
   found by re-tracing the mechanism as a whole rather than as the sequence of fixes that
   built it, none caught by the existing suite.** (1) A vanishing shard's stranded

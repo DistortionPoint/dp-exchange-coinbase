@@ -45,6 +45,35 @@ defmodule DpExchange.CoinbaseTest do
       assert caps.supported_order_types == [:market, :limit, :stop_limit]
       assert caps.supported_time_in_force == [:ioc, :fok, :gtc, :gtd]
     end
+
+    test "has_staking is true, agreeing with stake/3 and unstake/3 being :experimental" do
+      # Regression pin for the defect `dp_exchange_core`'s conformance-coverage audit
+      # found live on this package: `has_staking` was left undeclared (defaulting to
+      # `false`) while `stake/3` and `unstake/3` were already `:experimental` — real,
+      # active calls against Coinbase Prime, see `DpExchange.Coinbase.Prime`. A caller
+      # branching on `has_staking` alone would have concluded this venue does not stake
+      # at all. `Capabilities.new/1` now raises on that disagreement (assertion 2 in the
+      # shared conformance suite), so this test also pins that the declaration keeps
+      # building without raising.
+      caps = Coinbase.capabilities()
+
+      assert caps.has_staking == true
+      assert Map.get(caps.endpoints, {:stake, 3}) == :experimental
+      assert Map.get(caps.endpoints, {:unstake, 3}) == :experimental
+
+      # The four generic staking-query callbacks stay unsupported — a different fact
+      # about their own shape, not reopened by has_staking becoming true. See
+      # `Coinbase.venue_does_not_serve/0`.
+      for endpoint <- [
+            {:get_staking_rates, 1},
+            {:get_staking_balances, 1},
+            {:get_staking_rewards, 1},
+            {:get_staking_history, 1}
+          ] do
+        assert Map.get(caps.endpoints, endpoint) == :unsupported
+        assert endpoint in Coinbase.venue_does_not_serve()
+      end
+    end
   end
 
   describe "the ceilings are declared honestly" do
@@ -53,9 +82,10 @@ defmodule DpExchange.CoinbaseTest do
       # the ceilings were not, and the declaration says so rather than implying both.
       caps = Coinbase.capabilities()
 
-      assert caps.measured_at == ~D[2026-08-28]
+      assert caps.measured_at == ~D[2026-09-08]
       assert caps.measured_against =~ "measured live"
       assert caps.measured_against =~ "NOT measured"
+      assert caps.measured_against =~ "has_staking is NOT measured live"
     end
 
     test "credentials buy a higher ceiling, and both are declared" do
