@@ -20,6 +20,25 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`script/check_endpoint_inventory.sh`** — diffs the vendor's published Advanced Trade
+  REST endpoint pages against `docs/reference/coinbase/endpoints-enumerated.tsv` weekly,
+  via `.github/workflows/inventory-check.yml`. One HTTP request: this venue publishes no
+  Advanced Trade specification, but its `sitemap.xml` lists one page per endpoint, so the
+  set of those pages *is* the index.
+
+  Deliberately **not** re-deriving the enumerated file. That file's method — reading each
+  page's own `pageMetadata.openapi` field — meant fetching 806 pages, which is a reasonable
+  thing to do once by hand and a rude thing to do to a vendor every week.
+
+  The mechanism is the one `dp_exchange_core`'s vendor-change design doc settled on: across
+  five vendors a *changelog* diff caught nothing and an **index diff** was the only thing
+  that ever fired. It has since found a rate-limit table on `developer.webull.com` that had
+  existed for weeks behind a five-times-too-permissive ceiling, and a withdrawn WebSocket
+  channel on `developer.gemini.com`. Run against this venue it reports **51 endpoint pages,
+  unchanged** — a clean baseline, which is the other thing a check is for.
+
 ### Documentation
 
 - **"The vendor's rate-limit page could not be located" was a statement about the
