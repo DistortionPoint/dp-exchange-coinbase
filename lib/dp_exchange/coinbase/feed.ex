@@ -1117,7 +1117,10 @@ defmodule DpExchange.Coinbase.Feed do
   # section for the validation this one carries.
   @default_shard_spacing_ms 1_000
 
-  # Coinbase's own Advanced Trade rate-limits page: "WebSocket connections ... are ...
+  # Coinbase's own Advanced Trade rate-limits page —
+  # `docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket/websocket-rate-limits`,
+  # committed to `docs/reference/coinbase/rest-rate-limits.md` and watched weekly by
+  # `script/check_doc_sources.sh`: "WebSocket connections ... are ...
   # limited to 8 per second per IP" — re-read 2026-09-06 alongside the `level2` ceiling
   # investigation above, the same pass that produced `@default_level2_pairs_per_socket`.
   # This package opens one new connection per `@default_shard_spacing_ms` tick, so 8/sec

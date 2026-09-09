@@ -315,14 +315,31 @@ defmodule DpExchange.Coinbase do
       authenticated_ceiling: %{limit: 10, per_ms: 1_000},
 
       # Rank 3 of D13's hierarchy, and labelled as such. The granularities and page size
-      # were measured against the live venue on this date; the CEILINGS were not — they
-      # are inherited from the prior adapter's moduledoc, because the vendor's
-      # rate-limit page could not be located and probing a limit means deliberately
+      # were measured against the live venue on this date; the CEILINGS were not — they are
+      # inherited from the prior adapter's moduledoc, and probing a limit means deliberately
       # exceeding a third party's. An unlabelled number would be worse than a missing one.
+      #
+      # **Why they are still not doc-derived, restated 2026-09-09 with a real search behind
+      # it.** This used to read "the vendor's rate-limit page could not be located", which
+      # was true of three URL guesses and false of the vendor: `docs.cdp.coinbase.com`
+      # publishes **eleven** rate-limit pages, all listed in its own `sitemap.xml`. All 84
+      # Advanced Trade pages were then fetched and searched, and exactly one of them carries
+      # any rate-limit text at all — the WebSocket page. **There is no published Advanced
+      # Trade REST limit**, which is a stronger and more useful claim than "we could not
+      # find it", and the one worth re-testing when the docs change. See
+      # `docs/reference/coinbase/rest-rate-limits.md` for the method and the full result.
+      #
+      # The correction matters beyond this venue: the same sitemap search on
+      # developer.webull.com found a per-endpoint rate-limit table that had existed for
+      # weeks, and the ceiling this family had declared there was five times too permissive.
+      # "Could not be located" is a statement about the searcher, not the vendor.
       measured_at: ~D[2026-09-08],
       measured_against:
         "granularities and the 350-candle boundary measured live against " <>
           "api.coinbase.com/api/v3/brokerage, 2026-08-28; ceilings NOT measured and NOT " <>
+          "published by the vendor at all — all 84 Advanced Trade documentation pages were " <>
+          "fetched and searched 2026-09-09 and only the WebSocket page carries a limit " <>
+          "(8 connections/sec/IP); the REST ceilings remain inherited from the prior " <>
           "confirmed against Coinbase documentation — inherited from the prior adapter. " <>
           "has_staking is NOT measured live — this repo holds no Prime credential — and " <>
           "rests on api.prime.coinbase.com's own published paths, deduplicated " <>

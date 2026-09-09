@@ -20,6 +20,37 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **"The vendor's rate-limit page could not be located" was a statement about the
+  searcher, not the vendor — and it is now corrected with a real search behind it.**
+  `capabilities/0`'s ceiling provenance said the page could not be found. That was true of
+  three URL guesses and false of Coinbase: `docs.cdp.coinbase.com/sitemap.xml` lists 2,357
+  pages, **eleven** of which are rate-limit pages, and they were listed there the whole
+  time.
+
+  All **84** Advanced Trade documentation pages were then fetched and searched. **Exactly
+  one** carries any rate-limit text: the WebSocket page, at *8 per second per IP* for
+  connections and unauthenticated messages alike. So the honest claim is much stronger than
+  the old one — **there is no published Advanced Trade REST limit** — and it is the claim
+  worth re-testing when the docs change, rather than an admission of not having looked.
+
+  The ceilings themselves are **unchanged and still rank 3**: inherited from the prior
+  adapter, not doc-derived (there is no document) and not measured (measuring a rate
+  ceiling means deliberately exceeding a third party's). New reference file
+  `docs/reference/coinbase/rest-rate-limits.md` records the method and the negative result
+  so the next reader can re-run it rather than re-guess it.
+
+  **Why this was worth doing at all**: the identical sitemap search on
+  `developer.webull.com` found a per-endpoint rate-limit table that had existed for weeks
+  while this family declared a ceiling five times too permissive there, on a venue whose
+  documented penalty is a temporary IP block. "We could not find it" earns a second look.
+
+- **The 8-per-second-per-IP figure is now cited by URL and watched.** It is load-bearing —
+  `Feed`'s `@shard_spacing_floor_ms` of 125 ms is derived straight from it — and it now
+  names the page it comes from and has a row in `doc-sources.tsv`, so a change to it is
+  caught by the weekly check rather than by someone re-reading the comment.
+
 ### Fixed
 
 - **Reads now carry `@call_timeout` explicitly, exactly as writes already did.** `coverage/1`,
