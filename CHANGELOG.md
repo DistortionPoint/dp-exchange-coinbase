@@ -20,6 +20,34 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Reads now carry `@call_timeout` explicitly, exactly as writes already did.** `coverage/1`,
+  `coverage_by_kind/1`, `status/1` and `wanted/1` took `GenServer.call/2`'s implicit five
+  seconds while every write named a generous one — the same asymmetry that turned a bounded
+  delay into a dead caller in issue #28. Second line of defence, never the fix: a read that
+  has to queue behind something should wait for it, not die of it.
+
+- **The alias-catalogue fetch blocked every read on this Feed — dp-exchange-core issue
+  #28's failure, on this venue.** `handle_info(:fetch_alias_map, …)` read the venue's whole
+  `/market/products` catalogue over HTTP **inline**, and with `Core.HttpClient`'s documented
+  defaults (30_000 ms per attempt, 3 attempts) that blocked this GenServer for up to about
+  **ninety seconds**. `coverage/1` and `coverage_by_kind/1` are plain `GenServer.call/2`s on
+  the five-second default, so a health check landing during the fetch did not wait, it
+  **exited**, taking a consumer that reads it from its own `handle_call/3` with it.
+
+  **Found by sweeping for the class rather than by it failing here** — the #30 reporter
+  named the shape ("work done in the process that owes a reply") while describing something
+  else, and this family has paid for it three times already (#16, #23, #28).
+
+  The fetch now runs in a task and its result arrives as a message. A second
+  `:fetch_alias_map` tick while one is in flight is dropped rather than starting a second
+  catalogue read: two would race to write `state.alias_map`, with the loser silently
+  overwriting the winner, and would double a request this venue's limiter is sized for one
+  of. Exceptions are converted inside the task, because `Task.async/1` links and an
+  unconverted raise would arrive as an `{:EXIT, …}` with no clause for it — leaving the
+  in-flight marker pinned and every later tick dropped forever.
+
 ### Documentation
 
 - **`Credentials`' moduledoc now says that the redaction wrap lives in `child_spec/1`, and

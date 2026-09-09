@@ -1376,8 +1376,20 @@ defmodule DpExchange.Coinbase.Feed do
   def update_symbols(feed \\ __MODULE__, symbols),
     do: GenServer.call(feed, {:update_symbols, symbols}, @call_timeout)
 
+  # NOTE — reads carry `@call_timeout` explicitly, exactly as the writes above do.
+  #
+  # They used to take `GenServer.call/2`'s implicit five seconds, and that asymmetry is what
+  # turned a bounded delay into a dead caller in dp-exchange-core issue #28: `coverage/1` is
+  # the call a consumer's health check makes, so any moment this Feed was busy for longer
+  # than five seconds turned a health check into an EXIT — killing the consumer's own
+  # process when it read from inside its own `handle_call/3`. Asking whether the venue was
+  # healthy was what made it unhealthy.
+  #
+  # The blocking is fixed at its sources rather than papered over here; this is the second
+  # line of defence. A read that has to queue behind something should WAIT for it, never
+  # die of it.
   @spec coverage(GenServer.server()) :: %{String.t() => :stream | :internal_poll | :not_covered}
-  def coverage(feed \\ __MODULE__), do: GenServer.call(feed, :coverage)
+  def coverage(feed \\ __MODULE__), do: GenServer.call(feed, :coverage, @call_timeout)
 
   @doc """
   `coverage/1`, split by which `Core.Types.*` kind actually arrived — see the moduledoc's
@@ -1387,7 +1399,8 @@ defmodule DpExchange.Coinbase.Feed do
   @spec coverage_by_kind(GenServer.server()) :: %{
           Capabilities.data_kind() => %{String.t() => :stream | :internal_poll | :not_covered}
         }
-  def coverage_by_kind(feed \\ __MODULE__), do: GenServer.call(feed, :coverage_by_kind)
+  def coverage_by_kind(feed \\ __MODULE__),
+    do: GenServer.call(feed, :coverage_by_kind, @call_timeout)
 
   @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
   def subscribe_notices(feed \\ __MODULE__, opts \\ []),
@@ -1511,6 +1524,18 @@ defmodule DpExchange.Coinbase.Feed do
        # from "the venue aliases nothing here": both resolve through the same safe
        # fallback in `attribution_targets/2`.
        alias_map: %{},
+       # The in-flight alias-catalogue fetch, or `nil` — `%{ref: reference(), attempt: n}`.
+       #
+       # The fetch reads the venue's whole `/market/products` catalogue over HTTP, and it
+       # used to run INLINE in `handle_info(:fetch_alias_map, ...)`. With
+       # `Core.HttpClient`'s documented defaults (30_000 ms per attempt, 3 attempts) that
+       # blocked this GenServer for up to about ninety seconds, during which `coverage/1`
+       # and `coverage_by_kind/1` — plain `GenServer.call/2`s on the five-second default —
+       # did not merely wait, they EXITED, taking a consumer that reads them from its own
+       # `handle_call/3` with them. That is dp-exchange-core issue #28's failure, found by
+       # sweeping this family for the class the #30 reporter named rather than by it
+       # recurring in production.
+       alias_map_fetch: nil,
        alias_map_status: :unfetched,
        # The reason the fetch last gave up, if it ever did — `nil` while `alias_map_status`
        # is anything but `:unavailable`. Persisted so a notice subscriber that registers
@@ -1788,6 +1813,13 @@ defmodule DpExchange.Coinbase.Feed do
       nil ->
         {:noreply, state}
     end
+  end
+
+  # The alias-catalogue fetch answered. Matched on the stored `ref` so a late reply from a
+  # superseded fetch cannot overwrite a newer result, and ordered above the catch-all below.
+  def handle_info({ref, result}, %{alias_map_fetch: %{ref: ref, attempt: attempt}} = state) do
+    Process.demonitor(ref, [:flush])
+    apply_alias_map_result(result, attempt, %{state | alias_map_fetch: nil})
   end
 
   def handle_info(_other, state), do: {:noreply, state}
@@ -2693,14 +2725,44 @@ defmodule DpExchange.Coinbase.Feed do
   # One attempt of the alias-map fetch, whichever attempt number this is — see the
   # moduledoc's "classified and retried" section.
   defp attempt_alias_map_fetch(attempt, state) do
-    case state.alias_map_source.() do
-      {:ok, map} when is_map(map) ->
-        {:noreply,
-         %{state | alias_map: map, alias_map_status: :ok, alias_map_failure_reason: nil}}
+    {:noreply, start_alias_map_fetch(attempt, state)}
+  end
 
-      {:error, reason} ->
-        handle_alias_map_fetch_failure(attempt, reason, state)
-    end
+  # A fetch is already running. A second `:fetch_alias_map` while one is in flight would
+  # mean two catalogue reads racing to write `state.alias_map`, and the loser silently
+  # overwriting the winner. Only one runs; the arriving tick is dropped, and the running
+  # fetch's own retry ladder is what keeps the attempt count honest.
+  defp start_alias_map_fetch(_attempt, %{alias_map_fetch: %{ref: _ref}} = state), do: state
+
+  defp start_alias_map_fetch(attempt, state) do
+    source = state.alias_map_source
+    task = Task.async(fn -> safely_fetch_alias_map(source) end)
+
+    %{state | alias_map_fetch: %{ref: task.ref, attempt: attempt}}
+  end
+
+  # Runs inside the task. Converts a raise or an exit into an ordinary error result BEFORE
+  # it can become an abnormal task exit — `Task.async/1` links, and an unconverted
+  # exception would arrive here as an `{:EXIT, ...}` with no clause for it, leaving
+  # `state.alias_map_fetch` pinned forever and every later tick dropped by the clause
+  # above. `{:error, reason}` is a shape `handle_alias_map_fetch_failure/3` already
+  # classifies, so this adds no new failure path.
+  defp safely_fetch_alias_map(source) do
+    source.()
+  rescue
+    exception -> {:error, {:alias_map_fetch_raised, Exception.message(exception)}}
+  catch
+    :exit, reason -> {:error, {:alias_map_fetch_exited, reason}}
+  end
+
+  # The fetch answered. Identical classification to the synchronous version this replaced —
+  # only the moment it runs changed.
+  defp apply_alias_map_result({:ok, map}, _attempt, state) when is_map(map) do
+    {:noreply, %{state | alias_map: map, alias_map_status: :ok, alias_map_failure_reason: nil}}
+  end
+
+  defp apply_alias_map_result({:error, reason}, attempt, state) do
+    handle_alias_map_fetch_failure(attempt, reason, state)
   end
 
   # Transient: the caller's own rate limiter made this fetch wait, and the wait itself ran

@@ -2739,4 +2739,71 @@ defmodule DpExchange.Coinbase.FeedTest do
       refute_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 200
     end
   end
+
+  describe "a read cannot be blocked by the alias-catalogue fetch (core #28's class)" do
+    # NOT `start_feed/1`: that helper PREPENDS its own `alias_map_source` default, and
+    # `Keyword.get/3` takes the first match — so a source passed through it is silently
+    # shadowed and never called. These tests need their own slow source, so they build the
+    # child spec directly.
+    defp start_feed_with_source(source) do
+      name = :"feed_#{System.unique_integer([:positive])}"
+      start_supervised!({Feed, name: name, alias_map_source: source}, id: name)
+    end
+
+    test "coverage/1 answers while the alias map is still being fetched" do
+      # The fetch reads the venue's whole `/market/products` catalogue over HTTP and used
+      # to run INLINE in `handle_info(:fetch_alias_map, ...)`. With `Core.HttpClient`'s
+      # documented defaults (30_000 ms per attempt, 3 attempts) that blocked this
+      # GenServer for up to about ninety seconds, and `coverage/1`/`coverage_by_kind/1`
+      # are plain `GenServer.call/2`s on the FIVE-second default — so a health check
+      # landing during the fetch did not wait, it exited, taking a consumer that reads it
+      # from its own `handle_call/3` with it.
+      #
+      # dp-exchange-core issue #28's failure, on a third venue. Found by sweeping this
+      # family for the class the #30 reporter named — "work done in the process that owes
+      # a reply" — not by it recurring in production.
+      test_pid = self()
+
+      feed =
+        start_feed_with_source(fn ->
+          send(test_pid, :fetch_started)
+          Process.sleep(2_000)
+          {:ok, %{}}
+        end)
+
+      send(feed, :fetch_alias_map)
+      assert_receive :fetch_started, 1_000
+
+      reader = Task.async(fn -> Feed.coverage(feed) end)
+      result = Task.yield(reader, 500) || Task.shutdown(reader, :brutal_kill)
+
+      assert match?({:ok, _}, result),
+             "coverage/1 did not answer within 500ms while the alias catalogue was being " <>
+               "fetched — the Feed is blocked inside handle_info. got: #{inspect(result)}"
+
+      assert Process.alive?(feed)
+    end
+
+    test "a second tick during an in-flight fetch does not start a second catalogue read" do
+      # Two catalogue reads racing to write `state.alias_map` would let the loser silently
+      # overwrite the winner, and would double a request this venue's rate limiter is
+      # sized for one of.
+      test_pid = self()
+
+      feed =
+        start_feed_with_source(fn ->
+          send(test_pid, :fetch_started)
+          Process.sleep(300)
+          {:ok, %{}}
+        end)
+
+      send(feed, :fetch_alias_map)
+      assert_receive :fetch_started, 1_000
+
+      send(feed, :fetch_alias_map)
+      refute_receive :fetch_started, 200
+
+      assert Process.alive?(feed)
+    end
+  end
 end
