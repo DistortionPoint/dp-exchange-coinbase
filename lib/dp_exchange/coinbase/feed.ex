@@ -123,19 +123,26 @@ defmodule DpExchange.Coinbase.Feed do
 
   **Connects are staggered across both groups on one sequence, `ticker` first.** Every new
   socket this module opens — whichever channel it carries — takes the next tick of
-  `shard_spacing_ms` (`5_000`ms by default — see that option's own section below), in an
+  `shard_spacing_ms` (`1_000`ms by default — see that option's own section below), in an
   order that places every touched `ticker` shard ahead of every touched `level2` shard.
   This is what keeps `ticker`'s own boot-time coverage exactly as fast as the section above
   describes: a 406-symbol subscribe still resolves its synchronous reply and its remaining
   `ticker` shards inside the same handful of seconds as before this fix, with `level2`'s 14
-  shards ramping in behind them. For that universe the last `level2` shard's tick lands
-  roughly 70 seconds after boot (`(14 - 1) * shard_spacing_ms`, at the default) —
-  materially slower than `ticker`'s own coverage, and an accepted,
-  stated cost, now roughly a fifth of what the `6`-sized grouping cost (about six
-  minutes): `order_book` coverage was permanently `6 / 406` before `level2` got its own
-  grouping at all, climbing by 5,099 refusals and counting; ramping to `406 / 406` in
-  around a minute is strictly better than a ceiling that never moves, and nothing about
-  `level2` streaming is boot-latency-sensitive the way `ticker`'s starvation was.
+  shards ramping in behind them. For that universe (19 shards touched together in one
+  `reshard/1` call — 5 `ticker` plus 14 `level2`) the last shard's tick lands
+  `(shard_count - 1) * shard_spacing_ms` after boot — the identical span
+  `next_resubscribe_delay/1` computes below for its own overlap floor — `18 *
+  shard_spacing_ms`: 18 seconds at the current default, materially slower than `ticker`'s
+  own coverage and an accepted, stated cost, now roughly a twentieth of what the `6`-sized
+  grouping cost (about six minutes): `order_book` coverage was permanently `6 / 406` before
+  `level2` got its own grouping at all, climbing by 5,099 refusals and counting; ramping to
+  `406 / 406` in under 20 seconds is strictly better than a ceiling that never moves, and
+  nothing about `level2` streaming is boot-latency-sensitive the way `ticker`'s starvation
+  was. (An earlier draft of this paragraph estimated the span as `(14 - 1) *
+  shard_spacing_ms`, counting only `level2`'s own shards — 65 seconds at the `5_000`ms
+  default this replaced, not the true 90; it omitted the 5 `ticker` shards staggered ahead
+  of `level2` in the same sequence. Verified against the real `reshard/1` position math and
+  a live run of this suite before being corrected here.)
 
   **`level2` no longer needs to go first on a shared socket, because there is no longer a
   shared socket.** What used to be this section — "`level2` before `ticker`, spaced by
@@ -795,19 +802,79 @@ defmodule DpExchange.Coinbase.Feed do
   this moduledoc opens with — legible, not silently accepted, exactly the standard
   `level2_pairs_per_socket` set above the measured `30`.
 
-  **The default stays `5_000`, unmoved by this change, on purpose.** `@default_shard_spacing_ms`
-  predates this option and is carried over from the reference fix this package replaced —
-  inherited, not derived, the same way `@pairs_per_socket` (100) is. Against the
-  documented 8-connections-per-second-per-IP floor above, `5_000`ms is roughly forty
-  times more conservative than the venue's own stated rate requires, which is worth
-  saying plainly: it is very likely safe to tighten. It is not tightened here. This task
-  was to make the value injectable for a test, and to leave production behaviour alone
-  while doing it — retuning a constant nobody has yet deliberately measured a better
-  value for, inside a change whose stated purpose is test speed, is exactly the kind of
-  drive-by this family's own `FrameSender` moduledoc already warns against for a
-  different constant ("that is a decision for the design doc, with reasoning, not a
-  drive-by here"). See `docs/design/ideas/shard-spacing-headroom.md` for this observation
-  recorded as a non-blocking discovery, not acted on.
+  **The default is now `1_000`, chosen rather than inherited — closing
+  `docs/design/closed/2026-09-09_shard-spacing-headroom.md`.** `@default_shard_spacing_ms`
+  used to be `5_000`, carried over unexamined from the reference fix this package
+  replaced, the same way `@pairs_per_socket` (100) still is — nobody had picked `5_000`
+  FOR this venue; nobody had looked at it at all until the idea doc above asked where it
+  came from and the honest answer was "nowhere." That idea doc's own closing criteria
+  allowed reasoning from the documented rate-limits page alone, without a live probe, for
+  exactly this kind of value: a pure connect-rate number that already converts to an exact
+  floor (`125`ms, above) with nothing left to bisect. This package has not run a
+  `shard_spacing_ms` probe against the real venue and does not claim to; the reasoning
+  below is entirely documentation-derived.
+
+  - **`1_000`ms is one connection per second — an 8x margin under the documented floor, not
+    the floor itself.** The idea doc explicitly ruled out adopting `125`ms as the new
+    default: no margin for scheduler jitter, GC pauses, or a consumer's own concurrent load
+    sharing the same IP. `500`ms (a 4x margin) was also considered and set aside in favour
+    of the larger margin below.
+  - **Chosen more conservatively than headroom against the documented rate alone would
+    require, because of a real, recent incident on a *different* venue in this family:**
+    Webull's shards crash-looped this same week once abandoned sessions accumulated
+    against an undocumented five-connection ceiling. Coinbase's own rate-limits page
+    documents a RATE (8/second/IP), not a concurrency cap, and documents no concurrency cap
+    at all — but "no documented cap" is not "no cap," and a tighter stagger increases how
+    many of this module's own connects are opening, and therefore how many are mid-handshake,
+    in any short window — the same axis that bit Webull, on a different venue with a
+    different (undocumented) limit. `Socket`'s own live measurement method
+    (`docs/reference/coinbase/level2-session-limit.md`) took on the order of a few seconds
+    to establish one connection; at `1_000`ms spacing, only a handful of this module's own
+    connects are ever simultaneously mid-handshake for the 406-symbol, 19-shard scope this
+    moduledoc already discusses, against roughly two dozen that would be in flight at once
+    at the bare `125`ms floor. This is a documented-rate-plus-precaution choice, not a
+    measurement of Coinbase's own concurrency behaviour — this repo has neither measured
+    nor been told Coinbase has any such ceiling; the precaution is carried over from a
+    sibling venue's incident, not from anything Coinbase-specific.
+  - **For the 406-symbol scope above, boot-to-full-`level2`-coverage drops from 90 seconds
+    at the old default to 18 seconds at this one** — a fivefold improvement, deliberately
+    short of the roughly-twentyfold the bare floor would give, because outrunning the
+    documented rate by the smallest possible margin was never the goal.
+
+  This is a behaviour change for every consumer that has not set `shard_spacing_ms`
+  explicitly: this feed now reaches full coverage noticeably faster after boot and after
+  any event that reopens shards. A consumer who wants the old, more conservative pacing
+  back can still ask for it: `shard_spacing_ms: 5_000`.
+
+  ### One spacing, several jobs — considered separately, kept as one number
+
+  Four places in this module read `shard_spacing_ms`, and a value right for one is not
+  automatically right for another, so each is worth checking rather than assumed:
+
+  - The initial connect stagger (`reshard/1`'s `rest` list, above) and
+    `retry_missing_shards/1`'s reopen stagger both open brand-new sockets — a direct fit
+    for the documented 8-connections-per-second-per-IP floor this section is built on.
+  - `handle_info(:resubscribe, _)`'s unconditional re-issue walk staggers frames onto
+    ALREADY-open sockets — no new connection, so the connect-rate floor is not a direct fit.
+    Two independent reasons still keep it on the same number rather than a faster one of
+    its own: Coinbase's own rate-limits page states its 8/second/IP ceiling covers connects
+    AND messages together (`docs/reference/coinbase/level2-session-limit.md`'s own
+    paraphrase, "an `8`-per-second-per-IP connect/message rate"), so a faster resubscribe
+    cadence risks the same class of venue reaction a faster connect cadence does; and,
+    independent of anything the venue does, `Socket.subscribe/4` blocks THIS `GenServer`
+    for as long as its target socket takes to acknowledge (see "every shard beyond the
+    first must open on its own tick," above), so spacing resubscribe frames apart protects
+    `coverage/1` and every other call to this `Feed` from stalling behind a burst of
+    blocking sends regardless of what the venue does with them.
+  - `next_resubscribe_delay/1` is not a fifth job at all — it is a derived floor that has to
+    track whatever the resubscribe walk actually uses, or cycles overlap and stack frames
+    behind each other (see that function's own comment). Splitting it onto a different
+    constant than the walk it measures would just reintroduce the bug it exists to prevent.
+
+  Nothing above argues for resubscribing FASTER than the connect pace this section already
+  settled on, so the two concerns never pull the value in different directions. One number
+  does all four jobs honestly; splitting it would add a second constant with no case where
+  the two would ever need to disagree.
 
   ## The venue rewrites an aliased product id on delivery, and that has to be undone HERE
 
@@ -1034,17 +1101,21 @@ defmodule DpExchange.Coinbase.Feed do
   # Between opening each new socket, whichever channel it will carry. Opening several
   # connections in the same instant is a connect burst the venue answers with resets.
   #
-  # `5_000` is inherited from the reference fix this package replaced, the same way
-  # `@pairs_per_socket` (100) is — carried over, not derived from anything measured
-  # against this venue. See the moduledoc's "`shard_spacing_ms` — a supervision option"
-  # section for the one number this package DOES have on the record for connect pacing
-  # (Coinbase's own documented 8 connections/second/IP) and why the default is left alone
-  # here rather than tightened to it.
+  # `1_000` is CHOSEN, not inherited — the `5_000` this replaced was carried over from the
+  # reference fix this package replaced without ever being derived from anything about this
+  # venue, the same way `@pairs_per_socket` (100) still is. `1_000` rests on Coinbase's own
+  # documented 8-connections-per-second-per-IP rate (an 8x margin — see
+  # `@shard_spacing_floor_ms` below), deliberately short of that floor for headroom against
+  # an UNDOCUMENTED concurrency ceiling of the kind that crash-looped a sibling venue
+  # package (Webull) this same week. See the moduledoc's "`shard_spacing_ms` — a
+  # supervision option" section for the full reasoning and
+  # `docs/design/closed/2026-09-09_shard-spacing-headroom.md` for the closed decision
+  # record.
   #
   # Overridable via `:shard_spacing_ms`, the same shape as `:resubscribe_interval_ms` and
   # `:level2_pairs_per_socket` — see `validate_shard_spacing_ms!/1` and the moduledoc's own
   # section for the validation this one carries.
-  @default_shard_spacing_ms 5_000
+  @default_shard_spacing_ms 1_000
 
   # Coinbase's own Advanced Trade rate-limits page: "WebSocket connections ... are ...
   # limited to 8 per second per IP" — re-read 2026-09-06 alongside the `level2` ceiling

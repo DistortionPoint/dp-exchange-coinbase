@@ -296,12 +296,13 @@ than `ticker`'s 100 — and, as of this version, that `30` is a supervision opti
 change, not only a constant you have to wait on a release to see moved. A universe that
 needs 5 `ticker` sockets needs 14 `level2` sockets for the
 same 406-symbol scope (19 total), and every one of them — either channel — is staggered
-onto the same connect sequence `@shard_spacing_ms` already describes above, with every
+onto the same connect sequence `shard_spacing_ms` already describes below, with every
 `ticker` shard ordered ahead of every `level2` shard so `ticker`'s own boot-time coverage
-is unaffected. For a 406-symbol universe, that means `level2` coverage ramps in over
-roughly 70 seconds rather than seconds — materially slower than `ticker`, and an accepted
-cost against the alternative: `order_book` coverage that never moved off a handful of
-symbols at all before this package sized the two channels apart.
+is unaffected. For a 406-symbol universe at the current `1_000`ms default, that means
+`level2` coverage ramps in over roughly 18 seconds rather than seconds — materially slower
+than `ticker`, and an accepted cost against the alternative: `order_book` coverage that
+never moved off a handful of symbols at all before this package sized the two channels
+apart.
 
 A symbol whose `level2` subscribe the venue refuses is never marked covered for
 `:order_book` — `coverage/1` and `coverage_by_kind/1` report only what actually arrived,
@@ -413,9 +414,19 @@ that). The same spacing now also staggers `reconcile_shard/7`'s frames when one
 `update_symbols/2` call touches several already-open shards at once, not only when
 opening a brand-new one.
 
-Default is **5,000ms**, unchanged — inherited from the reference fix this package
-replaced, the same way `ticker`'s 100-per-socket shard size is, not derived from anything
-measured against this venue.
+Default is **1,000ms** — one connection per second, an 8x margin under the documented
+125ms connect-rate floor below. This used to be **5,000ms**, inherited unexamined from the
+reference fix this package replaced, the same way `ticker`'s 100-per-socket shard size
+still is; `1,000ms` is chosen instead, reasoned entirely from Coinbase's own documented
+rate-limits page (no live probe run against this venue) — see `feed.ex`'s own moduledoc,
+`"shard_spacing_ms — a supervision option"`, for the full reasoning, including why the
+choice sits well short of the documented floor rather than at it: partly headroom against
+jitter and shared load, and partly precaution against an *undocumented* concurrency
+ceiling of the kind that crash-looped a sibling venue package (Webull) the same week this
+was decided. **This is a behaviour change for any consumer that has not set
+`shard_spacing_ms` explicitly**: boot-to-full-coverage for the 406-symbol scope above
+drops from roughly 90 seconds to roughly 18 seconds. Pass `shard_spacing_ms: 5_000`
+yourself if you want the old, more conservative pacing back.
 
 **Below `0`, or not an integer, is refused at start** — the same shape as
 `level2_pairs_per_socket`. `0` itself is honoured, not refused: it schedules every shard
@@ -431,12 +442,11 @@ given rather than refused — but it logs the documented floor, its source, and 
 risk first: connects tighter than the venue's own stated per-IP rate risk the same
 connect-burst resets this option exists to avoid.
 
-**The 5,000ms default is very likely far more conservative than the venue requires** —
-roughly forty times the documented floor — but that is not acted on here; see
-`feed.ex`'s own moduledoc, `"shard_spacing_ms — a supervision option"`, for why tightening
-the default is a separate, deliberate decision rather than a side effect of this option's
-introduction. If you have your own evidence that a tighter pace is safe for your network
-position, this option is how you take it.
+**One number governs four call sites — the initial connect stagger, `retry_missing_shards/1`'s
+reopen stagger, the unconditional resubscribe walk, and the derived floor under
+`resubscribe_interval_ms`** — considered separately and kept as one value rather than
+split; see `feed.ex`'s own moduledoc, `"one spacing, several jobs"`, for why none of them
+pulls the value in a different direction from the others.
 
 ## Testing against this package
 

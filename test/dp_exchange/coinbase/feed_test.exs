@@ -13,18 +13,18 @@ defmodule DpExchange.Coinbase.FeedTest do
   # prove that a shard past the first got its own tick at all — the STRUCTURE of
   # `reshard/1`'s staggering (right shard indices, right channel, right count of async
   # opens) — not the literal production gap between ticks. Those tests inject this instead
-  # of waiting out the real 5_000ms default, which is what made this file's own suite the
-  # slowest thing `mix test` ran. Kept well above the documented Coinbase connect-rate
-  # floor `validate_shard_spacing_ms!/1` warns below (125ms) purely so a warning log never
-  # fires mid-test-run for a value that is only ever exercised in-process, against no real
-  # socket.
+  # of waiting out the real production default (`1_000`ms), which is what made this file's
+  # own suite the slowest thing `mix test` ran. Kept well above the documented Coinbase
+  # connect-rate floor `validate_shard_spacing_ms!/1` warns below (125ms) purely so a
+  # warning log never fires mid-test-run for a value that is only ever exercised
+  # in-process, against no real socket.
   @test_shard_spacing_ms 30
 
   # One test (`reconciling two ALREADY-OPEN shards...`, below) measures an actual time
   # delta between two real messages from two real processes, rather than only "did the
   # staggered event eventually happen" — a stricter proof that deserves more margin
   # against scheduler jitter on a loaded, `async: true` suite than the generic structural
-  # value above needs. Still two orders of magnitude below the real 5_000ms default.
+  # value above needs. Still well below the real production default (`1_000`ms).
   @test_shard_spacing_ms_precise 200
 
   # Real GenServers and real messages. The feed's socket is never started here — these
@@ -155,15 +155,20 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert Process.alive?(pid)
     end
 
-    test "the 60s DEFAULT is itself too short past 13 shards, and is extended too" do
-      # Reachable with no option set at all: a cycle spans (shards - 1) * 5_000, which
-      # passes 60s at 13 shards — trivially reachable from `level2` alone, sized at
-      # `@level2_pairs_per_socket` rather than `@pairs_per_socket` (361 symbols already
-      # needs 13 shards at 30/socket). The consumer's diagnostic knob merely exposed a
-      # limit the default already had.
+    test "the 60s DEFAULT is itself too short past 57 shards, and is extended too" do
+      # Reachable with no option set at all: a cycle spans (shards - 1) *
+      # shard_spacing_ms, which passes the 60s `resubscribe_interval_ms` default at 57
+      # shards or more, at the current `1_000`ms `shard_spacing_ms` default. That is a
+      # far bigger universe than the 361-symbol/13-shard case that tripped this at the
+      # `5_000`ms default this package used to ship — one side effect of tightening
+      # `shard_spacing_ms` (see feed.ex's own moduledoc, "shard_spacing_ms — a
+      # supervision option") is that this particular safety net now needs a much larger
+      # universe to matter at all. The mechanism itself is unchanged: the delay is
+      # derived from the shards that actually exist, not hardcoded, so a universe large
+      # enough still gets protected automatically, at either default.
 
       shards =
-        Map.new(0..12, fn index ->
+        Map.new(0..56, fn index ->
           {{"ticker", index}, %{socket: spawn(fn -> Process.sleep(:infinity) end), symbols: []}}
         end)
 
@@ -176,9 +181,9 @@ defmodule DpExchange.Coinbase.FeedTest do
           :sys.get_state(feed)
         end)
 
-      # (13 - 1) * 5_000 = 60_000 span, + 5_000 send window = 65_000.
-      assert log =~ "13 shard(s) (60000ms)"
-      assert log =~ "65000ms instead"
+      # (57 - 1) * 1_000 = 56_000 span, + 5_000 send window = 61_000.
+      assert log =~ "57 shard(s) (56000ms)"
+      assert log =~ "61000ms instead"
       assert Process.alive?(feed)
     end
 
@@ -944,7 +949,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       # second shard's failure now emits a `:coverage_change` Notice (see
       # `notify_shard_open_failed/3`) once its staggered attempt actually runs, roughly
       # `shard_spacing_ms` later. `@test_shard_spacing_ms` replaces the real production
-      # default (5_000ms) here so this test proves the SAME structure without waiting out
+      # default (1_000ms) here so this test proves the SAME structure without waiting out
       # a multi-second production timer — see that attribute's own comment.
       before = System.monotonic_time(:millisecond)
       assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
@@ -985,7 +990,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       # Shard 1 fails roughly one `shard_spacing_ms` out, shard 2 roughly two out — proof
       # every shard past the first got its own tick rather than all of them bursting
       # together (DpCryptoManagement's issue #20). `@test_shard_spacing_ms` stands in for
-      # the real 5_000ms default so this runs in milliseconds.
+      # the real 1_000ms default so this runs in milliseconds.
       #
       # Both arrivals are checked against `before` — a single fixed point captured BEFORE
       # either timer was scheduled — rather than against each other's observed arrival
@@ -1157,7 +1162,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       # between two dynamically-observed arrivals flakes on a loaded, `async: true` suite
       # (this file's own seed-2 and seed-3 CI runs hit exactly that failure during this
       # change) while a lower bound anchored to a point before any waiting began does
-      # not. `@test_shard_spacing_ms` stands in for the real 5_000ms default so three
+      # not. `@test_shard_spacing_ms` stands in for the real 1_000ms default so three
       # stacked ticks (positions 1, 2, 3) cost tens of milliseconds here instead of
       # fifteen seconds.
       [0, 1, 2]
@@ -1232,13 +1237,17 @@ defmodule DpExchange.Coinbase.FeedTest do
     # unconditionally nonsense (`Process.send_after/3` cannot schedule a negative or
     # fractional delay), and honoured-with-a-warning on the axis that is merely risky
     # (below the documented Coinbase connect-rate floor, 125ms).
-    test "the default is 5_000, unchanged from before this option existed" do
-      assert :sys.get_state(start_feed()).shard_spacing_ms == 5_000
+    test "the default is 1_000 — chosen, not the 5_000 this package used to ship" do
+      # See feed.ex's own moduledoc, "shard_spacing_ms — a supervision option", for why:
+      # an 8x margin under the documented 125ms connect-rate floor, deliberately short of
+      # the floor itself for headroom against an undocumented concurrency ceiling of the
+      # kind that crash-looped a sibling venue package this same week.
+      assert :sys.get_state(start_feed()).shard_spacing_ms == 1_000
     end
 
     test "an explicit nil falls back to the default rather than crashing at start" do
       pid = start_feed(shard_spacing_ms: nil)
-      assert :sys.get_state(pid).shard_spacing_ms == 5_000
+      assert :sys.get_state(pid).shard_spacing_ms == 1_000
     end
 
     test "an explicit override is honoured" do

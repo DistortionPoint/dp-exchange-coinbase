@@ -20,6 +20,51 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`@default_shard_spacing_ms`: `5_000` → `1_000` — closes
+  `docs/design/ideas/shard-spacing-headroom.md`, moved to
+  `docs/design/closed/2026-09-09_shard-spacing-headroom.md` with this outcome.** The old
+  value was inherited, unexamined, from the reference fix this package replaced — never
+  derived from anything about this venue, the same way `@pairs_per_socket` (100) still is.
+  Coinbase's own Advanced Trade rate-limits page documents WebSocket connections at 8 per
+  second per IP, converting directly to a floor of `ceil(1_000 / 8)` = `125`ms; `5_000`ms
+  was roughly forty times more conservative than that floor required.
+
+  `1_000`ms is one connection per second — an 8x margin under the documented floor, not the
+  floor itself (`500`ms, a 4x margin, was also considered and set aside for the larger
+  one). The extra margin beyond the documented rate alone is deliberate: Webull's shards
+  crash-looped this same week once abandoned sessions accumulated against an undocumented
+  five-connection ceiling on that venue, and Coinbase documents a rate, not a concurrency
+  cap — no concurrency cap is documented for it either, but "no documented cap" is not "no
+  cap." At `1_000`ms, only a handful of this module's own connects are ever simultaneously
+  mid-handshake for the 406-symbol/19-shard scope `feed.ex`'s own moduledoc discusses,
+  against roughly two dozen that would be in flight at once at the bare `125`ms floor.
+  Reasoned entirely from Coinbase's own documented rate-limits page — no live probe was
+  run, per this repo's own testing-tier rules for a pure connect-rate number that already
+  converts to an exact floor with nothing left to bisect.
+
+  All four call sites that read `shard_spacing_ms` were traced before choosing: the
+  initial connect stagger and `retry_missing_shards/1`'s reopen stagger both open
+  brand-new sockets, a direct fit for the documented floor; the unconditional 60-second
+  resubscribe walk staggers frames onto already-open sockets, kept on the same number both
+  because Coinbase's own rate-limits page states its 8/second/IP ceiling covers connects
+  and messages together and because `Socket.subscribe/4` blocks the `Feed` `GenServer`
+  regardless of what the venue does with the frame; `next_resubscribe_delay/1` is a
+  derived floor that has to track whatever the resubscribe walk actually uses. One number
+  continues to do all four jobs — see `feed.ex`'s own moduledoc, "one spacing, several
+  jobs," for the full reasoning kept alongside the code.
+
+  For the 406-symbol scope, boot-to-full-`level2`-coverage drops from 90 seconds at the
+  old default to 18 seconds at this one (a fivefold improvement — the 90-second figure
+  itself corrects an earlier moduledoc approximation, `(14 - 1) * shard_spacing_ms`, that
+  omitted the 5 `ticker` shards staggered ahead of `level2` in the same sequence; the true
+  span is `(shard_count - 1) * shard_spacing_ms` over all 19 touched shards, verified
+  against `reshard/1`'s actual position math). **This is a behaviour change for any
+  consumer that has not set `shard_spacing_ms` explicitly**: this feed now reaches full
+  coverage noticeably faster after boot and after any event that reopens shards. Pass
+  `shard_spacing_ms: 5_000` to keep the old, more conservative pacing.
+
 ### Fixed
 
 - **`Auth.jwt/2`'s two-minute CDP token expiry (`now + 120`) had no citation anywhere** —
