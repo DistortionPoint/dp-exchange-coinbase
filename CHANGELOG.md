@@ -20,6 +20,28 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Credentials were written to the log in cleartext by any crash — dp-exchange-core issue
+  #29.** A supervisor stores the `{module, :start_link, [opts]}` MFA its child spec names,
+  and OTP writes that argument list through `inspect/1` into the `Start Call:` line of the
+  report it logs on **any** child termination. `:credentials` arrived as a plain map, so
+  every crash printed the live secret in full. It needs no unusual conditions, it lands in
+  ordinary application logs — the artifact most likely to be shipped to an aggregator or
+  attached to a bug report — and it defeats credential hygiene upstream of it: a consumer
+  can hold the key encrypted at rest and still have it written out in the clear. The
+  reporting consumer found live keys this way and nearly pasted them into a GitHub issue
+  while reporting a different bug.
+
+  `child_spec/1` now wraps `:credentials` with `DpExchange.Coinbase.Credentials.wrap_opt/1`, and
+  **the placement is the fix**: wrapping in `start_link/1` or `init/1` does nothing,
+  because by then the supervisor above has already captured the raw list. Redacting the
+  value rather than setting the `:sensitive` process flag is deliberate — that flag
+  suppresses the whole report, including the stack trace that made the unrelated bug
+  diagnosable. This keeps the report and removes only the secret. `dp_exchange_core`'s
+  conformance suite gains **assertion 22** for exactly this, so it cannot come back here or
+  arrive in a new venue.
+
 ### Added
 
 - **`script/check_doc_sources.sh` and `docs/reference/coinbase/doc-sources.tsv`** — a weekly,
