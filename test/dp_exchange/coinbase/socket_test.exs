@@ -132,7 +132,7 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert_received {:dp_exchange, :coinbase, %Types.Quote{} = quote_struct}
       assert quote_struct.symbol == "BTC-USD"
       assert Decimal.equal?(quote_struct.price, Decimal.new("79478.7"))
-      assert quote_struct.timestamp == ~U[2026-08-28 14:53:45.649112Z]
+      assert quote_struct.venue_time == ~U[2026-08-28 14:53:45.649112Z]
     end
 
     test "a tick with NO venue timestamp is not delivered" do

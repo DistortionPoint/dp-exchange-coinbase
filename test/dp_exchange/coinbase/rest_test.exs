@@ -60,7 +60,7 @@ defmodule DpExchange.Coinbase.RestTest do
                Rest.get_price("BTC-USD", plug: responding(@ticker), retry_attempts: 0)
 
       assert Decimal.equal?(quote_struct.price, Decimal.new("79478.7"))
-      assert quote_struct.timestamp == ~U[2026-08-28 14:53:45.649112Z]
+      assert quote_struct.venue_time == ~U[2026-08-28 14:53:45.649112Z]
       assert quote_struct.provider == :coinbase
     end
 

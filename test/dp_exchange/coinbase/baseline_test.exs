@@ -128,7 +128,7 @@ defmodule DpExchange.Coinbase.BaselineTest do
     end
 
     test "the venue's timestamp is preserved to the microsecond" do
-      # The host pinned `parsed.timestamp.year`. This pins the whole instant, because a
+      # The host pinned `parsed.timestamp.year` (now `venue_time`). This pins the whole instant, because a
       # timestamp rounded to the second is a timestamp quietly altered.
       assert {:ok, _state} =
                frame(%{
@@ -147,7 +147,7 @@ defmodule DpExchange.Coinbase.BaselineTest do
                })
 
       assert_received {:dp_exchange, :coinbase, quote_struct}
-      assert quote_struct.timestamp == ~U[2026-08-28 14:53:45.649112Z]
+      assert quote_struct.venue_time == ~U[2026-08-28 14:53:45.649112Z]
     end
   end
 

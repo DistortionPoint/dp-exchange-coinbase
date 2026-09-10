@@ -69,7 +69,7 @@ defmodule DpExchange.CoinbaseLiveTest do
     test "the public price endpoint answers without credentials" do
       assert {:ok, quote_struct} = Coinbase.get_price("BTC-USD", [])
       assert Decimal.positive?(quote_struct.price)
-      assert %DateTime{} = quote_struct.timestamp
+      assert %DateTime{} = quote_struct.venue_time
     end
 
     test "a symbol the venue does not list is REFUSED, not errored" do

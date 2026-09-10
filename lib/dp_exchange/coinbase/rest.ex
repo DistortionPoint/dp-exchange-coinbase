@@ -1468,7 +1468,8 @@ defmodule DpExchange.Coinbase.Rest do
          symbol: symbol,
          price: price,
          volume: decimal(trade["size"]),
-         timestamp: at,
+         venue_time: at,
+         observed_at: DateTime.utc_now(),
          provider: :coinbase
        }}
     end
@@ -1720,7 +1721,8 @@ defmodule DpExchange.Coinbase.Rest do
          symbol: SymbolFormat.to_canonical_symbol(native),
          bids: levels(pricebook["bids"]),
          asks: levels(pricebook["asks"]),
-         timestamp: timestamp,
+         venue_time: timestamp,
+         observed_at: DateTime.utc_now(),
          # The venue publishes no sequence number on this endpoint. `nil` means it did not
          # say, so a caller cannot use this book to detect a gap in a stream.
          sequence: nil,

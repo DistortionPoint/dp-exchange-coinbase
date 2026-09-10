@@ -40,7 +40,8 @@ defmodule DpExchange.Coinbase.FeedTest do
     %Types.Quote{
       symbol: symbol,
       price: Decimal.new("1"),
-      timestamp: ~U[2026-08-28 12:00:00Z],
+      venue_time: ~U[2026-08-28 12:00:00Z],
+      observed_at: ~U[2026-08-28 12:00:00Z],
       provider: :coinbase
     }
   end
@@ -76,7 +77,8 @@ defmodule DpExchange.Coinbase.FeedTest do
       symbol: symbol,
       bids: [{Decimal.new("1"), Decimal.new("2")}],
       asks: [{Decimal.new("1.1"), Decimal.new("2")}],
-      timestamp: ~U[2026-08-28 12:00:00Z],
+      venue_time: ~U[2026-08-28 12:00:00Z],
+      observed_at: ~U[2026-08-28 12:00:00Z],
       provider: :coinbase
     }
   end

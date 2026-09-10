@@ -378,7 +378,8 @@ defmodule DpExchange.Coinbase.Socket do
          symbol: symbol,
          price: parsed_price,
          volume: decimal(ticker["volume_24_h"]),
-         timestamp: at,
+         venue_time: at,
+         observed_at: DateTime.utc_now(),
          provider: :coinbase
        }}
     end
@@ -439,7 +440,8 @@ defmodule DpExchange.Coinbase.Socket do
           symbol: symbol,
           bids: sorted(bids, :desc),
           asks: sorted(asks, :asc),
-          timestamp: at,
+          venue_time: at,
+          observed_at: DateTime.utc_now(),
           provider: :coinbase
         }
 

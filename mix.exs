@@ -6,7 +6,7 @@ defmodule DpExchangeCoinbase.MixProject do
   # change is signalled. The bump script matches the attribute assignment below by its
   # exact literal form — do not reformat it, and do not repeat that form anywhere else
   # in this file, comments included, or the script will rewrite the wrong line.
-  @version "0.2.34"
+  @version "0.3.0"
   @source_url "https://github.com/DistortionPoint/dp-exchange-coinbase"
 
   def project do
@@ -50,7 +50,7 @@ defmodule DpExchangeCoinbase.MixProject do
       # that is the signal it is meant to send. `0.1.53` is the floor because it is
       # where `Types.OrderBookDelta` shipped — this package's `Socket` decodes `level2`
       # `update` frames into it and no longer builds a book itself.
-      {:dp_exchange_core, "~> 0.1.53"},
+      {:dp_exchange_core, "~> 0.2.1"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.

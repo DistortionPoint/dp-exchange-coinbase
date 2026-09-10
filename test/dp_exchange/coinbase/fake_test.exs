@@ -16,7 +16,7 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert {:ok, %Types.Quote{} = first} = Fake.get_price("BTC-USD")
       assert {:ok, second} = Fake.get_price("BTC-USD")
 
-      assert first.timestamp == second.timestamp
+      assert first.venue_time == second.venue_time
       assert first.provider == :coinbase
     end
 

@@ -105,7 +105,8 @@ defmodule DpExchange.Coinbase.Fake do
              symbol: symbol,
              price: Decimal.new(price),
              volume: Decimal.new("1234.5"),
-             timestamp: @at,
+             venue_time: @at,
+             observed_at: @at,
              provider: :coinbase
            }}
 
@@ -216,7 +217,8 @@ defmodule DpExchange.Coinbase.Fake do
              # differ per level so a caller reading only the top learns it is reading a book.
              bids: book_side(mid, limit, :sub),
              asks: book_side(mid, limit, :add),
-             timestamp: @at,
+             venue_time: @at,
+             observed_at: @at,
              # The venue publishes no sequence on this endpoint, so neither does the fake: a
              # caller must not learn to detect stream gaps from a REST book.
              sequence: nil,
