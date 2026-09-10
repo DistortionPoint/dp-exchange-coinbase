@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-09-10
+
 ### Fixed
 
 - **No published version was attributable to a changelog entry (dp-exchange-core issue
