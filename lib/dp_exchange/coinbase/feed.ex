@@ -1241,14 +1241,42 @@ defmodule DpExchange.Coinbase.Feed do
   defp level2_shards([], _size), do: []
   defp level2_shards(symbols, size), do: Enum.chunk_every(symbols, size)
 
-  # Which channels this feed carries at all, given whether it has credentials — see
-  # `Socket`'s `@authenticated_channels`. A credential-less caller only ever wanted the
-  # public `ticker` channel; sending a doomed `level2` subscribe would either report a
-  # `credentials_required` error as a call's synchronous result (masking that `ticker`
-  # works fine) or cost a wire round trip to learn what the credential's absence already
-  # answers.
-  defp active_channels(nil), do: ["ticker"]
-  defp active_channels(_credentials), do: ["ticker", "level2"]
+  # Which channels this feed carries at all: what the caller asked for, narrowed by what its
+  # credentials allow.
+  #
+  # It used to be two literal clauses on `credentials` alone, so `level2` could not be
+  # opted out of (dp-exchange-coinbase issue #1). A consumer routing order-book depth over
+  # REST and consuming only quotes still paid for the book: at 406 pairs and
+  # `@default_level2_pairs_per_socket` of 30 that is **14 `level2` sockets** opened and kept
+  # alive, on top of the 5 `ticker` shards it actually read, plus **1,577,001 delta frames
+  # decoded and delivered in a single boot** for a payload with no wired consumer. Ignoring
+  # them on receipt saved nothing: the sockets were open and the frames were parsed before
+  # delivery either way.
+  #
+  # The vocabulary is `Core.Capabilities`' data kinds, not this venue's channel strings,
+  # because `capabilities().streamable` is what a consumer reads to decide — and it already
+  # says `[:quotes, :order_book]`, which reads as though either can be requested alone. Now
+  # it can be.
+  #
+  # Iterating the canonical list rather than the caller's preserves shard ordering
+  # regardless of the order they wrote the option in.
+  @channels_in_order [{:quotes, "ticker"}, {:order_book, "level2"}]
+
+  defp active_channels(state) do
+    for {kind, channel} <- @channels_in_order,
+        kind in state.channels,
+        channel_permitted?(channel, state.credentials),
+        do: channel
+  end
+
+  # A credential-less caller only ever wanted the public `ticker` channel — see `Socket`'s
+  # `@authenticated_channels`. Sending a doomed `level2` subscribe would either report a
+  # `credentials_required` error as a call's synchronous result (masking that `ticker` works
+  # fine) or cost a wire round trip to learn what the credential's absence already answers.
+  # This is a NARROWING of what was asked for, never a widening: asking for `:quotes` alone
+  # with credentials present still yields `ticker` alone.
+  defp channel_permitted?("level2", nil), do: false
+  defp channel_permitted?(_channel, _credentials), do: true
 
   # Each channel's own grouping, at its own size — see `shards/1` and `level2_shards/2`.
   # `level2_pairs_per_socket` is unused for `ticker`, which has no per-channel size of
@@ -1269,6 +1297,39 @@ defmodule DpExchange.Coinbase.Feed do
 
   defp shard_key_order({channel_a, index_a}, {channel_b, index_b}) do
     {channel_priority(channel_a), index_a} <= {channel_priority(channel_b), index_b}
+  end
+
+  # The kinds this feed streams, defaulting to everything `capabilities().streamable`
+  # declares — so a caller who says nothing gets exactly today's behaviour.
+  @default_channels [:quotes, :order_book]
+
+  # Same fail-closed shape as `validate_level2_pairs_per_socket!/1`: a value that cannot
+  # name a channel fails `init/1` loudly rather than being coerced or quietly ignored.
+  #
+  # An EMPTY list is refused too. It would start a feed that subscribes to nothing and
+  # reports honest, permanent zero coverage — indistinguishable from a venue outage, and a
+  # consumer who wants no stream should not start a feed at all.
+  defp validate_channels!(kinds) when is_list(kinds) and kinds != [] do
+    known = Enum.map(@channels_in_order, fn {kind, _channel} -> kind end)
+
+    case Enum.reject(kinds, &(&1 in known)) do
+      [] ->
+        Enum.uniq(kinds)
+
+      unknown ->
+        raise ArgumentError,
+              "DpExchange.Coinbase.Feed :channels must be drawn from #{inspect(known)} — " <>
+                "the kinds capabilities().streamable declares. Got #{inspect(unknown)}. " <>
+                "A kind this venue does not stream cannot be subscribed to by naming it."
+    end
+  end
+
+  defp validate_channels!(value) do
+    raise ArgumentError,
+          "DpExchange.Coinbase.Feed :channels must be a non-empty list of streamable " <>
+            "kinds, got #{inspect(value)}. An empty list would start a feed that " <>
+            "subscribes to nothing and reports zero coverage forever, which is " <>
+            "indistinguishable from a venue outage."
   end
 
   # See the moduledoc's "`level2_pairs_per_socket` — a supervision option" section for
@@ -1439,6 +1500,10 @@ defmodule DpExchange.Coinbase.Feed do
     # part that IS new — a value here that cannot chunk anything (not a positive integer)
     # fails `init/1` loudly rather than being coerced or ignored, per this family's "fail
     # closed; never substitute" rule.
+    channels =
+      (Keyword.get(opts, :channels) || @default_channels)
+      |> validate_channels!()
+
     level2_pairs_per_socket =
       (Keyword.get(opts, :level2_pairs_per_socket) || @default_level2_pairs_per_socket)
       |> validate_level2_pairs_per_socket!()
@@ -1505,6 +1570,7 @@ defmodule DpExchange.Coinbase.Feed do
        # `@default_level2_pairs_per_socket` itself, so every shard this process ever
        # computes uses the value it started with, not a constant that ignores what the
        # caller asked for.
+       channels: channels,
        level2_pairs_per_socket: level2_pairs_per_socket,
        # See `@default_shard_spacing_ms` and the moduledoc's own section on this option.
        # Read once, here, already validated — every place that used to reach for
@@ -1917,7 +1983,7 @@ defmodule DpExchange.Coinbase.Feed do
     base = map_size(state.shards)
     wanted_list = MapSet.to_list(state.wanted)
 
-    state.credentials
+    state
     |> active_channels()
     |> Enum.flat_map(fn channel ->
       wanted_list
@@ -1970,7 +2036,7 @@ defmodule DpExchange.Coinbase.Feed do
     wanted_list = MapSet.to_list(state.wanted)
 
     new_shards =
-      state.credentials
+      state
       |> active_channels()
       |> Enum.flat_map(fn channel ->
         wanted_list

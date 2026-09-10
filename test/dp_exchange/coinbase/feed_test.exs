@@ -2806,4 +2806,89 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert Process.alive?(feed)
     end
   end
+
+  describe ":channels — level2 can be opted out of (issue #1)" do
+    # The reported cost, on a consumer routing order-book depth over REST and reading only
+    # quotes: 14 `level2` sockets at 406 pairs, and 1,577,001 delta frames decoded and
+    # delivered in a single boot for a payload with no wired consumer. Ignoring them on
+    # receipt saved nothing — the sockets were open and the frames were parsed anyway.
+
+    test "defaults to both channels, so nothing changes for an existing caller" do
+      feed = start_feed(credentials: @credentials)
+
+      assert :sys.get_state(feed).channels == [:quotes, :order_book]
+    end
+
+    test "channels: [:quotes] opens ticker shards and no level2 shard at all" do
+      feed = start_feed(credentials: @credentials, channels: [:quotes])
+      :ok = Feed.subscribe(feed, ["BTC-USD", "ETH-USD"])
+
+      channels =
+        feed
+        |> :sys.get_state()
+        |> Map.fetch!(:shards)
+        |> Map.keys()
+        |> Enum.map(fn {channel, _index} -> channel end)
+        |> Enum.uniq()
+
+      assert channels == ["ticker"]
+    end
+
+    test "channels: [:order_book] opens level2 and no ticker" do
+      feed = start_feed(credentials: @credentials, channels: [:order_book])
+      :ok = Feed.subscribe(feed, ["BTC-USD"])
+
+      channels =
+        feed
+        |> :sys.get_state()
+        |> Map.fetch!(:shards)
+        |> Map.keys()
+        |> Enum.map(fn {channel, _index} -> channel end)
+        |> Enum.uniq()
+
+      assert channels == ["level2"]
+    end
+
+    test "a credential-less feed still gets ticker only, even asking for the book" do
+      # The option NARROWS what is asked for; it never widens past what credentials allow.
+      # `level2` is authenticated on this venue, so requesting it without a credential must
+      # not produce a doomed subscribe.
+      feed = start_feed(channels: [:quotes, :order_book])
+      :ok = Feed.subscribe(feed, ["BTC-USD"])
+
+      channels =
+        feed
+        |> :sys.get_state()
+        |> Map.fetch!(:shards)
+        |> Map.keys()
+        |> Enum.map(fn {channel, _index} -> channel end)
+        |> Enum.uniq()
+
+      assert channels == ["ticker"]
+    end
+
+    test "a kind this venue does not stream fails init loudly, never silently" do
+      # `init/1` raising means `start_link/1` answers `{:error, {exception, _stack}}` and,
+      # because it links, also signals this process — so the exit is trapped rather than
+      # letting a deliberate refusal look like a test crash.
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} =
+               Feed.start_link(name: nil, channels: [:candles])
+
+      assert message =~ ":channels must be drawn from"
+      assert message =~ ":candles"
+    end
+
+    test "an empty channel list is refused rather than starting a feed that reads nothing" do
+      # It would report honest, permanent zero coverage — indistinguishable from a venue
+      # outage. A consumer wanting no stream should not start a feed.
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} =
+               Feed.start_link(name: nil, channels: [])
+
+      assert message =~ "non-empty list"
+    end
+  end
 end

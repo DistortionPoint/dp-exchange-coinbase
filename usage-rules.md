@@ -203,6 +203,36 @@ guesses: frames deliver under whichever id the venue actually sent, and
 degraded and why. There is no `-USDC`/`-USD` string-munging fallback — it would be wrong
 for any pair the venue does not actually alias.
 
+
+### Choose your channels — `level2` is opt-out
+
+If you route order-book depth over REST, or simply do not read books, say so at start:
+
+```elixir
+children = [{DpExchange.Coinbase, credentials: creds, channels: [:quotes]}]
+```
+
+The vocabulary is `capabilities().streamable`'s data kinds — `:quotes` and `:order_book` —
+not this venue's channel names. Omit the option and you get both, exactly as before.
+
+**What it saves is not small.** `level2` shards at 30 pairs per socket, so a 406-pair scope
+opens **14 `level2` sockets** on top of its 5 `ticker` shards. A consumer reading only
+quotes measured **1,577,001 `OrderBookDelta` frames decoded and delivered in one boot**, all
+discarded. Ignoring them on receipt saves nothing — the sockets are open and the frames are
+parsed before they reach you.
+
+Two things the option deliberately does not do:
+
+- **It never widens past your credentials.** `level2` is authenticated here, so a
+  credential-less feed carries `ticker` alone whatever you ask for. Requesting the book
+  without a credential does not produce a doomed subscribe.
+- **It refuses an empty list**, loudly, at `init/1`. A feed subscribing to nothing reports
+  permanent zero coverage, which is indistinguishable from a venue outage. If you want no
+  stream, do not start a feed.
+
+A kind this venue does not stream (`:candles`, say) also fails at `init/1` rather than being
+silently dropped.
+
 ### `level2` delivers deltas, not a maintained book — BREAKING as of 0.2.0
 
 **Before 0.2.0**, subscribing `level2` delivered a full `Types.OrderBook` on every frame,

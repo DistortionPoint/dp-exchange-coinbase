@@ -22,6 +22,34 @@ acceptable changelog line.
 
 ### Added
 
+- **`:channels` — `level2` can be opted out of (issue #1).** `active_channels/1` hardcoded
+  both channels and ignored its argument, so a consumer that reads quotes and routes
+  order-book depth over REST had no way to decline the book and paid for it anyway.
+
+  The measured cost, from the consumer who filed it: at 406 pairs and
+  `@default_level2_pairs_per_socket` of 30, **14 `level2` sockets** opened and maintained on
+  top of the 5 `ticker` shards actually read — and **1,577,001 `OrderBookDelta` frames**
+  decoded and delivered in a single boot for a payload with no wired consumer. Ignoring them
+  on receipt saved nothing: the sockets were open and the frames were parsed before delivery
+  either way.
+
+  ```elixir
+  children = [{DpExchange.Coinbase, credentials: creds, channels: [:quotes]}]
+  ```
+
+  The vocabulary is `capabilities().streamable`'s data kinds rather than this venue's
+  channel strings, because `streamable: [:quotes, :order_book]` is what a consumer reads to
+  decide — and it already read as though either could be requested alone. **Omitting the
+  option changes nothing**, which is why the whole existing suite passed untouched.
+
+  Two deliberate limits: the option **narrows, never widens** — `level2` is authenticated
+  here, so a credential-less feed still carries `ticker` alone whatever it asks for, rather
+  than producing a doomed subscribe. And an **empty list is refused at `init/1`**, because a
+  feed subscribing to nothing reports permanent zero coverage, which is indistinguishable
+  from a venue outage. An unknown kind fails there too, rather than being silently dropped.
+
+### Added
+
 - **`script/check_endpoint_inventory.sh`** — diffs the vendor's published Advanced Trade
   REST endpoint pages against `docs/reference/coinbase/endpoints-enumerated.tsv` weekly,
   via `.github/workflows/inventory-check.yml`. One HTTP request: this venue publishes no
