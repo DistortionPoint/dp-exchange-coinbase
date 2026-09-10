@@ -260,6 +260,71 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
   end
 
+  describe "a dropped link is not still delivering" do
+    # `Socket.handle_disconnect/2` returns `{:reconnect, state}`, so a transport drop leaves
+    # the socket PROCESS alive and no `:EXIT` ever reaches `isolate_crashed_shard/5`. Before
+    # this, the delivery records from the connection that just died went on answering
+    # `:stream` — and a reconnect that restored the socket while the venue silently failed
+    # to restore a symbol left that symbol answering `:stream` forever, which is the
+    # 325-subscribed/174-delivering incident `coverage/1` was written for. See `Core.Venue`'s
+    # `coverage/1` doc: observation is scoped to the current transport session.
+    test "a link drop narrows coverage to that shard's symbols and that shard's kind" do
+      ticker_socket = idle_socket()
+      book_socket = idle_socket()
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | shards: %{
+              {"ticker", 0} => %{socket: ticker_socket, symbols: ["BTC-USD", "ETH-USD"]},
+              {"level2", 0} => %{socket: book_socket, symbols: ["BTC-USD"]}
+            }
+        }
+      end)
+
+      send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
+      send(feed, {:dp_exchange, :coinbase, quote_for("ETH-USD")})
+      send(feed, {:dp_exchange, :coinbase, order_book_for("BTC-USD")})
+
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream, "ETH-USD" => :stream}
+
+      send(feed, {:dp_exchange, :coinbase, :link_down, ticker_socket})
+
+      # ETH-USD had only the ticker shard, so it is gone entirely. BTC-USD keeps its
+      # still-healthy level2 book — a ticker drop must not erase another shard's evidence,
+      # the same isolation `isolate_crashed_shard/5` already applies to a crash.
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+      by_kind = Feed.coverage_by_kind(feed)
+      assert by_kind[:order_book] == %{"BTC-USD" => :stream}
+      refute Map.has_key?(by_kind, :quotes)
+
+      # Nothing was unsubscribed and the shard keeps its socket, because that socket is
+      # reconnecting rather than dead. The next frame after the resubscribe puts it back.
+      send(feed, {:dp_exchange, :coinbase, quote_for("ETH-USD")})
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream, "ETH-USD" => :stream}
+    end
+
+    test "a link drop from a socket this feed does not know is ignored" do
+      feed = start_feed()
+
+      send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+
+      send(feed, {:dp_exchange, :coinbase, :link_down, idle_socket()})
+
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+    end
+
+    # A pid that stays alive for the test's duration and answers nothing — `Feed` only ever
+    # compares these by identity here, never sends to them.
+    defp idle_socket do
+      pid = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      pid
+    end
+  end
+
   describe "coverage_by_kind/1 — ticker-dark/book-healthy, which coverage/1 cannot show" do
     test "a symbol delivering only a Quote appears under :quotes and not :order_book" do
       feed = start_feed()

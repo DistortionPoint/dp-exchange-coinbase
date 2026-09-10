@@ -117,6 +117,19 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :link_down, severity: :error}}
     end
 
+    test "disconnecting also tells Feed WHICH link dropped, so coverage can narrow to it" do
+      # Separate from the notice on purpose: `Feed` narrows `coverage/1` to this shard's
+      # symbols and this shard's channel's kind, never the whole feed, and it needs a pid to
+      # resolve the shard with. A socket pid is this package's own wiring and has no business
+      # in a `Core.Notice` that fans out to consumers — so it travels beside one.
+      #
+      # Called here from the test process, so `self()` is what `handle_disconnect/2` reports.
+      assert {:reconnect, _state} = Socket.handle_disconnect(%{reason: :closed}, state())
+
+      me = self()
+      assert_received {:dp_exchange, :coinbase, :link_down, ^me}
+    end
+
     test "no notice names a transport" do
       # "The venue link is down" is the fact; WebSocket is not a consumer's concern.
       Socket.handle_connect(%{}, state())

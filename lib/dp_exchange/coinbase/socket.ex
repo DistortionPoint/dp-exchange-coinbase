@@ -229,13 +229,22 @@ defmodule DpExchange.Coinbase.Socket do
   @impl true
   def handle_disconnect(%{reason: reason}, state) do
     notify(state, Notice.new(:link_down, :coinbase, details: %{reason: inspect(reason)}))
+    report_link_down(state)
     # No maintained book to wipe — see the moduledoc's "A reconnect has nothing to
-    # wipe" section. `delivering` is left alone: a symbol that was streaming is
-    # reasonably still "was covered a moment ago" until the coordinator's resubscribe
-    # timer either revives it or its own staleness ages it out of whatever freshness a
-    # caller applies downstream. The gap this disconnect opens in the delta stream is
-    # real and is now the host's to reconcile — this notice plus `:link_up` on
-    # reconnect are the brackets it needs.
+    # wipe" section. The gap this disconnect opens in the delta stream is real and is now
+    # the host's to reconcile — this notice plus `:link_up` on reconnect are the brackets
+    # it needs.
+    #
+    # `delivering` USED to be left alone here, on the argument that a symbol which was
+    # streaming is "reasonably still covered a moment ago" until the resubscribe timer
+    # revives it "or its own staleness ages it out of whatever freshness a caller applies
+    # downstream". The last clause was false, and it was the one holding the argument up:
+    # `coverage/1` returns `%{symbol() => route()}` and exposes no timestamp, so there is no
+    # freshness a caller can apply. The comment deferred to a mechanism that does not exist,
+    # and meanwhile a reconnect that restored this socket while the venue silently failed to
+    # restore a symbol left that symbol reported as `:stream` indefinitely — the
+    # 325-subscribed/174-delivering shape `coverage/1` was written for. `report_link_down/1`
+    # above is what lets `Feed` narrow coverage to exactly this shard.
     {:reconnect, state}
   end
 
@@ -598,4 +607,20 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   defp notify(_state, _notice), do: :ok
+
+  # Sent alongside the `:link_down` notice rather than folded into it. `Feed` has to know
+  # WHICH link dropped — it narrows `coverage/1` to that shard's symbols and that shard's
+  # channel's kind, never the whole feed — and a socket pid is this package's own wiring,
+  # with no business in a `Core.Notice` that fans out to consumers. `Feed` already resolves
+  # a pid to a shard this way for `:EXIT`, via `shard_key_for_socket/2`.
+  #
+  # Lossy by contract, exactly as `notify/2` above: a report that cannot be delivered is
+  # dropped, never retried. Reporting on the work must never become the reason the work
+  # does not happen.
+  defp report_link_down(%{subscriber: subscriber}) when is_pid(subscriber) do
+    send(subscriber, {:dp_exchange, :coinbase, :link_down, self()})
+    :ok
+  end
+
+  defp report_link_down(_state), do: :ok
 end

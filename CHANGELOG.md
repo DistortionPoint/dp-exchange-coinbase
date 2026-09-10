@@ -24,6 +24,33 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`coverage/1` kept answering `:stream` for symbols the dropped link had been delivering,
+  and this package carried the written argument for why that was fine.** `socket.ex` said
+  `delivering` is left alone because a symbol that was streaming is "reasonably still
+  covered a moment ago" until the resubscribe timer revives it *"or its own staleness ages
+  it out of whatever freshness a caller applies downstream"*. That last clause was the one
+  holding the argument up, and it was false: `coverage/1` returns `%{symbol() => route()}`
+  and exposes no timestamp, so there is no freshness a caller can apply. The comment
+  deferred to a mechanism that does not exist.
+
+  Meanwhile `handle_disconnect/2` returns `{:reconnect, state}`, so the socket *process*
+  survives a transport drop and no `:EXIT` ever reaches `isolate_crashed_shard/5` — the one
+  path that did clear delivery records. A reconnect that restored the socket while the venue
+  silently failed to restore some symbols left those symbols reported as `:stream`
+  indefinitely: the 325-subscribed/174-delivering incident this callback was written for.
+
+  `Socket` now reports which link dropped — beside the `:link_down` notice, not inside it,
+  because a socket pid is this package's wiring and has no business in a `Core.Notice` that
+  fans out to consumers — and `Feed` narrows coverage to exactly that shard's symbols and
+  that shard's channel's kind. A `level2` drop does not erase a symbol's still-healthy
+  `ticker` quote, the same isolation a crash already got. The shard keeps its entry and its
+  socket, because that socket is reconnecting rather than dead.
+
+  `dp_exchange_core` 0.2.5 writes the rule into `Core.Venue`'s `coverage/1` doc — observation
+  is scoped to the current transport session — and records why it cannot be carried by a
+  conformance assertion. All four streaming venues in the family had this wrong in the same
+  way and are fixed in the same batch.
+
 - **No published version was attributable to a changelog entry (dp-exchange-core issue
   #32).** Every entry in this repository's `CHANGELOG.md` sat under `## [Unreleased]` — in
   the **published tarball**, since `CHANGELOG.md` ships inside it — so a consumer could not

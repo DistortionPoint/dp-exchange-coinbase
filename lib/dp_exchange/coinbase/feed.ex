@@ -1700,6 +1700,34 @@ defmodule DpExchange.Coinbase.Feed do
     {:noreply, state}
   end
 
+  # A TRANSPORT drop, not a shard crash — and until this clause existed, nothing here could
+  # tell them apart. `Socket.handle_disconnect/2` returns `{:reconnect, state}`, so the
+  # socket process survives and no `:EXIT` ever reaches `isolate_crashed_shard/5`. The
+  # delivery records from the connection that just died went on answering `:stream` for
+  # symbols arriving from nowhere, and a reconnect that restored the socket while the venue
+  # silently failed to restore a symbol left that symbol answering `:stream` indefinitely —
+  # the 325-subscribed/174-delivering shape `coverage/1` was written for, one level down.
+  # See `Core.Venue`'s `coverage/1` doc: observation is scoped to the current transport
+  # session. `Socket.report_link_down/1` carries the pid this resolves.
+  #
+  # Isolated to the dropped link exactly the way a crash is: only that shard's symbols, only
+  # that shard's channel's kind — a `level2` drop must not erase a symbol's still-healthy
+  # `ticker` quote. Nothing else moves. The shard keeps its entry and its socket, because
+  # that socket is reconnecting rather than dead, and its symbols return as frames arrive
+  # after the next resubscribe.
+  def handle_info({:dp_exchange, :coinbase, :link_down, socket}, state) do
+    case shard_key_for_socket(state, socket) do
+      {channel, _index} = key ->
+        %{symbols: symbols} = Map.fetch!(state.shards, key)
+        kind = channel_kind(channel)
+
+        {:noreply, %{state | delivering: drop_kind(state.delivering, symbols, kind)}}
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:dp_exchange, :coinbase, payload}, state) do
     # See the moduledoc's alias-map section: `targets` is every name in `wanted` that
     # names the same market as the venue's delivered id — its own name and, where the
