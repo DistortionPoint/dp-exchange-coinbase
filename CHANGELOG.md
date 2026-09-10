@@ -20,6 +20,15 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`usage-rules.md` now answers the question a consumer actually has after 0.2.0: when is
+  `venue_time` `nil` here?** The migration note said what the fields mean; it did not say
+  what this venue does with them, which is the part a caller writes a branch for.
+
+  **Never**, on this venue: every `Quote` and `OrderBook` parses a time the venue sent and
+  fails closed when it cannot, so a `nil` branch here is dead code.
+
 ### Changed — BREAKING
 
 - **`Core.Types.Quote` and `Core.Types.OrderBook` no longer carry `:timestamp`.** They carry
