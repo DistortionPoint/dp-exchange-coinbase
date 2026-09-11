@@ -288,7 +288,7 @@ defmodule DpExchange.Coinbase.Rest do
     asked_at = DateTime.utc_now()
 
     with {:ok, accounts} <- all_accounts(credentials, opts, nil, [], 0) do
-      {:ok, Enum.map(accounts, &to_balance(&1, asked_at))}
+      to_balances(accounts, asked_at)
     end
   end
 
@@ -1096,19 +1096,59 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  # Refuses an account row this package cannot attribute, rather than emitting an unusable
+  # `Balance` and reporting it as success.
+  #
+  # `Core.Types.Balance`'s `new/1` refuses a `nil` in `:currency`. Nothing here called
+  # `new/1` — this built the struct literally, the way all five venues do — so the check
+  # never ran, and `currency` came straight out of the venue's JSON by key. A renamed or
+  # absent `"currency"` produced `%Types.Balance{currency: nil}`: an amount attributable to
+  # no asset, returned inside `{:ok, balances}`, which a consumer cannot size, book or
+  # reconcile against. It is the renamed-field scenario `Core.Types.Validate`'s moduledoc
+  # exists for, arriving through the one path that bypassed the constructor written to
+  # catch it.
+  #
+  # `balance` is a different matter and `total_balance/2`'s "both or nothing" below is
+  # deliberately untouched. `Core.Types.Balance` now states outright that `:balance` may
+  # honestly be `nil` while `:currency` may not, and cites this venue's derivation as the
+  # reason: an unknown total is a real answer with a real `available_balance` beside it, an
+  # unattributable row is not an answer at all.
   defp to_balance(account, asked_at) do
     available = amount(account["available_balance"])
     hold = amount(account["hold"])
 
-    %Types.Balance{
-      currency: account["currency"],
-      balance: total_balance(available, hold),
-      available_balance: available,
-      hold: hold,
-      timestamp: asked_at,
-      provider: :coinbase
-    }
+    with {:ok, currency} <- required_currency(account["currency"]) do
+      {:ok,
+       %Types.Balance{
+         currency: currency,
+         balance: total_balance(available, hold),
+         available_balance: available,
+         hold: hold,
+         timestamp: asked_at,
+         provider: :coinbase
+       }}
+    end
   end
+
+  # One unattributable row refuses the whole reply rather than leaving a gap in it. A balance
+  # list with an entry silently missing reads as "you hold none of that asset", which is a
+  # different and more dangerous statement than "this response could not be read".
+  defp to_balances(accounts, asked_at) do
+    accounts
+    |> Enum.reduce_while({:ok, []}, fn account, {:ok, acc} ->
+      case to_balance(account, asked_at) do
+        {:ok, balance} -> {:cont, {:ok, [balance | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, balances} -> {:ok, Enum.reverse(balances)}
+      error -> error
+    end
+  end
+
+  defp required_currency(code) when is_binary(code) and code != "", do: {:ok, code}
+  defp required_currency(_absent), do: {:error, :unexpected_response_shape}
 
   # Both or nothing. "Available 1, total unknown" and "total equals available" are
   # different claims, and a consumer sizing against the second when the first is true

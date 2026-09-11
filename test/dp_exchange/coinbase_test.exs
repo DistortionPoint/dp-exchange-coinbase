@@ -504,6 +504,49 @@ defmodule DpExchange.CoinbaseTest do
       assert balance.currency == "BTC"
     end
 
+    test "an account row with no currency refuses the whole reply" do
+      # `Core.Types.Balance`'s `new/1` refuses a nil `:currency`, and nothing in this
+      # package ever called `new/1` — the decoder builds the struct literally, as all five
+      # venues do — so the check never ran and the field came straight out of the venue's
+      # JSON by key. A renamed or absent `"currency"` gave `%Types.Balance{currency: nil}`:
+      # an amount attributable to no asset, inside `{:ok, balances}`, which a consumer
+      # cannot size, book or reconcile against.
+      #
+      # Refusing rather than dropping the row: a balance list with an entry silently
+      # missing reads as "you hold none of that asset", a different and more dangerous
+      # claim than "this response could not be read".
+      body = %{
+        "accounts" => [
+          %{"currency" => "BTC", "available_balance" => %{"value" => "1.25"}},
+          %{"available_balance" => %{"value" => "9.00"}}
+        ],
+        "has_next" => false
+      }
+
+      assert {:error, :unexpected_response_shape} =
+               Coinbase.get_balances(@creds, plug: json_plug(body), retry_attempts: 0)
+    end
+
+    test "an unknown total is still returned — :balance may honestly be nil" do
+      # The other half of the rule, and the one this venue is the reason for.
+      # `total_balance/2` carries `nil` when either the available or the hold side is
+      # missing, on the stated ground that "available 1, total unknown" and "total equals
+      # available" are different claims. `Core.Types.Balance` cites exactly this venue in
+      # allowing a nil `:balance`, so the currency guard must not tighten into it: the
+      # `available_balance` beside it is real and useful.
+      body = %{
+        "accounts" => [%{"currency" => "BTC", "available_balance" => %{"value" => "1.25"}}],
+        "has_next" => false
+      }
+
+      assert {:ok, [balance]} =
+               Coinbase.get_balances(@creds, plug: json_plug(body), retry_attempts: 0)
+
+      assert balance.currency == "BTC"
+      assert balance.balance == nil
+      assert Decimal.equal?(balance.available_balance, Decimal.new("1.25"))
+    end
+
     test "get_accounts reaches the venue through the facade" do
       body = %{"accounts" => [%{"uuid" => "u-1", "currency" => "BTC"}], "has_next" => false}
 
