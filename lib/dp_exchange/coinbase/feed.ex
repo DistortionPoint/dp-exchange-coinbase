@@ -1069,7 +1069,7 @@ defmodule DpExchange.Coinbase.Feed do
   use GenServer
 
   alias DpExchange.Coinbase.{Credentials, Rest, Socket}
-  alias DpExchange.Core.{Capabilities, Notice, Types}
+  alias DpExchange.Core.{Capabilities, Fanout, Notice, Types}
 
   require Logger
 
@@ -1556,6 +1556,13 @@ defmodule DpExchange.Coinbase.Feed do
        pending_unsubscribes: %{},
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
+       # Back-pressure, per `Core.Venue`'s `subscribe/2` doc and implemented by
+       # `Core.Fanout`: `dropping` is the set of subscribers currently over their mailbox
+       # bound, carried across calls so a stalled consumer produces one `:degraded` notice
+       # when delivery to it stops and one when it resumes — never one per dropped message,
+       # which on this venue's `level2` channel would mean a notice per book delta.
+       dropping: MapSet.new(),
+       max_queue_len: Fanout.max_queue_len!(opts, :coinbase),
        wanted: MapSet.new(),
        # symbol => %{kind => timestamp_ms}, one entry per `Capabilities.data_kind()` that
        # has actually delivered for that symbol — see the moduledoc's "coverage_by_kind/1"
@@ -1737,9 +1744,14 @@ defmodule DpExchange.Coinbase.Feed do
     kind = payload_kind(payload)
     now = :os.system_time(:millisecond)
 
-    Enum.each(targets, fn symbol ->
-      fan_out(state.subscribers, {:dp_exchange, :coinbase, %{payload | symbol: symbol}})
-    end)
+    # `delivering` is recorded whether or not the payload reached anybody. `coverage/1`
+    # reports what the VENUE delivered to this package, not what this package forwarded — a
+    # symbol whose frames are being dropped for a stalled consumer is still arriving, and
+    # reporting it as `:not_covered` would blame the venue for a consumer's own backlog.
+    state =
+      Enum.reduce(targets, state, fn symbol, acc ->
+        deliver(acc, {:dp_exchange, :coinbase, %{payload | symbol: symbol}})
+      end)
 
     delivering =
       Enum.reduce(targets, state.delivering, fn symbol, acc ->
@@ -2964,6 +2976,38 @@ defmodule DpExchange.Coinbase.Feed do
     )
   end
 
+  # The venue's data stream, bounded — see `Core.Fanout`. Only a subscriber under its
+  # mailbox bound is sent to; one past it is skipped and reported once, in a `:degraded`
+  # notice, and reported again when it catches up.
+  #
+  # This venue is the reason the module exists. `level2` measured 4258 delta frames in the
+  # window that produced this family's coverage incident; a consumer stalled for thirty
+  # seconds against that accumulates a mailbox in the hundred-thousands, and before this the
+  # node died with no notice, no log line and `coverage/1` reporting perfect health — because
+  # the feed genuinely was delivering.
+  #
+  # Notices keep going through `fan_out/2` unbounded, and must: the notice saying a
+  # subscriber is being dropped cannot be the first casualty of that same subscriber being
+  # dropped.
+  defp deliver(state, message) do
+    {_sent, dropping, transitions} =
+      Fanout.deliver(state.subscribers, message, state.dropping,
+        max_queue_len: state.max_queue_len
+      )
+
+    Enum.each(transitions, fn transition ->
+      fan_out(
+        state.notice_subscribers,
+        {:dp_exchange, :coinbase, Fanout.notice_for(transition, :coinbase, state.max_queue_len)}
+      )
+    end)
+
+    %{state | dropping: dropping}
+  end
+
+  # The UNBOUNDED path — notices only. See `deliver/2` above for why the data stream does
+  # not come through here and why notices deliberately still do.
+  #
   # A dead subscriber stops delivery. The venue must not accumulate events for a process
   # that no longer exists.
   #
@@ -2976,25 +3020,19 @@ defmodule DpExchange.Coinbase.Feed do
   # skipped, the same as a dead subscriber already was.
   defp fan_out(subscribers, message) do
     Enum.each(subscribers, fn subscriber ->
-      case resolve_subscriber(subscriber) do
+      case Fanout.resolve(subscriber) do
         pid when is_pid(pid) -> send(pid, message)
         nil -> :ok
       end
     end)
   end
 
-  defp resolve_subscriber(pid) when is_pid(pid) do
-    if Process.alive?(pid), do: pid
-  end
-
-  defp resolve_subscriber(name) when is_atom(name), do: Process.whereis(name)
-
   # `fan_out/2` restricted to exactly one subscriber — see
   # `handle_call({:subscribe_notices, _}, _, _)`'s notice-replay above. A `MapSet` of one
   # would work too, but this says directly what it does: tell this one subscriber, not
   # "everyone in a set that happens to have one member".
   defp notify_one(subscriber, message) do
-    case resolve_subscriber(subscriber) do
+    case Fanout.resolve(subscriber) do
       pid when is_pid(pid) -> send(pid, {:dp_exchange, :coinbase, message})
       nil -> :ok
     end

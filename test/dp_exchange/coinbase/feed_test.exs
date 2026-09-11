@@ -325,6 +325,95 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
   end
 
+  describe "back-pressure — a slow subscriber does not get an unbounded mailbox" do
+    # `Core.Venue`'s `subscribe/2` doc promised this from the day the contract was written,
+    # and no venue in this family implemented any of it: every one fanned out with a bare
+    # `send/2` and had never looked at a subscriber's mailbox. A consumer that stalls
+    # accumulated a mailbox until the node died, with no notice, no log line, and
+    # `coverage/1` reporting perfect health throughout — because the feed genuinely was
+    # delivering. Implemented in `Core.Fanout` 0.2.6 and wired here.
+
+    # A subscriber that never consumes, so everything sent to it stays queued. That is what
+    # a stalled consumer looks like from the sender's side, and the only way to build a real
+    # backlog without guessing at timing.
+    defp stalled_subscriber do
+      pid = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp queued(pid) do
+      {:message_queue_len, len} = Process.info(pid, :message_queue_len)
+      len
+    end
+
+    test "past its bound, a subscriber stops being sent to and its mailbox stops growing" do
+      slow = stalled_subscriber()
+      feed = start_feed(max_queue_len: 3)
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: slow)
+
+      for _each <- 1..10, do: send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
+      # A call is answered only after every send above has been handled.
+      _settled = Feed.coverage(feed)
+
+      # Three got through, then the bound stopped it. Not ten, and — the point — not
+      # unbounded. This venue's `level2` channel measured 4258 delta frames in the window
+      # that produced this family's coverage incident; that is what this bound stands
+      # between a stalled consumer and.
+      assert queued(slow) == 3
+    end
+
+    test "a stalled subscriber is reported once, not once per dropped message" do
+      slow = stalled_subscriber()
+      feed = start_feed(max_queue_len: 1)
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: slow)
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      for _each <- 1..2, do: send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :degraded, severity: :warning, details: details}}
+
+      assert details.bound == 1
+      assert details.dropping == :newest
+      assert details.subscriber == inspect(slow)
+
+      # A notice per dropped message would arrive at the rate of the stream the consumer
+      # already cannot keep up with, into the same fan-out that is overloaded.
+      for _each <- 1..5, do: send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :degraded}}, 100
+    end
+
+    test "a symbol whose frames are dropped for a slow consumer is still covered" do
+      # `coverage/1` reports what the VENUE delivered to this package, not what this package
+      # forwarded. Reporting `:not_covered` here would blame the venue for a consumer's own
+      # backlog, and send an operator looking at the wrong system entirely.
+      slow = stalled_subscriber()
+      feed = start_feed(max_queue_len: 1)
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: slow)
+
+      for _each <- 1..5, do: send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
+
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+    end
+
+    test "an invalid bound fails at init, loudly, rather than falling back to the default" do
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} =
+               Feed.start_link(
+                 name: :"bad_bound_#{System.unique_integer([:positive])}",
+                 alias_map_source: fn -> {:ok, %{}} end,
+                 max_queue_len: "3"
+               )
+
+      assert message =~ ":coinbase"
+      assert message =~ ":max_queue_len"
+    end
+  end
+
   describe "coverage_by_kind/1 — ticker-dark/book-healthy, which coverage/1 cannot show" do
     test "a symbol delivering only a Quote appears under :quotes and not :order_book" do
       feed = start_feed()
@@ -1547,35 +1636,54 @@ defmodule DpExchange.Coinbase.FeedTest do
     # `sub_counter` records every SUBSCRIBE send actually received, so a test can prove the
     # subscribe half was genuinely withheld while the unsubscribe half was still failing,
     # not merely that it happened to arrive later.
-    defp unsubscribe_flaky_socket(fail_times, unsub_counter, sub_counter) do
-      pid = spawn(fn -> unsubscribe_flaky_socket_loop(fail_times, unsub_counter, sub_counter) end)
+    # `report_to` is optional and, where a test passes it, strictly better than the
+    # counters beside it: every send this socket handles is announced to that pid in the
+    # order it happened. A counter can only be polled, and polling for an INTERMEDIATE
+    # value of a counter that is on its way somewhere else is a race by construction —
+    # `wait_until(fn -> :counters.get(unsub_counter, 1) == 1 end)` had a window only
+    # `subscribe_retry_delay_ms` (5 ms) wide in which that was true, and `wait_until/1`
+    # polls every 5 ms. It flaked roughly one run in six under `--cover`, which is how it
+    # was finally caught. Messages from one sender arrive in send order, so asserting the
+    # sequence proves the ordering exactly and waits for no window at all.
+    defp unsubscribe_flaky_socket(fail_times, unsub_counter, sub_counter, report_to \\ nil) do
+      pid =
+        spawn(fn ->
+          unsubscribe_flaky_socket_loop(fail_times, unsub_counter, sub_counter, report_to)
+        end)
+
       on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
       pid
     end
 
-    defp unsubscribe_flaky_socket_loop(remaining, unsub_counter, sub_counter) do
+    defp unsubscribe_flaky_socket_loop(remaining, unsub_counter, sub_counter, report_to) do
       receive do
         {:"$websockex_send", from, {:text, payload}} ->
           if unsubscribe_frame?(payload) do
             :counters.add(unsub_counter, 1, 1)
 
             if remaining > 0 do
+              report(report_to, :unsub_failed)
               :gen.reply(from, {:error, :send_timeout})
-              unsubscribe_flaky_socket_loop(remaining - 1, unsub_counter, sub_counter)
+              unsubscribe_flaky_socket_loop(remaining - 1, unsub_counter, sub_counter, report_to)
             else
+              report(report_to, :unsub_ok)
               :gen.reply(from, :ok)
-              unsubscribe_flaky_socket_loop(0, unsub_counter, sub_counter)
+              unsubscribe_flaky_socket_loop(0, unsub_counter, sub_counter, report_to)
             end
           else
             :counters.add(sub_counter, 1, 1)
+            report(report_to, :sub)
             :gen.reply(from, :ok)
-            unsubscribe_flaky_socket_loop(remaining, unsub_counter, sub_counter)
+            unsubscribe_flaky_socket_loop(remaining, unsub_counter, sub_counter, report_to)
           end
 
         _other ->
-          unsubscribe_flaky_socket_loop(remaining, unsub_counter, sub_counter)
+          unsubscribe_flaky_socket_loop(remaining, unsub_counter, sub_counter, report_to)
       end
     end
+
+    defp report(nil, _event), do: :ok
+    defp report(pid, event), do: send(pid, {:socket_did, event})
 
     defp unsubscribe_frame?(payload),
       do: match?({:ok, %{"type" => "unsubscribe"}}, Jason.decode(payload))
@@ -1939,7 +2047,7 @@ defmodule DpExchange.Coinbase.FeedTest do
            "until it succeeds" do
       unsub_counter = :counters.new(1, [])
       sub_counter = :counters.new(1, [])
-      socket = unsubscribe_flaky_socket(1, unsub_counter, sub_counter)
+      socket = unsubscribe_flaky_socket(1, unsub_counter, sub_counter, self())
 
       feed =
         start_supervised!(
@@ -1960,15 +2068,21 @@ defmodule DpExchange.Coinbase.FeedTest do
          valid_credentials()}
       )
 
-      # Wait for the FIRST (failing) unsubscribe attempt, and check the subscribe has not
-      # gone out yet — proving it is genuinely withheld while the unsubscribe is still
-      # failing, not merely that it happens to arrive later than a passing test would
-      # tolerate.
-      wait_until(fn -> :counters.get(unsub_counter, 1) == 1 end)
-      assert :counters.get(sub_counter, 1) == 0
+      # Asserted as an ORDERED SEQUENCE, not by polling counters. The socket announces each
+      # send in the order it handled it, and messages from one sender arrive in send order,
+      # so this proves exactly the property under test: the subscribe does not go out until
+      # the unsubscribe has actually landed.
+      #
+      # The previous version polled for `unsub_counter == 1`, an intermediate value on the
+      # way to 2, inside a window only `subscribe_retry_delay_ms` (5 ms) wide — with a 5 ms
+      # poll interval. It flaked about one run in six under `--cover`. Waiting for an
+      # intermediate value of a counter that is still climbing is a race by construction,
+      # however patient the timeout is; 2000 ms of waiting cannot widen a 5 ms window.
+      assert_receive {:socket_did, :unsub_failed}, 2_000
+      assert_receive {:socket_did, :unsub_ok}, 2_000
+      assert_receive {:socket_did, :sub}, 2_000
 
-      # Now wait for the retry to succeed (attempt 2), and confirm the subscribe DOES
-      # follow it — withheld only until the unsubscribe actually lands, not forever.
+      # The counters still back it up on totals, where polling a FINAL value is safe.
       wait_until(fn -> :counters.get(unsub_counter, 1) == 2 end)
       wait_until(fn -> :counters.get(sub_counter, 1) == 1 end)
 
