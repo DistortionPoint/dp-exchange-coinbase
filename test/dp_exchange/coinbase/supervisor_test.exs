@@ -33,13 +33,8 @@ defmodule DpExchange.Coinbase.SupervisorTest do
       assert is_pid(GenServer.whereis(limiter))
       assert DpExchange.Coinbase.capabilities().public_ceiling == %{limit: 3, per_ms: 1_000}
 
-      # Three per second declared, so three immediate acquires and no fourth.
-      for _i <- 1..3 do
-        assert :ok = DefaultRateLimiter.acquire(:coinbase, 1, limiter: limiter, timeout: 0)
-      end
-
-      assert {:error, :rate_limit_timeout} =
-               DefaultRateLimiter.acquire(:coinbase, 1, limiter: limiter, timeout: 0)
+      # Three per second declared, so the bucket drains in one weight-3 reservation.
+      assert_ceiling(limiter, 3)
     end
 
     test "with credentials, the limiter is configured from the AUTHENTICATED ceiling" do
@@ -59,12 +54,7 @@ defmodule DpExchange.Coinbase.SupervisorTest do
       caps = DpExchange.Coinbase.capabilities()
       assert caps.authenticated_ceiling == %{limit: 10, per_ms: 1_000}
 
-      for _i <- 1..10 do
-        assert :ok = DefaultRateLimiter.acquire(:coinbase, 1, limiter: limiter, timeout: 0)
-      end
-
-      assert {:error, :rate_limit_timeout} =
-               DefaultRateLimiter.acquire(:coinbase, 1, limiter: limiter, timeout: 0)
+      assert_ceiling(limiter, 10)
     end
 
     test "an empty credentials map does not buy the higher ceiling" do
@@ -75,12 +65,34 @@ defmodule DpExchange.Coinbase.SupervisorTest do
       opts = start_venue(credentials: %{})
       limiter = VenueSupervisor.limiter_name(opts)
 
-      for _i <- 1..3 do
-        assert :ok = DefaultRateLimiter.acquire(:coinbase, 1, limiter: limiter, timeout: 0)
-      end
+      assert_ceiling(limiter, 3)
+    end
 
+    # Pins the ceiling at exactly `ceiling`, without depending on elapsed time anywhere.
+    #
+    # Both earlier versions of this were races, and the second one is the instructive one.
+    # It started as a loop of `ceiling` single-token acquires followed by one that had to
+    # fail — but this is a token bucket that refills CONTINUOUSLY, so at `limit: 10,
+    # per_ms: 1_000` a token returns every 100 ms, and a loop that spans more than that on a
+    # loaded, instrumented suite leaves a refilled token for the last assertion. It flaked
+    # about one run in seven under `--cover`.
+    #
+    # Collapsing the loop into one atomic weight-N reservation made the window smaller and
+    # did not close it: the refill happens between the drain returning and the next call
+    # arriving, so ANY assertion of the form "the bucket is empty now" races the clock. It
+    # still flaked, just more rarely — which is worse, because rarer looks like fixed.
+    #
+    # What is time-independent is the SHAPE of the bucket rather than its level. A weight
+    # above the ceiling can never be satisfied however long you wait, because the bucket
+    # cannot hold that many; a weight at the ceiling succeeds from a fresh one. Together
+    # they pin the ceiling exactly, which is what these tests meant to assert all along —
+    # that the limiter was configured from the authenticated ceiling rather than the public
+    # one — instead of how fast the machine happens to be.
+    defp assert_ceiling(limiter, ceiling) do
       assert {:error, :rate_limit_timeout} =
-               DefaultRateLimiter.acquire(:coinbase, 1, limiter: limiter, timeout: 0)
+               DefaultRateLimiter.acquire(:coinbase, ceiling + 1, limiter: limiter, timeout: 0)
+
+      assert :ok = DefaultRateLimiter.acquire(:coinbase, ceiling, limiter: limiter, timeout: 0)
     end
 
     test "without one, every request fails closed — which is why the venue starts it" do

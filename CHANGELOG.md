@@ -20,6 +20,52 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A dead subscriber's pid was never removed, and the fan-out walked it on every message
+  for the life of the feed.** `Core.Fanout.resolve/1` skipped a dead subscriber at send
+  time, so no *events* accumulated for one — which is what the contract asks for, and it was
+  true. What accumulated was the **pid**. Nothing monitored a subscriber or pruned one, so a
+  supervised consumer that restarts left its old pid behind on every restart.
+
+  That is linear cost on the hot path: `deliver/4` walks the whole set and calls
+  `Process.alive?/1` per entry, per message. Measured in `dp_exchange_core` 0.3.3 —
+
+  | dead pids in set | µs per fan-out |
+  |---|---|
+  | 0 | 0.095 |
+  | 200 | 4.301 |
+  | 1000 | 22.842 |
+
+  — roughly **240×** at a thousand accumulated pids, inside the one process every
+  subscriber's data flows through.
+
+  Subscribers are now monitored, and a `:DOWN` drops the pid from every set it was in.
+
+  **A registered name is deliberately not pruned.** A pid that has died is gone permanently,
+  so removing it is always right. A name is not a process: `subscribe/2` accepts one
+  precisely so a consumer can restart under it, and a monitor fires when the *current holder*
+  dies. Pruning on that would silently unsubscribe a consumer whose supervisor is about to
+  bring it straight back under the same name — data loss with nothing to notice it by, which
+  is worse than the leak. A name cannot leak anyway: the set holds one atom however many
+  restarts happen.
+
+- **A flaky supervisor test, fixed at the third attempt.** "with credentials, the limiter is
+  configured from the AUTHENTICATED ceiling" acquired the ceiling one token at a time and
+  then asserted the next acquire failed. This is a token bucket that refills *continuously*
+  — at `limit: 10, per_ms: 1_000` a token returns every 100 ms — so a loop spanning more than
+  that under `--cover` left a refilled token for the final assertion. It failed about one run
+  in seven against a limiter behaving exactly as designed.
+
+  Collapsing the loop into one atomic weight-N reservation made the window smaller and did
+  **not** close it: the refill happens between the drain returning and the next call
+  arriving, so *any* assertion of the form "the bucket is empty now" races the clock. It
+  still flaked, just more rarely — which is worse, because rarer looks like fixed.
+
+  What is time-independent is the **shape** of the bucket rather than its level. A weight
+  *above* the ceiling can never be satisfied however long you wait; a weight *at* the ceiling
+  succeeds from a fresh one. Together they pin the ceiling exactly, which is what the test
+  meant to assert all along. Twelve consecutive `--cover` runs clean.
 ## [0.3.10] - 2026-09-11
 
 ### Added

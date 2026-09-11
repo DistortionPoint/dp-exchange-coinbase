@@ -67,7 +67,7 @@ defmodule DpExchangeCoinbase.MixProject do
       # before this line was written, per the lesson recorded below: a floor is only correct
       # once it has been RESOLVED, never once it has been reasoned about.
       #
-      {:dp_exchange_core, "~> 0.3.1"},
+      {:dp_exchange_core, "~> 0.3.3"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.
