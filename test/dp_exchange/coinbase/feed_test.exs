@@ -325,6 +325,116 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
   end
 
+  describe "the alias-catalogue fetch cannot wedge itself" do
+    # `state.alias_map_fetch` is what `start_alias_map_fetch/2` checks to refuse a second
+    # concurrent fetch. If it is ever left set by a fetch that will never answer, every later
+    # `:fetch_alias_map` tick is dropped and no retry happens again for the life of the feed
+    # — with `alias_map_status` reading `:pending`, not `:failed`, so nothing reports it
+    # either. Both ways that could happen are covered here; both were verified to wedge
+    # before the fix.
+
+    test "a task killed from outside is retried, not left pinned forever" do
+      # `safely_fetch_alias_map/1` converts a raise or an `exit` inside the task into an
+      # ordinary error result, and says in its own comment that this keeps the fetch from
+      # being "pinned forever". It does — for those two. A kill is untrappable, so no
+      # `rescue` or `catch` runs, and that was the hole.
+      test_pid = self()
+
+      source = fn ->
+        send(test_pid, {:fetching, self()})
+        Process.sleep(:infinity)
+      end
+
+      feed = start_wedge_feed(alias_map_source: source, alias_map_retry_delay_ms: 5)
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      assert_receive {:fetching, task_pid}, 2_000
+      Process.exit(task_pid, :kill)
+
+      # The retry ladder picks it straight back up rather than dropping the tick.
+      assert_receive {:fetching, second_pid}, 2_000
+      assert second_pid != task_pid
+      assert Process.alive?(feed)
+    end
+
+    test "a task that simply never answers is timed out and retried" do
+      # The other half, and the one no `:DOWN` can catch: the task is perfectly alive, it
+      # just never returns. Only a timer can tell that apart from one about to succeed.
+      test_pid = self()
+
+      source = fn ->
+        send(test_pid, {:fetching, self()})
+        Process.sleep(:infinity)
+      end
+
+      feed =
+        start_wedge_feed(
+          alias_map_source: source,
+          alias_map_fetch_timeout_ms: 50,
+          alias_map_retry_delay_ms: 5
+        )
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      assert_receive {:fetching, first_pid}, 2_000
+      assert_receive {:fetching, second_pid}, 2_000
+      assert second_pid != first_pid
+
+      # And the timed-out task is actually gone, not left running behind the feed's back.
+      wait_until(fn -> not Process.alive?(first_pid) end)
+      assert Process.alive?(feed)
+    end
+
+    test "a hang that never resolves still gives up loudly rather than retrying forever" do
+      # Transient does not mean infinite. A persistent hang exhausts the ladder and lands on
+      # the same `:unavailable` status a permanent failure gets, which is what a consumer can
+      # actually see — unlike `:pending`, which is what the wedge used to leave behind.
+      source = fn -> Process.sleep(:infinity) end
+
+      feed =
+        start_wedge_feed(
+          alias_map_source: source,
+          alias_map_fetch_timeout_ms: 20,
+          alias_map_retry_delay_ms: 5
+        )
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      wait_until(fn -> :sys.get_state(feed).alias_map_status == :unavailable end)
+
+      state = :sys.get_state(feed)
+      assert state.alias_map_fetch == nil
+      assert Process.alive?(feed)
+    end
+
+    test "a timer left over from a fetch that already answered is ignored" do
+      # The timeout is armed per attempt and matched on the tracked ref, so one arriving for
+      # a fetch that has since succeeded must not tear down whatever is running now.
+      feed = start_wedge_feed(alias_map_source: fn -> {:ok, %{"A-USD" => "B-USD"}} end)
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      wait_until(fn -> :sys.get_state(feed).alias_map_status == :ok end)
+
+      send(feed, {:alias_map_fetch_timeout, make_ref()})
+      _settled = Feed.coverage(feed)
+
+      state = :sys.get_state(feed)
+      assert state.alias_map_status == :ok
+      assert state.alias_map == %{"A-USD" => "B-USD"}
+      assert Process.alive?(feed)
+    end
+
+    # `start_feed/1` puts its own `alias_map_source` FIRST in the keyword list, and
+    # `Keyword.get/2` takes the first occurrence — so an `alias_map_source:` passed through it
+    # is silently ignored and the default stub runs instead. That cost this file's first draft
+    # of these tests a confusing round of "the fetch never starts"; building the opts directly
+    # is what makes the injection actually take.
+    defp start_wedge_feed(opts) do
+      name = :"feed_#{System.unique_integer([:positive])}"
+      start_supervised!({Feed, [name: name] ++ opts}, id: name)
+    end
+  end
+
   describe "a dead subscriber is dropped, not walked forever" do
     # `Core.Fanout.resolve/1` already skipped a dead subscriber at send time, so no EVENTS
     # accumulated — but nothing removed the pid, so a supervised consumer that restarts left

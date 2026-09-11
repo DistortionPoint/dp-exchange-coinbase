@@ -1187,6 +1187,26 @@ defmodule DpExchange.Coinbase.Feed do
   # on every re-issue tick, so there is no shared-budget arithmetic to repeat.
   @max_alias_map_retries 2
 
+  # How long the alias-catalogue fetch may run before this feed stops waiting for it.
+  #
+  # Without a bound, a source that never answers wedges the fetch permanently: `state
+  # .alias_map_fetch` stays set, and `start_alias_map_fetch/2`'s "already running" clause
+  # drops every later `:fetch_alias_map` tick, so no retry ever happens again for the life of
+  # the feed. Proven by pointing `alias_map_source` at a function that sleeps forever —
+  # `alias_map_status` sat at `:pending`, not `:failed`, so nothing reported it either.
+  #
+  # `Core.PollingFeed` already bounds its own fetch this way (`:fetch_timeout_ms`, a
+  # `{:fetch_timeout, ref}` message and a `Task.shutdown/2`), and this is the same idiom for
+  # the same reason — a task that never answers is indistinguishable from one that is about
+  # to, and only a timer can tell them apart.
+  #
+  # 30 seconds, matching `Core.HttpClient`'s own default request timeout: the default source
+  # goes through `HttpClient`, so anything shorter would fire while a legitimately slow
+  # request was still within its own budget. The real exposure is an INJECTED source — a
+  # consumer's function carries no timeout guarantee at all — which is why this exists rather
+  # than leaning on the HTTP layer's.
+  @alias_map_fetch_timeout_ms 30_000
+
   # Re-issue every shard's current subscriptions on this cadence, unconditionally — see
   # the moduledoc on reconnects.
   #
@@ -1598,6 +1618,10 @@ defmodule DpExchange.Coinbase.Feed do
        # alias-map fetch's own retry actually happens must not wait out the real delay.
        alias_map_retry_delay_ms:
          Keyword.get(opts, :alias_map_retry_delay_ms) || @alias_map_retry_delay_ms,
+       # See `@alias_map_fetch_timeout_ms` — overridable for the same reason, so a test
+       # proving the timeout fires need not wait out thirty real seconds.
+       alias_map_fetch_timeout_ms:
+         Keyword.get(opts, :alias_map_fetch_timeout_ms) || @alias_map_fetch_timeout_ms,
        # The venue's own declared alias relationships — see the moduledoc's "the venue
        # rewrites an aliased product id on delivery" section. `%{}` until fetched (or
        # forever, if every retry is exhausted), which is deliberately indistinguishable
@@ -1714,6 +1738,69 @@ defmodule DpExchange.Coinbase.Feed do
   end
 
   def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}
+
+  # The alias-catalogue fetch ran past its budget. Matched on the tracked `ref`, so a timer
+  # armed for a fetch that has since answered — its `ref` cleared, or replaced by a later
+  # attempt's — falls through to the catch-all and is ignored rather than shutting down a
+  # fetch that is doing fine.
+  #
+  # A task that never answers wedges this feed permanently without it: `alias_map_fetch`
+  # stays set and `start_alias_map_fetch/2`'s "already running" clause drops every later
+  # tick. Proven by pointing `alias_map_source` at a function that sleeps forever — the
+  # status sat at `:pending` rather than `:failed`, so nothing reported it either.
+  #
+  # Killed directly rather than through `Task.shutdown/2`, which wants a `%Task{}` this feed
+  # never kept — only the ref and pid are tracked. `Process.exit(pid, :kill)` is what
+  # `:brutal_kill` does anyway, and brutal is the right register here: the task is already
+  # past its deadline, and waiting politely for a process that has ignored one budget to
+  # respect a second is how a timeout becomes a longer timeout.
+  #
+  # `:flush` on the demonitor drops the `:DOWN` the kill produces, so the clause above does
+  # not then classify this feed's own deliberate kill as a task that died on its own — which
+  # would count one failure twice against the retry ladder.
+  def handle_info(
+        {:alias_map_fetch_timeout, ref},
+        %{alias_map_fetch: %{ref: ref, pid: pid, attempt: attempt}} = state
+      ) do
+    Process.exit(pid, :kill)
+    Process.demonitor(ref, [:flush])
+
+    handle_alias_map_fetch_failure(
+      attempt,
+      {:alias_map_fetch_timeout, state.alias_map_fetch_timeout_ms},
+      %{state | alias_map_fetch: nil}
+    )
+  end
+
+  # The alias-catalogue task died without answering. **Ordered before the subscriber `:DOWN`
+  # clause below, which would otherwise swallow it**, and matched on the tracked `ref` so
+  # only this feed's own fetch reaches it.
+  #
+  # `safely_fetch_alias_map/1` converts a raise or an `exit` inside the task into an ordinary
+  # `{:error, _}` result, and its comment says that keeps `state.alias_map_fetch` from being
+  # "pinned forever". It does, for those two cases. It cannot cover a task killed from
+  # outside — `Process.exit(pid, :kill)` is untrappable, so no `rescue` or `catch` runs — and
+  # that is the hole this closes.
+  #
+  # Measured rather than reasoned about: killing the task left `alias_map_fetch` holding the
+  # dead ref, `alias_map_status` at `:pending`, and every later `:fetch_alias_map` tick
+  # dropped by `start_alias_map_fetch/2`'s "already running" clause. No retry ever happened
+  # again, for the life of the feed, and the venue's aliasing silently never worked — with
+  # the status reading `:pending` rather than `:failed`, so nothing reported it either.
+  #
+  # Routed through the ordinary retry ladder rather than given its own path: a task that died
+  # is a transient failure like any other, and `handle_alias_map_fetch_failure/3` already
+  # knows how to count attempts, back off, and eventually give up loudly.
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{alias_map_fetch: %{ref: ref, attempt: attempt}} = state
+      ) do
+    handle_alias_map_fetch_failure(
+      attempt,
+      {:alias_map_fetch_down, reason},
+      %{state | alias_map_fetch: nil}
+    )
+  end
 
   # A subscriber that died. Dropped from both sets, and its monitor forgotten.
   #
@@ -2886,7 +2973,13 @@ defmodule DpExchange.Coinbase.Feed do
     source = state.alias_map_source
     task = Task.async(fn -> safely_fetch_alias_map(source) end)
 
-    %{state | alias_map_fetch: %{ref: task.ref, attempt: attempt}}
+    Process.send_after(
+      self(),
+      {:alias_map_fetch_timeout, task.ref},
+      state.alias_map_fetch_timeout_ms
+    )
+
+    %{state | alias_map_fetch: %{ref: task.ref, pid: task.pid, attempt: attempt}}
   end
 
   # Runs inside the task. Converts a raise or an exit into an ordinary error result BEFORE
@@ -2922,6 +3015,25 @@ defmodule DpExchange.Coinbase.Feed do
   # about the request or the venue that no amount of waiting changes, so it is not
   # retried, matching `transient_subscribe_failure?/1`'s own default-to-permanent stance.
   defp transient_alias_map_failure?({:exchange_error, _venue, :rate_limit_timeout}), do: true
+
+  # Transient for a different reason, and this exception to the default-to-permanent stance
+  # above is deliberate. The task carrying the fetch died without answering — killed from
+  # outside, which is untrappable, so `safely_fetch_alias_map/1`'s `rescue`/`catch` never
+  # ran. That says nothing about the request or the venue: it is a fact about a process, and
+  # the identical fetch has every chance of succeeding next time.
+  #
+  # Classifying it permanent would mean one `Process.exit(task, :kill)` — an operator, an
+  # out-of-memory killer — permanently disabling this venue's symbol aliasing until the tree
+  # is restarted. Transient lets a one-off recover, and a task that keeps dying still
+  # exhausts `@max_alias_map_retries` and gives up loudly, which is what a persistent problem
+  # deserves.
+  defp transient_alias_map_failure?({:alias_map_fetch_down, _reason}), do: true
+
+  # Same argument as the clause above: a fetch that ran past its deadline says nothing about
+  # the request or the venue, and the next one may well be quick. A persistent hang still
+  # exhausts `@max_alias_map_retries` and gives up loudly.
+  defp transient_alias_map_failure?({:alias_map_fetch_timeout, _ms}), do: true
+
   defp transient_alias_map_failure?(_reason), do: false
 
   defp handle_alias_map_fetch_failure(attempt, reason, state) do

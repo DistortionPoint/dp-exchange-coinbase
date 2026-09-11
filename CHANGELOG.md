@@ -20,6 +20,43 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The alias-catalogue fetch could wedge itself permanently, and then report `:pending`
+  forever.** `state.alias_map_fetch` is what `start_alias_map_fetch/2` checks to refuse a
+  second concurrent fetch. If a fetch never answers, that field stays set, **every later
+  `:fetch_alias_map` tick is dropped**, and no retry happens again for the life of the feed —
+  with `alias_map_status` reading `:pending` rather than `:failed`, so nothing reported it.
+  Symbol aliasing silently stops working and falls back to the venue's own product id.
+
+  Two ways in, both verified to wedge before the fix by driving them directly:
+
+  **A task killed from outside.** `safely_fetch_alias_map/1` converts a raise or an `exit`
+  inside the task into an ordinary error result, and its own comment says that keeps the
+  fetch from being "pinned forever". It does — for those two. `Process.exit(pid, :kill)` is
+  untrappable, so no `rescue` or `catch` runs. A `:DOWN` matched on the tracked ref now
+  routes it through the ordinary retry ladder.
+
+  **A task that simply never returns.** No `:DOWN` can catch this one: the process is
+  perfectly alive, it just never answers, and only a timer can tell that apart from one about
+  to succeed. `@alias_map_fetch_timeout_ms` (30 s, matching `Core.HttpClient`'s own request
+  timeout, overridable as `:alias_map_fetch_timeout_ms`) now bounds it, kills the task and
+  retries. `Core.PollingFeed` already bounds its own fetch exactly this way; this venue's did
+  not. The real exposure is an **injected** `alias_map_source` — a consumer's function
+  carries no timeout guarantee at all — which is why this exists rather than leaning on the
+  HTTP layer's.
+
+  Both are classified **transient**, against this module's default-to-permanent stance, and
+  deliberately: a dead or slow process says nothing about the request or the venue, and one
+  `Process.exit(task, :kill)` should not permanently disable aliasing. A problem that
+  persists still exhausts `@max_alias_map_retries` and gives up loudly, landing on
+  `:unavailable` — a status a consumer can actually see, unlike the `:pending` the wedge used
+  to leave behind.
+
+  Found while checking that the previous release's subscriber-`:DOWN` clause had not shadowed
+  any existing monitor handling. It had not — but tracing what *else* sends this feed a
+  `:DOWN` led straight here.
+
 ## [0.3.11] - 2026-09-11
 
 ### Fixed
