@@ -131,7 +131,7 @@ defmodule DpExchange.Coinbase.Socket do
   use WebSockex
 
   alias DpExchange.Coinbase.{Auth, Credentials, FrameSender, SymbolFormat}
-  alias DpExchange.Core.{Notice, Types}
+  alias DpExchange.Core.{Notice, Telemetry, Types}
 
   require Logger
 
@@ -223,6 +223,13 @@ defmodule DpExchange.Coinbase.Socket do
   @impl true
   def handle_connect(_conn, state) do
     notify(state, Notice.new(:link_up, :coinbase))
+
+    # The metrics channel alongside the notice channel, never instead of it. A `Core.Notice`
+    # is a condition a consumer must ACT on; telemetry is aggregate and lossy by design. A
+    # consumer that alarmed on a telemetry gauge would be acting on a channel documented as
+    # droppable, and one that graphed notices would be graphing something it is meant to
+    # handle. Both fire here because this one event is genuinely both.
+    Telemetry.link_up(:coinbase)
     {:ok, state}
   end
 
@@ -230,6 +237,15 @@ defmodule DpExchange.Coinbase.Socket do
   def handle_disconnect(%{reason: reason}, state) do
     notify(state, Notice.new(:link_down, :coinbase, details: %{reason: inspect(reason)}))
     report_link_down(state)
+    Telemetry.link_down(:coinbase, inspect(reason))
+
+    # No `link_reconnect_attempt` here, deliberately. This socket reconnects immediately and
+    # keeps no attempt counter, so the only number it could report is `attempt: 1` — every
+    # time. A reconnect LOOP would then render as an endless series of first attempts, which
+    # is worse than no event: it looks like a venue flapping once, repeatedly, rather than a
+    # socket that cannot get back. `dp_exchange_schwab` tracks `login_failures` and does
+    # emit it. An invented counter is exactly the plausible-wrong-value this family keeps
+    # writing rules against.
     # No maintained book to wipe — see the moduledoc's "A reconnect has nothing to
     # wipe" section. The gap this disconnect opens in the delta stream is real and is now
     # the host's to reconcile — this notice plus `:link_up` on reconnect are the brackets
@@ -250,6 +266,13 @@ defmodule DpExchange.Coinbase.Socket do
 
   @impl true
   def handle_frame({:text, payload}, state) do
+    # The high-frequency one: once per frame, on the venue whose `level2` channel measured
+    # 4258 delta frames inside a single incident window. Emitted BEFORE the decode, and
+    # counted whether or not it parses — the question this event answers is "is the venue
+    # sending", and a frame this package could not read is still a frame the venue sent.
+    # Counting only what parsed would make a decoder bug here look like a silent venue.
+    Telemetry.link_event(:coinbase, :frame, byte_size(payload))
+
     case Jason.decode(payload) do
       {:ok, decoded} -> {:ok, dispatch(decoded, state)}
       # A payload that did not parse is reported, not swallowed and not fatal.
