@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-09-11
+
 ### Fixed
 
 - **The alias-catalogue fetch could wedge itself permanently, and then report `:pending`
