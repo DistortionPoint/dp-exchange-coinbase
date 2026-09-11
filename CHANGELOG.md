@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-09-11
+
 ### Fixed
 
 - **`"NaN"` and `"Inf"` from a venue became real `Decimal` prices and flowed through
