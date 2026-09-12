@@ -745,6 +745,22 @@ so it does not quietly get old, but nothing forces it: if you are relying on a c
 a way you cannot afford to have wrong, check the date and, where it matters, verify against
 the venue yourself.
 
+## Error shapes that mean "do not act on this answer"
+
+Returned by calls that previously answered `{:ok, _}` carrying a value you could not act on.
+A consumer matching only `{:ok, _}` needs no change; one that enumerates error reasons
+should know them.
+
+`{:error, :unexpected_response_shape}` from `get_balances/2` — a balance row the venue did
+not attribute to an asset refuses the whole reply. An amount you cannot name an asset for
+cannot be sized, booked or reconciled against, and dropping the row silently would read as
+"you hold none of that asset", a different and more dangerous claim than "this response could
+not be read". **Not retryable on its own.**
+
+A `Balance`'s own `balance` field may still be `nil`, and that is a different statement: the
+venue named the asset and did not state a quantity for it. Read that as unknown, never as
+zero.
+
 ## Every negative here is audited
 
 `docs/reference/coinbase/negative-claims.md` lists each one with the source and date
