@@ -20,6 +20,22 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A trade the venue did not identify came back as a print in the tape.** `to_trade/2`
+  already refused an undated or unpriced print — `parse_time/1` and `required_decimal/2` on
+  both numbers — and let the id through untouched. `Core.Types.Trade` enforces `:id` exactly
+  as it enforces `:price`, `:quantity` and `:timestamp`, and its `new/1` refuses a `nil` in
+  any of them; nothing here called `new/1`, so the check never ran for the one field that had
+  no guard.
+
+  A print nobody can identify cannot be deduplicated against, reconciled to a fill, or asked
+  about again. An explicit `""` is refused for the same reason — it compares and logs like a
+  real id while naming nothing.
+
+  Found by checking this venue after fixing the same class in `dp_exchange_gemini`, where the
+  id was worse: `to_string(nil)` made it `""` rather than leaving it `nil`.
+
 ## [0.3.23] - 2026-09-12
 
 ### Fixed
@@ -40,6 +56,7 @@ acceptable changelog line.
   enforced, and a venue that did not state a commission has not stated one.
 
 ## [0.3.22] - 2026-09-12
+
 ### Changed
 
 - **`usage-rules.md` documents the error shapes this package started returning this week.**
@@ -573,7 +590,6 @@ acceptable changelog line.
   The issue measured five packages, from their `deps/`. `dp_exchange_schwab` has the same
   defect and is not one of their dependencies, so it could not appear in their table: six
   instances, all fixed here.
-
 
 ## [0.3.3] and earlier - 2026-09-10
 
@@ -2202,7 +2218,6 @@ the last block that will ever need a range.
   JWT window is two minutes: a host clock further out than that produces authentication
   failures that look like a credential problem.
 
-
 - **Convert, portfolios and the transaction summary** — the last ten Advanced Trade
   endpoints in the coverage plan's Phase 11.
 
@@ -2234,7 +2249,6 @@ the last block that will ever need a range.
   while a promotion is running, and it can end between two calls — and keeps the tax's
   `INCLUSIVE`/`EXCLUSIVE` flag, because the same rate quoted either way is a different amount
   of money.
-
 
 - **US derivatives — the nine CFM endpoints.** `get_positions/1` and
   `list_futures_positions/1`, `get_futures_position/3`, `get_futures_balance_summary/2`,
@@ -2275,7 +2289,6 @@ the last block that will ever need a range.
   surface this package does not reach would be a claim about the venue standing in for one
   about the package.
 
-
 - **Coinbase Prime custodial staking** — `DpExchange.Coinbase.Prime`, all nine endpoints,
   with `stake/3` and `unstake/3` now live on the facade.
 
@@ -2309,7 +2322,6 @@ the last block that will ever need a range.
   test here. Responses come back as the venue's own maps for the same reason: a
   `Types.StakingBalance` built from an unverified field name is a plausible number in the
   wrong field.
-
 
 - **Payment methods and the internal move**: `list_payment_methods/2`,
   `get_payment_method/3` (`GET /payment_methods`, `GET /payment_methods/{id}`) and
@@ -2347,7 +2359,6 @@ the last block that will ever need a range.
   adjustments. Returning it here would have answered a different question while looking
   like this one.
 
-
 - **`quantization/1` — what the venue will actually accept**, and `Rest.get_product/2` for
   the whole record. Both were `:unsupported`.
 
@@ -2365,7 +2376,6 @@ the last block that will ever need a range.
   and last of the public/private path corrections — the book, the candles and now the
   product list were all reading `/market/…` regardless.
 
-
 - **`get_trades/2` — the public tape.** `get_price/2` already reads this payload and keeps
   only the newest print, because a `Quote` has room for one price; the rest were discarded
   at the boundary. This returns them.
@@ -2373,7 +2383,6 @@ the last block that will ever need a range.
   Not `get_trade_history/2`, which is the credential's own fills. `broken` is `false` on
   every print — the ticker publishes no bust flag, and a venue with nothing busted reports
   nothing busted.
-
 
 - **`get_historical_prices/4` reads the authenticated candles path when a credential is
   present.** The venue publishes the same candles twice — `/market/products/…` public and
@@ -2409,7 +2418,6 @@ the last block that will ever need a range.
   An empty side is still `nil` rather than zero: one side of a book can genuinely be empty,
   and zero would claim someone is quoting nothing at a price of nothing.
 
-
 - **`get_trade_history/2` — past fills.**
 
   **`trade_type` is not decoration.** Regular fills carry `FILL`; the venue also emits
@@ -2432,7 +2440,6 @@ the last block that will ever need a range.
   Filters go to the venue rather than being applied to the page it returned, and the walk
   follows `cursor` to a page bound.
 
-
 - **`get_balances/2` and `get_accounts/2`.** The package could not say what the credential
   holds.
 
@@ -2453,7 +2460,6 @@ the last block that will ever need a range.
   Collapsing them would lose the first. `opts[:uuid]` reads the single-account endpoint.
 
   `:timestamp` is when the request was made — a balance has no venue event time.
-
 
 - **`convert/4` and `get_trade_volume/2` (Core 0.1.22) are declared unsupported, with the
   reasons checked.** Advanced Trade's convert is the **two-step** form —
@@ -2504,7 +2510,6 @@ the last block that will ever need a range.
   Bars now carry all four prices and `:opened_at` — the venue's own bucket start, used
   as-is. A bar the venue did not date is refused with `:missing_venue_timestamp` rather
   than stamped with the local clock, which would place it wrongly while looking right.
-
 
 ### Fixed
 - **This package claimed the venue has no order preview and no atomic replace. It has

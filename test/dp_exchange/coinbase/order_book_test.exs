@@ -423,6 +423,34 @@ defmodule DpExchange.Coinbase.OrderBookTest do
                Rest.get_trades("BTC-USD", plug: responding(body), retry_attempts: 0)
     end
 
+    test "an unidentified print is refused, like an undated or unpriced one" do
+      # `Core.Types.Trade` enforces `:id` exactly as it enforces `:price`, `:quantity` and
+      # `:timestamp`, and its `new/1` refuses a `nil` in any of them. This decoder builds the
+      # struct literally, so that check never ran — and it already guarded the other three,
+      # while the id went through untouched.
+      #
+      # A print nobody can identify cannot be deduplicated against, reconciled to a fill, or
+      # asked about again. An explicit `""` is refused for the same reason: it is an id that
+      # compares and logs like a real one while naming nothing.
+      for id <- [nil, ""] do
+        body = %{
+          "trades" => [
+            %{
+              "trade_id" => id,
+              "price" => "1",
+              "size" => "1",
+              "time" => "2026-08-28T14:53:45.649112Z",
+              "side" => "BUY"
+            }
+          ]
+        }
+
+        assert {:error, {:missing_required_field, :id}} =
+                 Rest.get_trades("BTC-USD", plug: responding(body), retry_attempts: 0),
+               "trade_id #{inspect(id)} must be refused"
+      end
+    end
+
     test "broken is false — this venue publishes no bust flag here" do
       body = %{
         "trades" => [

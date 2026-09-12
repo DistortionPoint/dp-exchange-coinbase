@@ -1585,13 +1585,24 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  # `trade_id` is guarded like the price and the size, because `Core.Types.Trade` enforces it
+  # the same way. This decoder already refused an undated or unpriced print and let an
+  # unidentified one through — `id: trade["trade_id"]` with nothing between — so a row whose
+  # id the venue omitted became a tape entry a consumer cannot deduplicate against, reconcile
+  # to a fill, or ask the venue about again.
+  #
+  # The id stays a raw value rather than being run through `to_string/1`: `to_string(nil)` is
+  # `""`, which passes every `nil` check a consumer might write while identifying nothing.
+  # `dp_exchange_gemini` carried exactly that substitution in its own `to_trade/2`, which is
+  # what prompted checking this one.
   defp to_trade(trade, symbol) do
     with {:ok, at} <- parse_time(trade["time"]),
+         {:ok, id} <- required_trade_id(trade["trade_id"]),
          {:ok, price} <- required_decimal(trade["price"], :price),
          {:ok, quantity} <- required_decimal(trade["size"], :quantity) do
       {:ok,
        %Types.Trade{
-         id: trade["trade_id"],
+         id: id,
          symbol: symbol,
          # The venue's `side` on a ticker trade is the taker's. `nil` for anything else
          # rather than the nearer of the two.
@@ -1891,6 +1902,10 @@ defmodule DpExchange.Coinbase.Rest do
   # non-nil, only that the key was given. Refuse the record instead of leaking a `nil`
   # price into a `Quote`/`Trade`/`Candle`, which is the same substitution a raise would
   # have been, wearing a quieter shape.
+  defp required_trade_id(nil), do: {:error, {:missing_required_field, :id}}
+  defp required_trade_id(""), do: {:error, {:missing_required_field, :id}}
+  defp required_trade_id(id), do: {:ok, id}
+
   defp required_decimal(nil, field), do: {:error, {:missing_required_field, field}}
 
   defp required_decimal(value, field) do
