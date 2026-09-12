@@ -874,7 +874,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, [Types.Position.t()]} | {:error, term()} | {:refused, term()}
   def get_positions(credentials, opts) do
     with {:ok, rows} <- list_futures_positions(credentials, opts) do
-      {:ok, Enum.map(rows, &to_position/1)}
+      to_positions(rows)
     end
   end
 
@@ -914,11 +914,65 @@ defmodule DpExchange.Coinbase.Rest do
 
   # "UNKNOWN" is the venue's own value and maps to nil rather than to a side. A position
   # filed the wrong way round is the most expensive mistake available in this mapping.
+  # Refuses a position row this package cannot read, rather than reporting one that says
+  # nothing about what is held.
+  #
+  # `Core.Types.Position` enforces `:symbol`, `:side` and `:quantity`, and its `new/1` refuses
+  # a `nil` in any of them. Nothing here called `new/1` — the struct is built literally, as
+  # everywhere in this family — so that check never ran and all three came through unguarded:
+  # `row["product_id"]` by key, `futures_side/1` answering `nil` for a side it does not
+  # recognise, and `amount_value/1` answering `nil` for an absent or unreadable figure.
+  #
+  # **Only `:symbol` is guarded, and the other two are deliberately left alone.** This package
+  # has already reasoned about both, and reporting a partial position is more informative than
+  # dropping it — a caller still learns the position exists and can ask again.
+  #
+  #   * `side` — the venue's own `UNKNOWN` becomes `nil` rather than a guess. See
+  #     `futures_test.exs`'s "the venue's UNKNOWN is nil, not a side": *"A position filed the
+  #     wrong way round is the most expensive mistake in this mapping."*
+  #   * `quantity` — "a missing amount is nil rather than zero", same file. That decision is
+  #     about `nil` versus `0`; refusing the row would answer a question nobody asked.
+  #
+  # `symbol` has no such reading. A position naming no instrument cannot be sized, closed or
+  # reconciled by anyone — it is not a weaker claim about what is held, it is not a claim at
+  # all — and unlike a side or a size there is no "the venue declined to say" case for it.
   defp to_position(row) do
+    with {:ok, symbol} <- required_position_field(row["product_id"], :symbol) do
+      {:ok,
+       position_struct(
+         row,
+         symbol,
+         futures_side(row["side"]),
+         amount_value(row["number_of_contracts"])
+       )}
+    end
+  end
+
+  # One unreadable row refuses the whole reply rather than leaving a gap in it. A position
+  # list with an entry silently missing reads as "you hold none of that instrument", which is
+  # a different and more dangerous claim than "this response could not be read".
+  defp to_positions(rows) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case to_position(row) do
+        {:ok, position} -> {:cont, {:ok, [position | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, positions} -> {:ok, Enum.reverse(positions)}
+      error -> error
+    end
+  end
+
+  defp required_position_field(nil, field), do: {:error, {:missing_required_field, field}}
+  defp required_position_field(value, _field), do: {:ok, value}
+
+  defp position_struct(row, symbol, side, quantity) do
     %Types.Position{
-      symbol: row["product_id"],
-      side: futures_side(row["side"]),
-      quantity: amount_value(row["number_of_contracts"]),
+      symbol: symbol,
+      side: side,
+      quantity: quantity,
       # The contract types this as an atom. `:future` is the vocabulary `Capabilities`
       # already uses for the instrument kind, so it is the one used here.
       instrument_type: :future,

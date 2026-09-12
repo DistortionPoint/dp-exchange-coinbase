@@ -515,4 +515,48 @@ defmodule DpExchange.Coinbase.FuturesTest do
       assert position.quantity == nil
     end
   end
+
+  describe "a position row the venue did not attribute to an instrument" do
+    test "refuses the whole reply rather than reporting an unnamed position" do
+      # `Core.Types.Position` enforces `:symbol` and its `new/1` refuses a `nil` there, but
+      # this decoder builds the struct literally so that check never ran and `product_id` came
+      # through by key. A position naming no instrument cannot be sized, closed or reconciled
+      # by anyone — it is not a weaker claim about what is held, it is not a claim at all.
+      body = %{"positions" => [Map.delete(position_row(), "product_id")]}
+
+      assert {:error, {:missing_required_field, :symbol}} =
+               Rest.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "one unattributable row refuses even when the others are fine" do
+      # Dropping it silently would read as "you hold none of that instrument", a different and
+      # more dangerous claim than "this response could not be read".
+      body = %{
+        "positions" => [position_row(), Map.delete(position_row(), "product_id")]
+      }
+
+      assert {:error, {:missing_required_field, :symbol}} =
+               Rest.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "an UNKNOWN side and a missing amount are still reported, not refused" do
+      # The other half, and why only the symbol is guarded. Both of these are decisions this
+      # package already made with reasons — "the venue's UNKNOWN is nil, not a side" and "a
+      # missing amount is nil rather than zero" — and reporting a partial position still tells
+      # a caller the position exists. The symbol guard must not tighten into either.
+      row =
+        position_row(%{"side" => "UNKNOWN"})
+        |> Map.delete("number_of_contracts")
+
+      assert {:ok, [position]} =
+               Rest.get_positions(@credentials,
+                 plug: responding(%{"positions" => [row]}),
+                 retry_attempts: 0
+               )
+
+      assert position.side == nil
+      assert position.quantity == nil
+      assert position.symbol
+    end
+  end
 end
