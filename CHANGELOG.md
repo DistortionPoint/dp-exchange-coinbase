@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.18] - 2026-09-12
+
 ### Fixed
 
 - **`mix.lock` held `dp_exchange_core` at a version predating assertion 24, so the new
