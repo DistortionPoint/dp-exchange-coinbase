@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.24] - 2026-09-12
+
 ### Fixed
 
 - **A trade the venue did not identify came back as a print in the tape.** `to_trade/2`
