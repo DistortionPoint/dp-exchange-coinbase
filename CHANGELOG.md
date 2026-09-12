@@ -20,6 +20,15 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mix.lock` held `dp_exchange_core` at a version predating assertion 24, so the new
+  conformance assertion never ran here.** The pin (`~> 0.3.3`) allows the newer Core, but
+  `mix.lock` is committed and CI runs `mix deps.get`, which honours it — so "the pin allows
+  it" and "CI resolves it" are different statements, and only the second one matters. Locked
+  forward to `0.3.7` and verified by breaking this package's fake on purpose: the suite now
+  fails where it previously stayed green.
+
 ## [0.3.17] - 2026-09-11
 
 ### Fixed
