@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.23] - 2026-09-12
+
 ### Fixed
 
 - **A fill could report an unstated quantity at an unstated price.** `to_fill/1` built
