@@ -85,6 +85,46 @@ defmodule DpExchange.Coinbase.FillsTest do
       assert f.provider == :coinbase
     end
 
+    test "a fill with no quantity or no price is refused, not carried with a nil in it" do
+      # `Fill` names both among the fields its `new/1` refuses a `nil` in, but this decoder
+      # builds the struct literally so that check never ran, and both went through bare
+      # `decimal/1` — which answers `nil` for an absent, empty, unparseable, NaN or Infinity
+      # value. A fill reporting that some unstated amount traded at some unstated price is
+      # worse than no fill at all: it reconciles to nothing and says nothing about why.
+      #
+      # `trade_time` was already guarded by `parse_time/1` for exactly this reason. These are
+      # the other two fields that carry the execution itself.
+      for {field, expected} <- [
+            {"size", {:missing_required_field, :quantity}},
+            {"price", {:missing_required_field, :price}}
+          ] do
+        body = %{"fills" => [Map.delete(fill(), field)], "cursor" => ""}
+
+        assert {:error, ^expected} =
+                 Rest.get_trade_history(@credentials, plug: responding(body), retry_attempts: 0),
+               "a fill with no #{field} must be refused"
+      end
+    end
+
+    test "a NaN price is refused like an absent one" do
+      body = %{"fills" => [fill(%{"price" => "NaN"})], "cursor" => ""}
+
+      assert {:error, {:invalid_decimal, :price, "NaN"}} =
+               Rest.get_trade_history(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "an unstated commission is still nil — fee is not an enforced field" do
+      # The other half: the guard above must not tighten into `fee`. A venue that did not
+      # state a commission has not stated one, and `Fill` does not enforce it.
+      body = %{"fills" => [Map.delete(fill(), "commission")], "cursor" => ""}
+
+      assert {:ok, [f]} =
+               Rest.get_trade_history(@credentials, plug: responding(body), retry_attempts: 0)
+
+      assert f.fee == nil
+      assert Decimal.equal?(f.quantity, Decimal.new("0.25"))
+    end
+
     test "the fee currency is nil, not the pair's quote guessed from the symbol" do
       # A fee can be charged in a third asset and often is. Naming USD because the pair ends
       # in USD would be a claim the venue never made.

@@ -20,6 +20,23 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fill could report an unstated quantity at an unstated price.** `to_fill/1` built
+  `%Core.Types.Fill{}` literally and put `quantity` and `price` through bare `decimal/1`,
+  which answers `nil` for an absent, empty, unparseable, NaN or Infinity value. `Fill` names
+  both among the fields its `new/1` refuses a `nil` in, but nothing here called `new/1`, so
+  that check never ran.
+
+  A `Fill` is an execution record — the value a consumer reconciles money against — and one
+  saying some unstated amount traded at some unstated price is worse than no fill at all: it
+  reconciles to nothing and says nothing about why. `parse_time/1` already guarded the
+  timestamp for exactly this reason; these are the other two fields that carry the execution
+  itself.
+
+  `fee` and `fee_currency` stay unguarded and are asserted to stay that way — neither is
+  enforced, and a venue that did not state a commission has not stated one.
+
 ## [0.3.22] - 2026-09-12
 ### Changed
 

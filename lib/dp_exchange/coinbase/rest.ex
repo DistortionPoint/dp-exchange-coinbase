@@ -1249,16 +1249,30 @@ defmodule DpExchange.Coinbase.Rest do
   # An undated fill is refused rather than stamped with the local clock. A fill is an event
   # that happened at a moment; a client timestamp on one places it wrongly in a trade
   # history while looking entirely reasonable.
+  # `quantity` and `price` are guarded, not carried forward as `nil`.
+  #
+  # A `Types.Fill` is an execution record — the value a consumer reconciles money against —
+  # and `Fill` names both among the fields its `new/1` refuses a `nil` in. Nothing here
+  # called `new/1` (the struct is built literally, as everywhere in this family), so that
+  # check never ran, and both went through bare `decimal/1`, which answers `nil` for an
+  # absent, empty, unparseable, NaN or Infinity value. A fill reporting that some unstated
+  # amount traded at some unstated price is worse than no fill at all: it reconciles to
+  # nothing and says nothing about why.
+  #
+  # `parse_time/1` already guarded the timestamp for exactly this reason. These two are the
+  # same argument applied to the other two fields that carry the execution itself.
   defp to_fill(row) do
-    with {:ok, timestamp} <- parse_time(row["trade_time"]) do
+    with {:ok, timestamp} <- parse_time(row["trade_time"]),
+         {:ok, quantity} <- required_decimal(row["size"], :quantity),
+         {:ok, price} <- required_decimal(row["price"], :price) do
       {:ok,
        %Types.Fill{
          order_id: row["order_id"],
          trade_id: row["trade_id"],
          symbol: canonical_or_nil(row["product_id"]),
          side: side_atom(row["side"]),
-         quantity: decimal(row["size"]),
-         price: decimal(row["price"]),
+         quantity: quantity,
+         price: price,
          fee: decimal(row["commission"]),
          # The venue names no fee currency on a fill. `nil`, not the quote currency guessed
          # from the pair — a fee can be charged in a third asset and often is.
