@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.29] - 2026-09-13
+
 ### Changed
 
 - **Eight public facade functions were never called through the facade by any test, and now
