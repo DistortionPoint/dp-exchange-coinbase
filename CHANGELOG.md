@@ -20,6 +20,44 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **Eight public facade functions were never called through the facade by any test, and now
+  are.** `coinbase_test.exs`'s own comment states the failure mode it was written for — "a
+  delegate wired to the wrong function would pass every Rest test" — and that was closed for
+  the order surface and left open for the reads.
+
+  Now covered: `get_top_of_book/2`, `get_order_book/2`, `get_trades/2`,
+  `get_market_overview/1` and `list_instruments/1`, each exercised through
+  `DpExchange.Coinbase` rather than `Rest`.
+
+  Also the two untested cells of the staking 2x2. `stake` + portfolio and `unstake` + wallet
+  were tested; `unstake` + portfolio and `stake` + wallet were not — and the operation atom
+  is what picks between `stake_portfolio` and `unstake_portfolio`, so a transposed clause
+  sends a redemption to the initiate path. Both numbers stay real, the call succeeds, and the
+  account does the opposite of what the caller asked, on the one surface here that moves
+  staked funds. Both transpositions were performed on purpose and both now fail.
+
+  And `alive?/1`'s pid clause, which `coverage/1` and `coverage_by_kind/1` route through. Only
+  the atom clause had ever run, so a consumer holding a pid from its own supervision tree
+  took the untested path.
+
+  No delegation was wrong. This is a coverage gap on the surface a consumer actually calls,
+  found by reading which lines of `DpExchange.Coinbase` the suite never executes.
+
+  **Most of what that report flags is an artifact and was not "fixed":** a multi-line
+  `def ... \\ []` head is counted separately from its body and never runs, so fourteen
+  entries — the whole order surface among them — were already covered. Each remaining
+  candidate was confirmed by grepping the suite for a facade-qualified call before anything
+  was written.
+
+  `quantization/1` is deliberately left uncovered. The contract callback takes no options, so
+  it passes `[]` and cannot be given a plug; testing it means either a live call, which tier 1
+  forbids, or adding a `quantization/2` arity to the facade, which `usage-rules/adapter.md`
+  says is "a Core change with a deliberate release behind it, not a local addition". Its
+  behaviour is covered through the fake, and its limiter still defaults correctly — bare `[]`
+  reaches `Keyword.put_new(:limiter, ...)` the same as any other call.
+
 ## [0.3.28] - 2026-09-13
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

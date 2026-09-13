@@ -470,6 +470,110 @@ defmodule DpExchange.CoinbaseTest do
       end
     end
 
+    # The five market-data reads and `quantization/1` are the functions a consumer calls
+    # most, and until now not one of them was ever called THROUGH the facade by a test —
+    # every assertion went straight to `Rest`. That is the gap the describe block's own
+    # comment names: "a delegate wired to the wrong function would pass every Rest test",
+    # and it was closed for the order surface and left open for the reads.
+    #
+    # Found by reading which lines of `DpExchange.Coinbase` the suite never executes. Most
+    # of what that report flags is an artifact — a multi-line `def ... \\ []` head is
+    # counted separately from its body and never runs — but these are one-liners, where a
+    # miss is a miss. Each was then confirmed by grepping the suite for a facade-qualified
+    # call, rather than trusted from the coverage tool.
+    test "the five market-data reads reach the venue through the facade" do
+      book = %{
+        "product_id" => "BTC-USD",
+        "bids" => [%{"price" => "79478.00", "size" => "0.5"}],
+        "asks" => [%{"price" => "79479.00", "size" => "0.25"}],
+        "time" => "2026-09-13T12:00:00Z"
+      }
+
+      assert {:ok, _top} =
+               Coinbase.get_top_of_book("BTC-USD",
+                 credentials: @creds,
+                 plug: json_plug(%{"pricebooks" => [book]}),
+                 retry_attempts: 0
+               )
+
+      assert {:ok, _depth} =
+               Coinbase.get_order_book("BTC-USD",
+                 plug: json_plug(%{"pricebook" => book}),
+                 retry_attempts: 0
+               )
+
+      trades = %{
+        "trades" => [
+          %{
+            "trade_id" => "t-1",
+            "price" => "79478.00",
+            "size" => "0.5",
+            "time" => "2026-09-13T12:00:00Z"
+          }
+        ]
+      }
+
+      assert {:ok, _tape} =
+               Coinbase.get_trades("BTC-USD", plug: json_plug(trades), retry_attempts: 0)
+
+      products = %{
+        "products" => [
+          %{
+            "product_id" => "BTC-USD",
+            "base_increment" => "0.00000001",
+            "quote_increment" => "0.01",
+            "base_min_size" => "0.0001",
+            "status" => "online"
+          }
+        ]
+      }
+
+      assert {:ok, _overview} =
+               Coinbase.get_market_overview(plug: json_plug(products), retry_attempts: 0)
+
+      assert {:ok, _instruments} =
+               Coinbase.list_instruments(plug: json_plug(products), retry_attempts: 0)
+    end
+
+    test "coverage accepts a feed given as a pid, not only as a registered name" do
+      # `alive?/1` has a clause per shape — `is_atom` resolves through `GenServer.whereis/1`,
+      # `is_pid` asks the process directly — and only the atom clause was ever executed. A
+      # consumer holding a pid from its own supervision tree, rather than a registered name,
+      # takes the untested one.
+      #
+      # Both `coverage/1` and `coverage_by_kind/1` route through it, and a feed that is alive
+      # must not be reported as delivering nothing: `%{}` is this package's answer for "no
+      # feed", and returning it for a live one would read as a venue delivering nothing at
+      # all, which is the substitution this family refuses everywhere else.
+      # The feed is given something to report BEFORE it is asked. A first version of this
+      # test asserted `is_map(...)`, which `%{}` satisfies — so it passed whether the pid
+      # clause answered true or false, and breaking that clause on purpose left it green.
+      # A live feed and a dead one are indistinguishable by return value until one of them
+      # has coverage to report.
+      {:ok, pid} = DpExchange.Coinbase.Feed.start_link(name: nil, subscriber: self())
+
+      tick = %DpExchange.Core.Types.Quote{
+        symbol: "BTC-USD",
+        price: Decimal.new("1"),
+        venue_time: ~U[2026-08-28 12:00:00Z],
+        observed_at: ~U[2026-08-28 12:00:00Z],
+        provider: :coinbase
+      }
+
+      send(pid, {:dp_exchange, :coinbase, tick})
+
+      # No sleep: `coverage/1` is a `GenServer.call`, so it queues behind the raw `send/2`
+      # in the same mailbox and cannot be answered until that message is handled.
+      assert Coinbase.coverage(feed: pid) == %{"BTC-USD" => :stream}
+      assert %{quotes: %{"BTC-USD" => :stream}} = Coinbase.coverage_by_kind(feed: pid)
+
+      # The negative control on the same branch: a dead pid is not a live feed, and `%{}`
+      # is what "no feed" means rather than what a live one reports.
+      GenServer.stop(pid)
+      refute Process.alive?(pid)
+      assert Coinbase.coverage(feed: pid) == %{}
+    end
+
     test "place_order reaches the venue through the facade" do
       body = %{"success" => true, "success_response" => %{"order_id" => "via-facade"}}
 

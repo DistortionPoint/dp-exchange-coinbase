@@ -365,6 +365,47 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
     end
   end
 
+  describe "the facade chooses the operation, not only the scope" do
+    # The other two cells of the same 2x2. `stake`+portfolio and `unstake`+wallet were
+    # tested above; `unstake`+portfolio and `stake`+wallet were not, and those are the two
+    # branches of `prime_portfolio/6` and `prime_wallet/7` the suite never executed.
+    #
+    # Worth having rather than assumed-by-symmetry: the operation atom is what picks between
+    # `stake_portfolio` and `unstake_portfolio`, so a transposed clause sends a redemption to
+    # the initiate path. Both numbers stay real, the call succeeds, and the account does the
+    # opposite of what the caller asked — on the one surface in this package that moves
+    # staked funds. The path assertion is what catches it.
+    test "a portfolio alone with unstake means the portfolio unstake path" do
+      me = self()
+
+      assert {:ok, _result} =
+               DpExchange.Coinbase.unstake(
+                 "ETH",
+                 Decimal.new("1"),
+                 opts(me, credentials: @credentials, portfolio_id: "pf-1")
+               )
+
+      assert_receive {:request, "POST", path, _raw, _headers}
+      assert path == "/v1/portfolios/pf-1/staking/unstake"
+      refute path =~ "initiate"
+    end
+
+    test "a wallet with stake means the wallet initiate path" do
+      me = self()
+
+      assert {:ok, _result} =
+               DpExchange.Coinbase.stake(
+                 "ETH",
+                 Decimal.new("1"),
+                 opts(me, credentials: @credentials, portfolio_id: "pf-1", wallet_id: "w-9")
+               )
+
+      assert_receive {:request, "POST", path, _raw, _headers}
+      assert path == "/v1/portfolios/pf-1/wallets/w-9/staking/initiate"
+      refute path =~ "unstake"
+    end
+  end
+
   describe "the facade reaches the rest of Prime's nine endpoints directly" do
     test "query_transaction_validators/3 reaches the portfolio-scoped path" do
       me = self()
