@@ -2412,22 +2412,53 @@ defmodule DpExchange.Coinbase.Rest do
   `:status` and `:symbol` in `opts` filter at the venue rather than here — a client-side
   filter over one page would silently drop matching orders that were on the next one.
 
-  **This returns one page.** The venue paginates with a cursor and this does not follow it,
-  which is a limit worth stating rather than a total worth trusting: a caller reconciling
-  positions against a truncated order list would find a difference it could not explain.
+  **This follows the venue's cursor to the end**, bounded by `@max_order_pages`.
+
+  It used to return one page and say so, on the reasoning that a stated limit is better than
+  a total worth trusting. The statement was honest and the behaviour was still wrong: the
+  same doc named the harm — "a caller reconciling positions against a truncated order list
+  would find a difference it could not explain" — and this module already refuses to accept
+  that shape twice over, for `get_balances/2` ("a truncated balance list is the worst shape
+  this family has: every number in it is real") and for `get_trade_history/2`. An order list
+  is the same shape and the same envelope.
+
+  A venue that sends no cursor is unaffected: the walk stops on the first page, exactly as
+  before. A server that always says `has_next` answers `{:error, :too_many_order_pages}`
+  rather than looping inside a facade call.
   """
   @spec get_orders(map(), keyword()) ::
           {:ok, [Types.Order.t()]} | {:error, term()} | {:refused, term()}
   def get_orders(credentials, opts) do
+    with {:ok, orders} <- all_orders(credentials, opts, nil, [], 0) do
+      {:ok, Enum.map(orders, &to_order/1)}
+    end
+  end
+
+  @max_order_pages 50
+
+  defp all_orders(_credentials, _opts, _cursor, _acc, page) when page >= @max_order_pages,
+    do: {:error, :too_many_order_pages}
+
+  defp all_orders(credentials, opts, cursor, acc, page) do
     params =
       %{}
       |> put_unless_nil("order_status", opts |> Keyword.get(:status) |> order_status_param())
       |> put_unless_nil("product_ids", venue_symbol(Keyword.get(opts, :symbol)))
       |> put_unless_nil("limit", Keyword.get(opts, :limit))
+      |> put_unless_nil("cursor", cursor)
 
     case request(:get, "/orders/historical/batch", credentials, opts, params) do
-      {:ok, %{body: %{"orders" => orders}}} when is_list(orders) ->
-        {:ok, Enum.map(orders, &to_order/1)}
+      {:ok, %{body: %{"orders" => orders} = body}} when is_list(orders) ->
+        collected = acc ++ orders
+
+        # Same envelope and same reading as `all_accounts/5`: the venue's own `has_next`,
+        # and a cursor that is actually a cursor. A venue that sends neither stops here,
+        # which is what every response looked like before this walked at all.
+        if body["has_next"] == true and is_binary(body["cursor"]) and body["cursor"] != "" do
+          all_orders(credentials, opts, body["cursor"], collected, page + 1)
+        else
+          {:ok, collected}
+        end
 
       {:ok, %{body: _other}} ->
         {:error, :unexpected_response_shape}

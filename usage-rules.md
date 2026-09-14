@@ -755,6 +755,22 @@ so it does not quietly get old, but nothing forces it: if you are relying on a c
 a way you cannot afford to have wrong, check the date and, where it matters, verify against
 the venue yourself.
 
+## The list endpoints follow the venue's cursor, and say so when they cannot finish
+
+`get_balances/2`, `get_trade_history/2` and `get_orders/2` follow Coinbase's `cursor` /
+`has_next` envelope to the end rather than returning the first page. A truncated list of any
+of the three is the shape this family most wants to avoid — every value in it is real, so
+nothing looks wrong, and what is missing is simply never seen.
+
+Each walk is bounded. A venue that keeps saying `has_next` answers
+`{:error, :too_many_account_pages}`, `{:error, :too_many_fill_pages}` or
+`{:error, :too_many_order_pages}` rather than looping inside your call. Those are errors
+about **this package's limit**, not statements about your account: retry with a narrower
+filter (`:symbol`, `:status`, or a date range) rather than treating them as "no data".
+
+`get_orders/2` returned one page until 0.3.36. If you built your own cursor loop on top of
+it, it now returns the whole set and your loop will see a single page with nothing after it.
+
 ## Error shapes that mean "do not act on this answer"
 
 Returned by calls that previously answered `{:ok, _}` carrying a value you could not act on.

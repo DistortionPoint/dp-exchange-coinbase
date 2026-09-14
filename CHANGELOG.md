@@ -20,6 +20,35 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_orders/2` returned one page and let a caller reconcile against a prefix.** The
+  venue paginates its order list with the same `cursor` / `has_next` envelope this module
+  already walks for `get_balances/2` and `get_trade_history/2`, and this one stopped at the
+  first page.
+
+  It was documented — "**This returns one page.** The venue paginates with a cursor and this
+  does not follow it" — and the same doc named the harm exactly: "a caller reconciling
+  positions against a truncated order list would find a difference it could not explain."
+  The statement was honest and the behaviour was still wrong. `get_balances/2`'s own doc
+  settles the question for this venue: "a truncated balance list is the worst shape this
+  family has: every number in it is real." An order list is the same shape.
+
+  The walk is bounded like the other two and answers `{:error, :too_many_order_pages}`
+  rather than looping inside a facade call. A response with no `has_next` and no `cursor`
+  behaves exactly as before, so a venue that never paginated sees no change.
+
+  **If you built your own cursor loop on top of this, it now returns the whole set** and
+  your loop will see one page with nothing after it.
+
+### Changed
+
+- `usage-rules.md` now states that the three list endpoints follow the cursor, and that the
+  page-bound errors are about this package's limit rather than about your account — retry
+  with a narrower filter rather than reading them as "no data". None of this was in the
+  consumer documentation before; it was only in the module docs, which are a different
+  audience.
+
 ## [0.3.35] - 2026-09-14
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

@@ -244,6 +244,67 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
       assert second.id == "def-456"
     end
 
+    test "the cursor is followed to the end, not stopped at the first page" do
+      # This returned one page and said so — and the same doc named the harm: "a caller
+      # reconciling positions against a truncated order list would find a difference it
+      # could not explain." The statement was honest and the behaviour was still wrong.
+      # `get_balances/2` and `get_trade_history/2` in this same module already refuse that
+      # shape, over the same Advanced Trade envelope.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:cursor, conn.query_params["cursor"] || conn.params["cursor"]})
+
+        body =
+          case conn.query_string do
+            q when is_binary(q) ->
+              if String.contains?(q, "cursor=page2") do
+                %{"orders" => [order_json(%{"order_id" => "second"})], "has_next" => false}
+              else
+                %{
+                  "orders" => [order_json(%{"order_id" => "first"})],
+                  "has_next" => true,
+                  "cursor" => "page2"
+                }
+              end
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:ok, orders} =
+               Rest.get_orders(@credentials, plug: plug, retry_attempts: 0)
+
+      assert Enum.map(orders, & &1.id) == ["first", "second"]
+    end
+
+    test "a venue that sends no cursor still answers with its single page" do
+      # The walk has to be inert where it was never needed: a response with no `has_next`
+      # and no `cursor` must behave exactly as it did before this paged at all.
+      body = %{"orders" => [order_json()]}
+
+      assert {:ok, [only]} =
+               Rest.get_orders(@credentials, plug: responding(body), retry_attempts: 0)
+
+      assert only.id == "abc-123"
+    end
+
+    test "a server that always says has_next is bounded rather than looping" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{"orders" => [order_json()], "has_next" => true, "cursor" => "always"})
+        )
+      end
+
+      assert {:error, :too_many_order_pages} =
+               Rest.get_orders(@credentials, plug: plug, retry_attempts: 0)
+    end
+
     test "filters are sent to the venue rather than applied here" do
       # A client-side filter over one page would silently drop matching orders that were on
       # the next one.
