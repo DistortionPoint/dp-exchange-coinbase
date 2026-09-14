@@ -160,18 +160,38 @@ defmodule DpExchange.Coinbase.ConvertTest do
       end
     end
 
-    test "a status this package does not know is nil, never the nearest one" do
-      # Reporting a quote as settled is the failure this field exists to prevent, and
-      # reporting a failure as a quote is the same mistake backwards.
+    test "a status this package does not know is refused, never guessed and never nil" do
+      # The old assertion was `status == nil`, and its reasoning was right about the thing it
+      # ruled out: "reporting a quote as settled is the failure this field exists to prevent,
+      # and reporting a failure as a quote is the same mistake backwards." Both true. Neither
+      # makes `nil` the answer.
+      #
+      # `:status` is in `Types.Conversion`'s `@enforce_keys`, so its `new/1` refuses a `nil`
+      # there — a `Conversion` carrying one is a struct the typespec says cannot occur, and it
+      # only existed because nothing here calls `new/1`. The third option the old comment did
+      # not take is the one the contract asks for: refuse. A conversion whose status cannot be
+      # read is not safely actionable by anyone, and a status Coinbase has newly added is
+      # exactly the thing that should be loud. `required_side/1` answers an unknown side the
+      # same way.
       body = trade(%{"status" => "TRADE_STATUS_SOMETHING_NEW"})
 
-      assert {:ok, conversion} =
+      assert {:error, {:unknown_conversion_status, "TRADE_STATUS_SOMETHING_NEW"}} =
                Rest.quote_conversion(@credentials, "USD", "USDC", Decimal.new("1"),
                  plug: responding(body),
                  retry_attempts: 0
                )
+    end
 
-      assert conversion.status == nil
+    test "a conversion with no id is refused rather than naming no quote" do
+      # `:id` is in the same `@enforce_keys`. A conversion with no id cannot be committed,
+      # cancelled or reconciled — every later call takes that id.
+      body = trade(%{"id" => nil})
+
+      assert {:error, {:missing_required_field, :id}} =
+               Rest.quote_conversion(@credentials, "USD", "USDC", Decimal.new("1"),
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
     end
   end
 

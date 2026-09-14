@@ -784,7 +784,7 @@ defmodule DpExchange.Coinbase.Rest do
       )
 
     with {:ok, trade} <- convert_trade(post_json("/convert/quote", body, credentials, opts)) do
-      {:ok, to_conversion(trade, from, to)}
+      to_conversion(trade, from, to)
     end
   end
 
@@ -804,7 +804,7 @@ defmodule DpExchange.Coinbase.Rest do
 
       with {:ok, trade} <-
              convert_trade(post_json("/convert/trade/#{trade_id}", body, credentials, opts)) do
-        {:ok, to_conversion(trade, from, to)}
+        to_conversion(trade, from, to)
       end
     end
   end
@@ -824,7 +824,7 @@ defmodule DpExchange.Coinbase.Rest do
 
       with {:ok, trade} <-
              convert_trade(request(:get, "/convert/trade/#{trade_id}", credentials, opts, params)) do
-        {:ok, to_conversion(trade, from, to)}
+        to_conversion(trade, from, to)
       end
     end
   end
@@ -843,10 +843,35 @@ defmodule DpExchange.Coinbase.Rest do
   # `from_asset` and `to_asset` come from what the caller asked for, not from the response:
   # the venue's amounts carry a currency each, but which is the source and which the
   # destination is the caller's question and the response does not label them.
+  # `:id` and `:status` are both in `Types.Conversion`'s `@enforce_keys`, so its `new/1`
+  # refuses a `nil` in either — and nothing here calls `new/1`, the struct being built
+  # literally as everywhere in this family, so that check never ran.
+  #
+  # `conversion_status/1` answering `nil` for a word this package does not know is the right
+  # instinct and the wrong destination. Its own comment says why it must not guess —
+  # "reporting a quote as settled is the failure this field exists to [prevent]" — and the
+  # contract offers the third option that comment did not take: refuse. A conversion whose
+  # status cannot be read is not safely actionable by anyone, and a status Coinbase has newly
+  # added is exactly the thing that should be loud rather than `nil`. `required_side/1` above
+  # already answers an unknown side the same way.
   defp to_conversion(trade, from, to) do
+    with {:ok, id} <- required_id(trade["id"], :id),
+         {:ok, status} <- required_conversion_status(trade["status"]) do
+      {:ok, build_conversion(trade, from, to, id, status)}
+    end
+  end
+
+  defp required_conversion_status(value) do
+    case conversion_status(value) do
+      nil -> {:error, {:unknown_conversion_status, value}}
+      status -> {:ok, status}
+    end
+  end
+
+  defp build_conversion(trade, from, to, id, status) do
     %Types.Conversion{
-      id: trade["id"],
-      status: conversion_status(trade["status"]),
+      id: id,
+      status: status,
       from_asset: from,
       to_asset: to,
       from_amount: amount_value(trade["user_entered_amount"]),

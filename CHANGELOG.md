@@ -20,6 +20,25 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`quote_conversion/5`, `commit_conversion/4` and `get_conversion/4` could return a
+  `Conversion` with a `nil` id or a `nil` status.** Both are in `Types.Conversion`'s
+  `@enforce_keys`, so its `new/1` refuses a `nil` in either — and nothing here calls `new/1`,
+  every struct being built literally as across this family, so that check never ran.
+
+  `conversion_status/1` answered `nil` for a word this package does not know. That instinct
+  is right and its destination was wrong: the comment beside it says why it must not guess —
+  "reporting a quote as settled is the failure this field exists to prevent" — and the
+  contract offers the option that comment did not take. A conversion whose status cannot be
+  read is not safely actionable by anyone, and a status Coinbase has newly added is exactly
+  the thing that should be loud rather than `nil`. It answers
+  `{:error, {:unknown_conversion_status, value}}` now, the same way `required_side/1` answers
+  an unknown side.
+
+  **Behaviour change for consumers**: a conversion carrying a status this package does not
+  recognise was previously returned with `status: nil` and is now refused.
+
 ## [0.3.33] - 2026-09-14
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
