@@ -246,16 +246,35 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       assert Decimal.equal?(best_bid_size, Decimal.new("0.5"))
     end
 
-    test "the venue's ordering is preserved, not re-sorted here" do
-      # A book's order is the venue's statement about its own matching. Re-sorting would
-      # hide a venue that sent a crossed or out-of-order book, which is the thing worth
-      # seeing.
+    test "levels are re-sorted, not left in the venue's row order" do
+      # This asserted the opposite, and its own fixture was the tell: an ASCENDING bid list,
+      # which is exactly the order `Core.Types.OrderBook` calls broken — "a venue package
+      # that returns venue-order without re-sorting has broken the contract even though every
+      # value in it is true."
+      #
+      # The reasoning it carried was that re-sorting "would hide a venue that sent a crossed
+      # or out-of-order book". It conflates two different things. **Sorting cannot hide a
+      # crossed book**: crossed means the best bid is at or above the best ask, which is a
+      # fact about the prices and not about the order the rows arrived in, and after sorting
+      # both bests sit at the head where it is easier to see. What row order hid was the
+      # ordering a caller is entitled to rely on.
+      #
+      # It was also this package disagreeing with itself — `Socket`'s snapshot has always
+      # sorted, the fake generates both sides best-first, and `usage-rules.md` tells consumers
+      # the snapshot arrives "sorted best-price-first, as the contract always promised".
+      # `dp_exchange_schwab` had the identical defect, with an identically-shaped fixture, and
+      # fixed it on 2026-09-13. This is the sibling that was left open.
       body = %{
         "pricebook" =>
           pricebook(%{
             "bids" => [
               %{"price" => "79477.50", "size" => "1"},
-              %{"price" => "79478.00", "size" => "1"}
+              %{"price" => "79478.00", "size" => "2"},
+              %{"price" => "79477.75", "size" => "3"}
+            ],
+            "asks" => [
+              %{"price" => "79480.00", "size" => "1"},
+              %{"price" => "79479.00", "size" => "2"}
             ]
           })
       }
@@ -263,9 +282,35 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       assert {:ok, book} =
                Rest.get_order_book("BTC-USD", plug: responding(body), retry_attempts: 0)
 
-      assert [{first, _first_size}, {second, _second_size}] = book.bids
-      assert Decimal.equal?(first, Decimal.new("79477.50"))
-      assert Decimal.equal?(second, Decimal.new("79478.00"))
+      assert Enum.map(book.bids, fn {price, _size} -> Decimal.to_string(price) end) ==
+               ["79478.00", "79477.75", "79477.50"]
+
+      assert Enum.map(book.asks, fn {price, _size} -> Decimal.to_string(price) end) ==
+               ["79479.00", "79480.00"]
+
+      # The quantity travels with its own price rather than being re-paired by position.
+      assert [{_best_bid, best_bid_size} | _rest] = book.bids
+      assert Decimal.equal?(best_bid_size, Decimal.new("2"))
+    end
+
+    test "a crossed book stays visibly crossed after sorting" do
+      # The concern the old behaviour was defending, answered directly: sorting puts the best
+      # bid and the best ask at the heads of their lists, so a book whose best bid is at or
+      # above its best ask is MORE obvious, not less.
+      body = %{
+        "pricebook" =>
+          pricebook(%{
+            "bids" => [%{"price" => "100.00", "size" => "1"}],
+            "asks" => [%{"price" => "99.00", "size" => "1"}]
+          })
+      }
+
+      assert {:ok, book} =
+               Rest.get_order_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+
+      [{best_bid, _bid_size} | _rest] = book.bids
+      [{best_ask, _ask_size} | _rest] = book.asks
+      assert Decimal.compare(best_bid, best_ask) == :gt
     end
 
     test "a book the venue did not date is REFUSED, not stamped with the local clock" do

@@ -24,6 +24,35 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`get_order_book/2` returned the venue's row order, which the contract calls broken.**
+  `Core.Types.OrderBook` says it in as many words: "a caller reading `hd(bids)` as the best
+  bid is reading it correctly, and a venue package that returns venue-order without
+  re-sorting has broken the contract even though every value in it is true." This path did
+  exactly that, so `hd(bids)` could be any level the venue happened to list first.
+
+  It was also this package disagreeing with itself. `Socket`'s `snapshot` frame has always
+  sorted, the fake generates both sides best-first, and `usage-rules.md` tells consumers the
+  snapshot arrives "sorted best-price-first, as the contract always promised". One path did
+  not, and it was the one a consumer pulls on `:link_up` to re-establish a book.
+
+  The old behaviour was defended in the `@doc` and pinned by a test: re-sorting "would hide a
+  venue that sent a crossed or out-of-order book". That conflates two things. **Sorting
+  cannot hide a crossed book** — crossed means the best bid is at or above the best ask,
+  which is a fact about the prices rather than about the order the rows arrived in, and after
+  sorting both bests sit at the head where it is easier to see. There is now a test asserting
+  precisely that. What row order hid was the ordering a caller is entitled to rely on.
+
+  `dp_exchange_schwab` had the identical defect with an identically-shaped ascending-bid
+  fixture and fixed it on 2026-09-13; `dp_exchange_webull` and `dp_exchange_gemini` were
+  swept then too. This was the sibling left open.
+
+  **Consumers reading `book.bids`/`book.asks` from this call now get sorted sides.** Anything
+  that had compensated by sorting for itself keeps working; anything relying on row order
+  matching the venue's JSON does not, and was relying on something the contract never
+  offered.
+
+### Fixed
+
 - **A venue timestamp outside the epoch range raised out of the decoder, and zero quietly
   became 1970.** The time helpers used `DateTime.from_unix!/2`, which handles neither case.
 

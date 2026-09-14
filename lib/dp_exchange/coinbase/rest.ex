@@ -1799,9 +1799,14 @@ defmodule DpExchange.Coinbase.Rest do
   `opts[:limit]` bounds the levels per side; `opts[:aggregation_price_increment]` groups
   them, which is the venue's own word for it.
 
-  **Both sides come back as the venue ordered them, unsorted here.** A book's order is the
-  venue's statement about its own matching, and re-sorting it would hide a venue that sent
-  a crossed or out-of-order book — which is exactly the thing worth seeing.
+  **Both sides come back sorted best-price-first** — bids descending, asks ascending — which
+  `Core.Types.OrderBook` makes part of the contract rather than a convenience.
+
+  This used to return the venue's row order, defended as keeping "a crossed or out-of-order
+  book" visible. Sorting does not hide a crossed book: crossed means the best bid is at or
+  above the best ask, which is a fact about the prices rather than about the order the rows
+  arrived in, and after sorting both bests sit at the head where it is easier to see, not
+  harder. What row order hid was the ordering a caller is entitled to rely on.
 
   `timestamp` is the pricebook's own `time`. **A book the venue did not stamp is refused**:
   a depth snapshot with the local clock on it cannot be told apart from a current one, and
@@ -1838,8 +1843,8 @@ defmodule DpExchange.Coinbase.Rest do
       {:ok,
        %Types.OrderBook{
          symbol: SymbolFormat.to_canonical_symbol(native),
-         bids: levels(pricebook["bids"]),
-         asks: levels(pricebook["asks"]),
+         bids: pricebook["bids"] |> levels() |> sorted(:desc),
+         asks: pricebook["asks"] |> levels() |> sorted(:asc),
          venue_time: timestamp,
          observed_at: DateTime.utc_now(),
          # The venue publishes no sequence number on this endpoint. `nil` means it did not
@@ -1855,6 +1860,30 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp levels(_absent), do: []
+
+  # Best price first, because `Core.Types.OrderBook` makes that part of the contract rather
+  # than a convenience: "a caller reading `hd(bids)` as the best bid is reading it correctly,
+  # and a venue package that returns venue-order without re-sorting has broken the contract
+  # even though every value in it is true."
+  #
+  # This function did not exist, and `get_order_book/2` returned the venue's row order. Its
+  # own doc defended that — re-sorting "would hide a venue that sent a crossed or out-of-order
+  # book, which is exactly the thing worth seeing" — and the defence conflates two different
+  # things. **Sorting cannot hide a crossed book.** Crossed means the best bid is at or above
+  # the best ask, and that is a fact about the prices, not about the order the rows arrived
+  # in; after sorting it is still there, and easier to see, because both bests are now at the
+  # head. What passing row order through hid was the ordering the contract promises.
+  #
+  # It was also this package disagreeing with itself: `Socket`'s `snapshot` frame has always
+  # sorted (see `Socket.sorted/2`), the fake generates both sides best-first, and
+  # `usage-rules.md` tells consumers the snapshot arrives "sorted best-price-first, as the
+  # contract always promised". Only this one path did not. `dp_exchange_schwab` had the same
+  # defect, with the same ascending-bid fixture pinning it, and fixed it on 2026-09-13.
+  defp sorted(levels, :desc),
+    do: Enum.sort_by(levels, fn {price, _qty} -> price end, {:desc, Decimal})
+
+  defp sorted(levels, :asc),
+    do: Enum.sort_by(levels, fn {price, _qty} -> price end, {:asc, Decimal})
 
   # **This built `Quote`s with `price: close` until 2026-09-01.** The venue sends open,
   # high, low and close; three of them were discarded here, at the boundary, where no
