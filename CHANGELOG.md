@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.30] - 2026-09-14
+
 ### Fixed
 
 - **`usage-rules.md` promised consumers something the code does not do.** It said "When is
