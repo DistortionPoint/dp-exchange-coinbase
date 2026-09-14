@@ -609,7 +609,7 @@ defmodule DpExchange.Coinbase.Rest do
 
     case request(:get, "/portfolios", credentials, opts, params) do
       {:ok, %{body: %{"portfolios" => portfolios}}} when is_list(portfolios) ->
-        {:ok, Enum.map(portfolios, &to_portfolio/1)}
+        to_portfolios(portfolios)
 
       {:ok, _unexpected} ->
         {:error, :unexpected_response_shape}
@@ -619,14 +619,39 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  # One unidentifiable portfolio refuses the whole page rather than leaving a gap in it —
+  # the same rule `dp_exchange_gemini`'s `to_fills/2` states for a trade history: a list with
+  # an entry silently missing reconciles to a smaller number and looks complete.
+  defp to_portfolios(rows) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case to_portfolio(row) do
+        {:ok, portfolio} -> {:cont, {:ok, [portfolio | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, portfolios} -> {:ok, Enum.reverse(portfolios)}
+      error -> error
+    end
+  end
+
+  # `:id` is in `Types.Portfolio`'s `@enforce_keys`, so its `new/1` refuses a `nil` there —
+  # and nothing here calls `new/1`, the struct being built literally as everywhere in this
+  # family, so that check never ran. A portfolio with no id names nothing: every later call
+  # that takes a `portfolio_uuid` has no value to pass, and a caller holding one cannot tell
+  # it apart from a portfolio that simply has not been fetched yet.
   defp to_portfolio(row) do
-    %Types.Portfolio{
-      id: row["uuid"],
-      name: row["name"],
-      type: row["type"],
-      deleted: row["deleted"],
-      provider: :coinbase
-    }
+    with {:ok, id} <- required_id(row["uuid"], :id) do
+      {:ok,
+       %Types.Portfolio{
+         id: id,
+         name: row["name"],
+         type: row["type"],
+         deleted: row["deleted"],
+         provider: :coinbase
+       }}
+    end
   end
 
   @doc """
@@ -665,7 +690,7 @@ defmodule DpExchange.Coinbase.Rest do
     with {:ok, name} <- required_name(opts) do
       case post_json("/portfolios", %{"name" => name}, credentials, opts) do
         {:ok, %{body: %{"portfolio" => portfolio}}} when is_map(portfolio) ->
-          {:ok, to_portfolio(portfolio)}
+          to_portfolio(portfolio)
 
         {:ok, _unexpected} ->
           {:error, :unexpected_response_shape}
@@ -688,7 +713,7 @@ defmodule DpExchange.Coinbase.Rest do
       when is_binary(portfolio_uuid) and is_binary(name) do
     case put_json("/portfolios/#{portfolio_uuid}", %{"name" => name}, credentials, opts) do
       {:ok, %{body: %{"portfolio" => portfolio}}} when is_map(portfolio) ->
-        {:ok, to_portfolio(portfolio)}
+        to_portfolio(portfolio)
 
       {:ok, _unexpected} ->
         {:error, :unexpected_response_shape}
@@ -1318,13 +1343,16 @@ defmodule DpExchange.Coinbase.Rest do
   defp to_fill(row) do
     with {:ok, timestamp} <- parse_time(row["trade_time"]),
          {:ok, quantity} <- required_decimal(row["size"], :quantity),
-         {:ok, price} <- required_decimal(row["price"], :price) do
+         {:ok, price} <- required_decimal(row["price"], :price),
+         {:ok, order_id} <- required_id(row["order_id"], :order_id),
+         {:ok, symbol} <- required_symbol(row["product_id"]),
+         {:ok, side} <- required_side(row["side"]) do
       {:ok,
        %Types.Fill{
-         order_id: row["order_id"],
+         order_id: order_id,
          trade_id: row["trade_id"],
-         symbol: canonical_or_nil(row["product_id"]),
-         side: side_atom(row["side"]),
+         symbol: symbol,
+         side: side,
          quantity: quantity,
          price: price,
          fee: decimal(row["commission"]),
@@ -2009,6 +2037,46 @@ defmodule DpExchange.Coinbase.Rest do
   defp required_trade_id(nil), do: {:error, {:missing_required_field, :id}}
   defp required_trade_id(""), do: {:error, {:missing_required_field, :id}}
   defp required_trade_id(id), do: {:ok, id}
+
+  # `Fill` names SEVEN fields its `new/1` refuses a `nil` in — `:order_id`, `:symbol`,
+  # `:side`, `:quantity`, `:price`, `:timestamp`, `:provider` — and `to_fill/1` guarded
+  # three of them.
+  #
+  # The comment above `to_fill/1` already made the argument, and made it for exactly two
+  # fields: a fill "reporting that some unstated amount traded at some unstated price is
+  # worse than no fill at all". The same is true of one reporting that an unstated amount of
+  # an unstated instrument traded on an unstated side, against an unstated order. Nothing
+  # here calls `new/1` — the struct is built literally, as everywhere in this family — so the
+  # contract's own check never runs and each of these has to be written out.
+  #
+  # `dp_exchange_gemini`'s `to_fill/2` guards all five of the ones a row can be missing. This
+  # is the sibling that was half-swept.
+  defp required_id(nil, field), do: {:error, {:missing_required_field, field}}
+  defp required_id("", field), do: {:error, {:missing_required_field, field}}
+  defp required_id(value, _field) when is_binary(value), do: {:ok, value}
+  defp required_id(value, _field), do: {:ok, to_string(value)}
+
+  # An unmappable product id is refused rather than carried as `nil`. A fill whose symbol is
+  # `nil` reconciles against nothing, and `canonical_or_nil/1` was answering `nil` for an
+  # absent one straight into a field the contract marks required.
+  defp required_symbol(nil), do: {:error, {:missing_required_field, :symbol}}
+
+  defp required_symbol(native) do
+    case canonical_or_nil(native) do
+      nil -> {:error, {:missing_required_field, :symbol}}
+      symbol -> {:ok, symbol}
+    end
+  end
+
+  # `side_atom/1` answers `nil` for anything the venue did not name `BUY` or `SELL`, which is
+  # the honest answer for a field that may legitimately be absent. On a `Fill` it is not
+  # legitimate: a fill that does not say which way it went cannot be reconciled at all.
+  defp required_side(value) do
+    case side_atom(value) do
+      nil -> {:error, {:unknown_side, value}}
+      side -> {:ok, side}
+    end
+  end
 
   defp required_decimal(nil, field), do: {:error, {:missing_required_field, field}}
 

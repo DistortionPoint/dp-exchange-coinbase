@@ -28,6 +28,27 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
 
 ### Fixed
 
+- **A `Fill` could come back with a `nil` order id, symbol or side, and a `Portfolio` with a
+  `nil` id.** `Types.Fill` names seven fields its `new/1` refuses a `nil` in; `to_fill/1`
+  guarded three. `Types.Portfolio` names `:id`; `to_portfolio/1` guarded none. Nothing in
+  this package calls `new/1` — every struct is built literally, as everywhere in this family
+  — so the contract's own check never runs and each guard has to be written out, and these
+  were not.
+
+  The argument was already in this file, above `to_fill/1`, made for exactly two fields: a
+  fill "reporting that some unstated amount traded at some unstated price is worse than no
+  fill at all: it reconciles to nothing and says nothing about why". It is just as true of a
+  fill that does not say which instrument, which side, or against which order — and an
+  `order_id` of `""`, which the venue can send, passes every `nil` check a consumer might
+  write while identifying no order at all.
+
+  `dp_exchange_gemini`'s `to_fill/2` guards all five fields a row can be missing. This was
+  the sibling that got three of them.
+
+  An unreadable row now refuses the whole page rather than leaving a gap in it, which is the
+  rule gemini's `to_fills/2` already states: a list with an entry silently missing reconciles
+  to a smaller number and looks complete.
+
 - **`get_order_book/2` returned the venue's row order, which the contract calls broken.**
   `Core.Types.OrderBook` says it in as many words: "a caller reading `hd(bids)` as the best
   bid is reading it correctly, and a venue package that returns venue-order without

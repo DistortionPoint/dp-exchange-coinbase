@@ -61,6 +61,22 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
   end
 
   describe "list_portfolios/2" do
+    test "a portfolio row with no uuid refuses the page rather than naming nothing" do
+      # `:id` is in `Types.Portfolio`'s `@enforce_keys`, so its `new/1` refuses a `nil`
+      # there — and nothing here calls `new/1`, the struct being built literally as everywhere
+      # in this family, so that check never ran. A portfolio with no id names nothing: every
+      # later call taking a `portfolio_uuid` has no value to pass, and a caller holding one
+      # cannot tell it from a portfolio not yet fetched.
+      #
+      # The whole page is refused rather than the row dropped — `dp_exchange_gemini`'s
+      # `to_fills/2` states the rule: a list with an entry silently missing reconciles to a
+      # smaller number and looks complete.
+      body = %{"portfolios" => [%{"name" => "Default", "type" => "DEFAULT"}]}
+
+      assert {:error, {:missing_required_field, :id}} =
+               Rest.list_portfolios(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
     test "a deleted portfolio is returned, not filtered out" do
       body = %{
         "portfolios" => [

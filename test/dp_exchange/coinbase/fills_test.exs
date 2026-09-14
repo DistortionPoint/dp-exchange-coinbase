@@ -150,6 +150,52 @@ defmodule DpExchange.Coinbase.FillsTest do
       assert f.liquidity == nil
     end
 
+    test "a fill missing an execution field is refused, not reported with nil in it" do
+      # `Fill` names SEVEN fields its `new/1` refuses a `nil` in. `to_fill/1` guarded three —
+      # timestamp, quantity and price — and let `order_id`, `symbol` and `side` through as
+      # `nil`, because nothing here calls `new/1` (the struct is built literally, as
+      # everywhere in this family) so the contract's own check never runs.
+      #
+      # The argument was already written above `to_fill/1`, for two fields: a fill "reporting
+      # that some unstated amount traded at some unstated price is worse than no fill at all:
+      # it reconciles to nothing and says nothing about why". It is just as true of one that
+      # does not say which instrument, which side, or against which order.
+      #
+      # `dp_exchange_gemini`'s `to_fill/2` guards all five a row can be missing; this was the
+      # sibling that got half of them.
+      for {field, expected} <- [
+            {"order_id", {:missing_required_field, :order_id}},
+            {"product_id", {:missing_required_field, :symbol}},
+            {"side", {:unknown_side, nil}}
+          ] do
+        body = %{"fills" => [Map.delete(fill(), field)], "cursor" => ""}
+
+        assert {:error, ^expected} =
+                 Rest.get_trade_history(@credentials, plug: responding(body), retry_attempts: 0),
+               "a fill row missing #{field} must be refused"
+      end
+    end
+
+    test "an order_id the venue sent as an empty string is refused, not passed through" do
+      # `""` is not a weaker id — it is a different kind of wrong, because it passes every
+      # `nil` check a consumer might write while identifying no order at all. The same
+      # reasoning `dp_exchange_gemini` records for `to_string(nil)` on this exact field.
+      body = %{"fills" => [fill(%{"order_id" => ""})], "cursor" => ""}
+
+      assert {:error, {:missing_required_field, :order_id}} =
+               Rest.get_trade_history(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "a side the venue names something this package does not know is refused" do
+      # `side_atom/1` answers `nil` for anything that is not `BUY` or `SELL`, which is honest
+      # where the field is optional. On a fill it is not optional: one that does not say
+      # which way it went cannot be reconciled at all.
+      body = %{"fills" => [fill(%{"side" => "SOMETHING_NEW"})], "cursor" => ""}
+
+      assert {:error, {:unknown_side, "SOMETHING_NEW"}} =
+               Rest.get_trade_history(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
     test "a fill the venue did not date is refused, never stamped with the local clock" do
       # A fill is an event that happened at a moment. A client timestamp places it wrongly
       # in a trade history while looking entirely reasonable.
