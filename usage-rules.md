@@ -39,10 +39,20 @@ expressible before, because there was no way to see which kind of time you had.
 without it.
 
 
-**When is `venue_time` `nil` on this venue? It never is.** Every `Quote` and `OrderBook` this
-package builds parses a time the venue sent, and fails closed when it cannot — so a value
-that reaches you always carries the venue's own instant. A `nil` branch for this venue is
-dead code. Other venues in the family do return `nil`, which is why the field is nullable.
+**When is `venue_time` `nil` on this venue? On a `TopOfBook` from `get_top_of_book/2`, and
+nowhere else.** Every `Quote` and `OrderBook` this package builds parses a time the venue
+sent and fails closed when it cannot, so those always carry the venue's own instant.
+`get_top_of_book/2` reads `/best_bid_ask`, and a pricebook that arrives without a parseable
+`time` yields `venue_time: nil` rather than either refusing the quote or stamping it with
+our clock — the bid and the ask are real, `observed_at` still says when we looked, and that
+is the honest freshness for a top-of-book read. Depth is the stricter case and is refused,
+because a stale book read as current is a more expensive wrong number than a stale quote.
+
+So: branch on `nil` if you use `get_top_of_book/2`. You do not need to anywhere else.
+
+This section used to say "It never is", full stop, and a consumer who believed it and wrote
+no `nil` branch would have crashed on exactly that one shape. Other venues in the family
+return `nil` far more widely, which is why the field is nullable in the contract.
 
 Full reasoning and the options that were weighed:
 [`dp_exchange_core` issue #31](https://github.com/DistortionPoint/dp-exchange-core/issues/31).

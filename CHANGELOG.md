@@ -20,6 +20,19 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`usage-rules.md` promised consumers something the code does not do.** It said "When is
+  `venue_time` `nil` on this venue? It never is ... a `nil` branch for this venue is dead
+  code" — eight lines below its own code block saying `quote.venue_time # may be nil`.
+  `get_top_of_book/2` reads `/best_bid_ask`, and a pricebook without a parseable `time`
+  yields `venue_time: nil`; that is deliberate and has a test of its own ("an undated
+  pricebook leaves venue_time nil rather than borrowing our clock"), and it is what
+  `dp_exchange_robinhood` documents for the same call. A consumer who believed the promise
+  and wrote no `nil` branch would have crashed on exactly that shape. The document is
+  corrected, not the behaviour: refusing a value over a field the contract marks optional
+  is the defect this family swept out of three other packages, not a fix.
+
 ## [0.3.29] - 2026-09-13
 
 ### Changed
