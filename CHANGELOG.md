@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.39] - 2026-09-14
+
 ### Fixed
 
 - **An order price or size could go onto the wire in scientific notation.**
