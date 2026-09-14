@@ -1905,13 +1905,34 @@ defmodule DpExchange.Coinbase.Rest do
   # while looking right. Refuse instead.
   defp candle_start(start) when is_binary(start) do
     case Integer.parse(start) do
-      {seconds, ""} -> {:ok, DateTime.from_unix!(seconds)}
+      {seconds, ""} -> candle_start(seconds)
       _not_an_epoch -> {:error, :missing_venue_timestamp}
     end
   end
 
-  defp candle_start(start) when is_integer(start), do: {:ok, DateTime.from_unix!(start)}
+  defp candle_start(start) when is_integer(start), do: from_unix_seconds(start)
   defp candle_start(_absent), do: {:error, :missing_venue_timestamp}
+
+  # `DateTime.from_unix/2`, not `from_unix!/2`, and non-positive is refused.
+  #
+  # Two ways a number that parses cleanly is still not a bar time, and the bang version
+  # handled neither. **Out of range RAISES**: this field is seconds, so a venue moving to
+  # milliseconds — ordinary drift, and this venue publishes both units elsewhere — sends
+  # `1787936147000`, which is `invalid Unix time`, thrown out of `get_historical_prices/4`
+  # rather than returned by it. **Zero and negative do NOT raise**: they quietly become 1970
+  # and earlier, which is the shape this family already named — a bar that opens in 1970
+  # sorts to the front of the series with every price in it real.
+  #
+  # Both answer `{:error, :missing_venue_timestamp}`, which is what this function already
+  # says for an undated bar and is the honest answer for one that cannot be dated.
+  defp from_unix_seconds(seconds) when seconds > 0 do
+    case DateTime.from_unix(seconds) do
+      {:ok, at} -> {:ok, at}
+      {:error, _out_of_range} -> {:error, :missing_venue_timestamp}
+    end
+  end
+
+  defp from_unix_seconds(_non_positive), do: {:error, :missing_venue_timestamp}
 
   # `nil` rather than zero for an absent number. Zero is a price, and a venue that did
   # not report volume has not reported zero volume.

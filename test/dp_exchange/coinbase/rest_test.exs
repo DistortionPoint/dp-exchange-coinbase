@@ -287,6 +287,40 @@ defmodule DpExchange.Coinbase.RestTest do
                )
     end
 
+    test "a start outside the epoch range is refused, not raised out of the read" do
+      # `start` is SECONDS here. `DateTime.from_unix!/1` raises on an out-of-range value, so
+      # a venue moving this field to milliseconds — ordinary drift, and this venue publishes
+      # both units elsewhere — threw `invalid Unix time` out of `get_historical_prices/4`
+      # rather than returning an error from it. The caller got an exception where the
+      # function's own contract offers `{:error, :missing_venue_timestamp}`.
+      for bad <- ["1787936147000", 1_787_936_147_000] do
+        body = %{"candles" => [%{"start" => bad, "open" => "1", "close" => "1"}]}
+
+        assert {:error, :missing_venue_timestamp} =
+                 Rest.get_historical_prices("BTC-USD", "1m", [],
+                   plug: responding(body),
+                   retry_attempts: 0
+                 ),
+               "a start of #{inspect(bad)} must be refused, not raised"
+      end
+    end
+
+    test "a zero or negative start is refused rather than opening the bar in 1970" do
+      # These do NOT raise — they are valid `DateTime`s — which is why they are worse. A bar
+      # that opens in 1970 sorts to the front of the series with every price in it real, and
+      # `0` is a common venue sentinel for "unknown".
+      for bad <- [0, -1, "0"] do
+        body = %{"candles" => [%{"start" => bad, "open" => "1", "close" => "1"}]}
+
+        assert {:error, :missing_venue_timestamp} =
+                 Rest.get_historical_prices("BTC-USD", "1m", [],
+                   plug: responding(body),
+                   retry_attempts: 0
+                 ),
+               "a start of #{inspect(bad)} must be refused"
+      end
+    end
+
     test "the venue's own bars are internally consistent, and this says so" do
       assert {:ok, bars} =
                Rest.get_historical_prices("BTC-USD", "1m", [],
