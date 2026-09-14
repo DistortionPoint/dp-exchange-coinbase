@@ -2216,16 +2216,16 @@ defmodule DpExchange.Coinbase.Rest do
   defp configuration_leaf(:market, request) do
     case {Map.get(request, :quantity), Map.get(request, :quote_size)} do
       {nil, nil} -> {:error, :missing_order_size}
-      {nil, quote_size} -> {:ok, %{"quote_size" => to_string(quote_size)}}
-      {quantity, _quote_size} -> {:ok, %{"base_size" => to_string(quantity)}}
+      {nil, quote_size} -> {:ok, %{"quote_size" => wire_number(quote_size)}}
+      {quantity, _quote_size} -> {:ok, %{"base_size" => wire_number(quantity)}}
     end
   end
 
   defp configuration_leaf(:limit, request) do
     with {:ok, price} <- required_field(request, :price, :missing_limit_price) do
       leaf = %{
-        "base_size" => to_string(Map.fetch!(request, :quantity)),
-        "limit_price" => to_string(price)
+        "base_size" => wire_number(Map.fetch!(request, :quantity)),
+        "limit_price" => wire_number(price)
       }
 
       {:ok, maybe_put_configuration(leaf, request)}
@@ -2236,9 +2236,9 @@ defmodule DpExchange.Coinbase.Rest do
     with {:ok, price} <- required_field(request, :price, :missing_limit_price),
          {:ok, stop} <- required_field(request, :stop_price, :missing_stop_price) do
       leaf = %{
-        "base_size" => to_string(Map.fetch!(request, :quantity)),
-        "limit_price" => to_string(price),
-        "stop_price" => to_string(stop)
+        "base_size" => wire_number(Map.fetch!(request, :quantity)),
+        "limit_price" => wire_number(price),
+        "stop_price" => wire_number(stop)
       }
 
       {:ok, maybe_put_configuration(leaf, request)}
@@ -2252,7 +2252,27 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp put_unless_nil(map, _key, nil), do: map
+
+  defp put_unless_nil(map, key, %Decimal{} = value),
+    do: Map.put(map, key, wire_number(value))
+
   defp put_unless_nil(map, key, value), do: Map.put(map, key, to_string(value))
+
+  # **`Decimal.to_string/1` defaults to SCIENTIFIC notation, and `to_string/1` on a
+  # `%Decimal{}` goes through `String.Chars` to the same default.** So a price or size that
+  # carries an exponent is serialised as `"1.5E+2"` or `"1E-8"` — which is not a number this
+  # venue reads, and is a different order if it reads it at all.
+  #
+  # An exponent is not exotic. `Decimal.normalize/1` — the ordinary way to strip trailing
+  # zeros — turns `150.00` into `1.5E+2`, and anything below a millionth carries one by
+  # construction: `Decimal.new("0.00000001")` is `1E-8`.
+  #
+  # Four of the five venue packages already said this somewhere: `Prime.convert_params/3`
+  # in this very repo, `dp_exchange_robinhood`'s `decimal_string/1` ("Full notation, never
+  # scientific: `1.0e-4` is not a quantity this venue reads"), and two others. None of them
+  # covered the ORDER path, which is the one that spends money.
+  defp wire_number(%Decimal{} = value), do: Decimal.to_string(value, :normal)
+  defp wire_number(value), do: to_string(value)
   # The venue's own object, sent as it was given. `put_unless_nil/3` stringifies, which turns
   # a nested map into its inspect form and the venue into a caller error.
   defp put_raw_unless_nil(map, _key, nil), do: map

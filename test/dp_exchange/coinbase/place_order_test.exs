@@ -513,6 +513,45 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
     end
   end
 
+  test "a normalized or very small number is sent in full notation, never scientific" do
+    # `Decimal.to_string/1` defaults to SCIENTIFIC, and `to_string/1` on a `%Decimal{}`
+    # reaches the same default through `String.Chars`. So a price or size carrying an
+    # exponent went onto the wire as `"1.5E+2"` or `"1E-8"` — not a number this venue
+    # reads, and a different order if it read it at all.
+    #
+    # An exponent is not exotic: `Decimal.normalize/1`, the ordinary way to strip trailing
+    # zeros, turns `150.00` into `1.5E+2`, and anything below a millionth carries one by
+    # construction. A caller normalising a price before placing an order is doing something
+    # entirely reasonable.
+    me = self()
+
+    plug = fn conn ->
+      {:ok, raw, conn} = Plug.Conn.read_body(conn)
+      send(me, {:sent, Jason.decode!(raw)})
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.resp(200, Jason.encode!(accepted()))
+    end
+
+    request =
+      limit_request(%{
+        price: Decimal.normalize(Decimal.new("150.00")),
+        quantity: Decimal.new("0.00000001")
+      })
+
+    place(request, plug)
+
+    assert_receive {:sent, body}
+    leaf = body["order_configuration"]["limit_limit_gtc"]
+
+    assert leaf["limit_price"] == "150"
+    assert leaf["base_size"] == "0.00000001"
+
+    refute String.contains?(leaf["limit_price"], "E")
+    refute String.contains?(leaf["base_size"], "E")
+  end
+
   describe "a retried order carries the SAME idempotency key" do
     test "every attempt sends the client_order_id generated for the first" do
       # `Core.HttpClient` retries anything that is not a 4xx, including a timeout and a
