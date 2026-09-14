@@ -43,7 +43,17 @@ acceptable changelog line.
   **If you built your own cursor loop on top of this, it now returns the whole set** and
   your loop will see one page with nothing after it.
 
-### Changed
+
+- **The pagination walks no longer build their result with `acc ++ page`.** `++` copies its
+  left operand, so folding each page onto a growing accumulator is quadratic in the number
+  of rows — the one thing a pagination walk is guaranteed to do a lot of. Pages are collected
+  as pages and concatenated once.
+
+  Measured: 50 pages of 250 rows went from 2.75 ms to 0.55 ms, and 50 pages of 49 rows —
+  Coinbase's own default page size for `/accounts` — from 0.20 ms to 0.01 ms.
+
+  `dp_exchange_robinhood`'s `walk/6` already did it this way and records why; the walkers
+  here did not. Ordering is unchanged and is pinned by test.
 
 - `usage-rules.md` now states that the three list endpoints follow the cursor, and that the
   page-bound errors are about this package's limit rather than about your account — retry
