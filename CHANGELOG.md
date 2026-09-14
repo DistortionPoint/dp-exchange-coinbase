@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.34] - 2026-09-14
+
 ### Fixed
 
 - **`quote_conversion/5`, `commit_conversion/4` and `get_conversion/4` could return a
