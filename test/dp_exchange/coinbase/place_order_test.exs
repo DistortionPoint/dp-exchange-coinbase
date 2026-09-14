@@ -512,4 +512,53 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                )
     end
   end
+
+  describe "a retried order carries the SAME idempotency key" do
+    test "every attempt sends the client_order_id generated for the first" do
+      # `Core.HttpClient` retries anything that is not a 4xx, including a timeout and a
+      # connection reset — exactly the failures where the venue may have received and acted
+      # on the request. That is only safe because this venue documents `client_order_id` as
+      # an idempotency key and this package generates one when the caller gives none, so a
+      # retry asks the venue to complete the SAME order rather than place another.
+      #
+      # The property that makes it true is that the key is generated once, while the body is
+      # built, and the retry loop re-sends that body unchanged. Nothing pinned it: move the
+      # generation inside the loop and every attempt becomes a distinct order, with the
+      # suite still green. `dp_exchange_schwab` and `dp_exchange_gemini` have no such key and
+      # therefore do not retry these writes at all.
+      me = self()
+
+      plug = fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        decoded = if raw == "", do: %{}, else: Jason.decode!(raw)
+        send(me, {:attempt, decoded["client_order_id"]})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(503, Jason.encode!(%{"message" => "unavailable"}))
+      end
+
+      Rest.place_order(@credentials, limit_request(),
+        plug: plug,
+        retry_attempts: 3,
+        retry_delay: 1
+      )
+
+      ids = drain_attempts([])
+
+      assert length(ids) > 1,
+             "the retry loop must actually have retried for this to mean anything"
+
+      assert Enum.all?(ids, &is_binary/1), "every attempt must carry a client_order_id"
+      assert length(Enum.uniq(ids)) == 1, "a retry must not mint a new key: got #{inspect(ids)}"
+    end
+
+    defp drain_attempts(acc) do
+      receive do
+        {:attempt, id} -> drain_attempts([id | acc])
+      after
+        300 -> Enum.reverse(acc)
+      end
+    end
+  end
 end
