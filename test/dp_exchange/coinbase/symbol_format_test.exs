@@ -43,6 +43,29 @@ defmodule DpExchange.Coinbase.SymbolFormatTest do
       assert "BTCUSD" == SymbolFormat.to_canonical_symbol("btcusd")
     end
 
+    test "a symbol with no quote part is not decorated with this venue's separator" do
+      # This venue maps with `sep: "-"`, so `CanonicalPair.to_exchange/2` used to join
+      # `base <> "-" <> ""` and hand back `"AAPL-"` for `"AAPL"`, and `"-"` for `""`.
+      #
+      # The totality test below already fed exactly these inputs — and asserted only
+      # `is_binary/1`, which `"AAPL-"` satisfies perfectly. It exercised the bug every run
+      # and said nothing about it.
+      #
+      # It matters because the fabricated string is plausible: it goes into a request URL,
+      # the venue answers 404, and `classify/1` reports `{:refused, :not_listed}` — telling
+      # a caller the VENUE said their symbol is not listed, when what happened is that this
+      # package invented a symbol the venue was never asked about.
+      assert "AAPL" == SymbolFormat.to_exchange_symbol("AAPL")
+      assert "BTC" == SymbolFormat.to_exchange_symbol("BTC")
+      assert "" == SymbolFormat.to_exchange_symbol("")
+
+      # A dangling separator is not carried to the venue either.
+      assert "BTC" == SymbolFormat.to_exchange_symbol("BTC-")
+
+      # And a real pair is unaffected.
+      assert "BTC-USD" == SymbolFormat.to_exchange_symbol("BTC-USD")
+    end
+
     test "both directions are total — nothing raises and nothing is dropped" do
       for input <- ["", "NOTAPAIR", "---", "BTC-", "-USD", "btc"] do
         assert is_binary(SymbolFormat.to_canonical_symbol(input))

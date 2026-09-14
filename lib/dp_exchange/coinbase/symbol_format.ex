@@ -9,11 +9,22 @@ defmodule DpExchange.Coinbase.SymbolFormat do
   facade needs to know that one venue's conversion happens to be free.
 
   And it is a **defensive boundary**. Any un-canonical form Coinbase ever returns gets
-  normalised here rather than leaking upward — a lowercase `btc-usd`, or a separatorless
-  form from an endpoint nobody has looked at lately. The cost of running the normaliser
-  over an already-canonical string is nothing; the cost of one venue quietly emitting a
-  form the rest of the system does not recognise is a symbol that matches no catalogue
-  entry and collects nothing.
+  normalised here rather than leaking upward — a lowercase `btc-usd`, or an alias this venue
+  spells its own way. The cost of running the normaliser over an already-canonical string is
+  nothing; the cost of one venue quietly emitting a form the rest of the system does not
+  recognise is a symbol that matches no catalogue entry and collects nothing.
+
+  **It does NOT cover a separatorless form, and that is deliberate.** This moduledoc used to
+  promise it did, one paragraph above a second paragraph correctly explaining that it cannot:
+  `CanonicalPair` consults the quote list only for a mapping that declares `sep: ""`, so on a
+  dashed mapping a string with no dash takes the `:nomatch` path and comes back uppercased
+  and unsplit. Both paragraphs were written; only the second was true.
+
+  The behaviour is right and the promise was wrong. Guessing a split from a quote suffix is
+  safe on a venue that only ever names pairs, and unsafe in general — a bare ticker ending in
+  a quote code (`PLUSD`) would become `PL-USD`, a different instrument, silently. An
+  unrecognised separatorless string that matches no catalogue entry is the cheaper failure of
+  the two, because it collects nothing rather than collecting the wrong thing.
 
   ## The quote list is ordered longest-first, and here that is precaution, not need
 
