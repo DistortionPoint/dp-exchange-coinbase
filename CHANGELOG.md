@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.36] - 2026-09-14
+
 ### Fixed
 
 - **`get_orders/2` returned one page and let a caller reconcile against a prefix.** The
