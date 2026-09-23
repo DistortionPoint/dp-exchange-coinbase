@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.41] - 2026-09-23
+
 ### Fixed
 
 - **Prime's staking writes retried three times with nothing the venue could dedupe on.**
