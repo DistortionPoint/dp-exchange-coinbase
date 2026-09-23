@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.43] - 2026-09-23
+
 ### Fixed
 
 - **One malformed ticker frame crashed the socket.** The `ticker` channel read
