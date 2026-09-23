@@ -181,15 +181,45 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       assert body["currency"] == "ETH"
     end
 
-    test "an idempotency key is passed through and never invented" do
-      # A key the caller cannot reproduce protects nothing on a retry it did not make.
+    test "an idempotency key is ALWAYS sent, generated when the caller gives none" do
+      # **This asserted the opposite**, on the reasoning that "a key the caller cannot
+      # reproduce protects nothing on a retry it did not make". That half is true and worth
+      # keeping in view: a caller who calls `stake_portfolio/5` a second time gets a fresh
+      # key, and the venue cannot tell that from a second stake — because it is one.
+      #
+      # It is the wrong retry. `Core.HttpClient` retries a timeout or a 5xx **three times by
+      # default**, re-sending the identical body, and `Prime.request_opts/1` forwards
+      # `:retry_attempts` unchanged. Against a generated key those attempts carry the same
+      # value and the venue returns the original result; against no key at all they are
+      # three separate stakes. The old test reasoned about the caller's retry and the defect
+      # lived in the package's own.
+      #
+      # `Rest.place_order/3` had already settled the identical question the other way —
+      # "re-sending one returns the original order instead of placing a second" — with a key
+      # the caller equally cannot reproduce. Two paths in one package disagreeing about the
+      # same venue mechanism is what this is.
       me = self()
 
       assert {:ok, _result} =
                Prime.stake_portfolio(@credentials, "pf-1", "ETH", Decimal.new("1"), opts(me))
 
       assert_receive {:request, "POST", _path, raw, _headers}
-      refute Map.has_key?(Jason.decode!(raw), "idempotency_key")
+      generated = Jason.decode!(raw)["idempotency_key"]
+
+      assert is_binary(generated) and generated != "",
+             "a staking write with no idempotency key is a write HttpClient will send three times"
+
+      assert {:ok, _result} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", Decimal.new("1"), opts(me))
+
+      assert_receive {:request, "POST", _path, raw_again, _headers}
+
+      refute Jason.decode!(raw_again)["idempotency_key"] == generated,
+             "two separate calls are two separate stakes and must not share a key"
+    end
+
+    test "a caller's own idempotency key is used, never overwritten" do
+      me = self()
 
       assert {:ok, _result} =
                Prime.stake_portfolio(
@@ -200,8 +230,87 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
                  opts(me, idempotency_key: "given-by-caller")
                )
 
-      assert_receive {:request, "POST", _path, raw2, _headers}
-      assert Jason.decode!(raw2)["idempotency_key"] == "given-by-caller"
+      assert_receive {:request, "POST", _path, raw, _headers}
+      assert Jason.decode!(raw)["idempotency_key"] == "given-by-caller"
+    end
+
+    test "claim_rewards/4 is sent ONCE, while a staking write still retries" do
+      # `Core.HttpClient` retries a timeout or a 5xx three times by default, and a retried
+      # write is only safe when the venue can tell the second attempt from the first. The
+      # staking calls send an `idempotency_key` for exactly that. `claim_rewards/4` cannot:
+      # its body is whatever `opts[:body]` holds, opaque to this module, and injecting a
+      # field into a caller's map would be guessing at a schema this package does not own.
+      # So it takes the other remedy — one attempt.
+      #
+      # The staking half of this test is the control, and it is the half that makes the
+      # assertion mean anything: without it, "one request" could equally be a harness that
+      # never retries. Note that `opts/2` above pins `retry_attempts: 0` for every other test
+      # in this file, which is why the package's real default was invisible here until now.
+      counting = fn counter ->
+        fn conn ->
+          :counters.add(counter, 1, 1)
+          Plug.Conn.resp(conn, 500, "upstream is having a bad day")
+        end
+      end
+
+      claims = :counters.new(1, [])
+
+      assert {:error, _reason} =
+               Prime.claim_rewards(@credentials, "pf-1", "w-1",
+                 plug: counting.(claims),
+                 retry_delay: 1
+               )
+
+      assert :counters.get(claims, 1) == 1,
+             "a call that moves money and carries no key the venue can dedupe on must be " <>
+               "sent once, not three times"
+
+      stakes = :counters.new(1, [])
+
+      assert {:error, _reason} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", Decimal.new("1"),
+                 plug: counting.(stakes),
+                 retry_delay: 1
+               )
+
+      assert :counters.get(stakes, 1) > 1,
+             "the control must actually retry, or the assertion above proves nothing about " <>
+               "claim_rewards/4 and only something about the harness"
+    end
+
+    test "a caller can still ask claim_rewards/4 to retry, having supplied its own body" do
+      # `put_new`, not `put`: a caller who knows the venue's field for this can send it in
+      # `opts[:body]` and take the retries back. Refusing to let them would be this module
+      # overruling a caller who knows more about the endpoint than it does.
+      counter = :counters.new(1, [])
+
+      plug = fn conn ->
+        :counters.add(counter, 1, 1)
+        Plug.Conn.resp(conn, 500, "upstream is having a bad day")
+      end
+
+      assert {:error, _reason} =
+               Prime.claim_rewards(@credentials, "pf-1", "w-1",
+                 plug: plug,
+                 retry_delay: 1,
+                 retry_attempts: 3,
+                 body: %{"idempotency_key" => "caller-knows-the-field"}
+               )
+
+      assert :counters.get(counter, 1) > 1
+    end
+
+    test "unstaking carries a key too, not only staking" do
+      # Both directions move an asset, and both go through the same body builder. Asserted
+      # rather than assumed, because "the fix landed on one of the pair" is the shape this
+      # family keeps finding.
+      me = self()
+
+      assert {:ok, _result} =
+               Prime.unstake_portfolio(@credentials, "pf-1", "ETH", Decimal.new("1"), opts(me))
+
+      assert_receive {:request, "POST", _path, raw, _headers}
+      assert is_binary(Jason.decode!(raw)["idempotency_key"])
     end
 
     test "all four Prime headers are sent" do

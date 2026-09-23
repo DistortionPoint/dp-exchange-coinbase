@@ -8,6 +8,23 @@ Everything general is in
 This file is only what is **specific to Coinbase**.
 
 
+## A money-moving call is either keyed or sent once — never retried blind
+
+`Core.HttpClient` retries a timeout or a 5xx three times by default, and that is safe only
+when the venue can tell the second attempt from the first. This package makes that true one
+of two ways, and which one it is depends on what the endpoint gives it:
+
+- **Orders and Prime staking send an idempotency key**, generated when you do not supply
+  one — `client_order_id` on Advanced Trade, `idempotency_key` on Prime. Re-sending returns
+  the original result instead of performing the action again, so the retries are kept.
+  Supply your own (`request.client_order_id`, `opts[:idempotency_key]`) if you want to
+  correlate or to make your OWN re-issued call idempotent — a generated key covers the
+  retries this package makes, not a second call you make yourself.
+- **`Prime.claim_rewards/4` is sent once.** Its body is yours and opaque here, so there is no
+  key this package can add without guessing at a schema it does not own. If you know the
+  venue's field for it, put it in `opts[:body]` and pass `retry_attempts:` to take the
+  retries back.
+
 ## BREAKING — `Quote` and `OrderBook` no longer carry `:timestamp`
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and

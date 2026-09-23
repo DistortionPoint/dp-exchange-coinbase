@@ -54,6 +54,7 @@ defmodule DpExchange.Coinbase.Prime do
   is worse than a map a caller has to read.
   """
 
+  alias DpExchange.Coinbase.IdempotencyKey
   alias DpExchange.Core.HttpClient
 
   @base_url "https://api.prime.coinbase.com"
@@ -211,6 +212,20 @@ defmodule DpExchange.Coinbase.Prime do
 
   **A write, not a report.** It does not say what has accrued; it moves what has. A caller
   wanting the figure reads `staking_status/4`.
+
+  ## Sent once, never retried
+
+  `Core.HttpClient` retries a timeout or a 5xx three times by default, and a retried write
+  is only safe when the venue can tell the second attempt from the first. The staking calls
+  above can: they send an `idempotency_key`, generated when the caller gives none. This one
+  cannot. Its body is whatever `opts[:body]` holds — opaque to this module — and injecting a
+  field into a caller's own map would be guessing at a schema this package does not own.
+
+  So it takes the other remedy, the one `dp_exchange_gemini`'s `post_once/4` and
+  `dp_exchange_schwab`'s order writes already use: one attempt. A caller that wants another
+  makes it deliberately, which is the right way round for a call that moves money. A caller
+  who knows the venue's field for this can pass it in `opts[:body]` and raise
+  `:retry_attempts` themselves.
   """
   @spec claim_rewards(credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -219,7 +234,7 @@ defmodule DpExchange.Coinbase.Prime do
       "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/claim_rewards",
       Keyword.get(opts, :body, %{}),
       credentials: credentials,
-      opts: opts
+      opts: Keyword.put_new(opts, :retry_attempts, 1)
     )
   end
 
@@ -244,14 +259,38 @@ defmodule DpExchange.Coinbase.Prime do
 
   # Full notation, never scientific: `Decimal.to_string/1` renders a small quantity as
   # 1E-8, which is not a number this venue reads.
+  # **An idempotency key is ALWAYS sent, generated when the caller gives none.**
+  #
+  # It used to be `put_present("idempotency_key", opts[:idempotency_key])` — present only if
+  # the caller thought to pass one — while `request_opts/1` forwards `:retry_attempts`
+  # unchanged, so the default of 3 applied. A staking write that timed out on its first
+  # attempt was therefore re-sent up to twice more with **nothing the venue could tell the
+  # second attempt from the first by**, and staking the same amount twice is not a retry, it
+  # is a second position.
+  #
+  # `Rest.place_order/3` already resolved the identical question the identical way — "re-
+  # sending one returns the original order instead of placing a second" — and
+  # `dp_exchange_gemini`'s `withdraw/6` does the same with `clientTransferId`, with a test
+  # pinning that it is sent even when the caller gives none. This is the sibling those two
+  # left open, on a money-moving path.
+  #
+  # Generating rather than refusing to retry is the better of the two remedies and is the one
+  # the venue's own API supports: this field was already being sent when a caller supplied
+  # it, so it is the venue's mechanism, not an invention here. `claim_rewards/4` gets the
+  # other remedy — see its own note — because its body is opaque to this module and injecting
+  # a field into a caller's map would be a guess.
+  #
+  # `preview_unstake_wallet/6` shares this body and so gets a key too. Harmless: it changes
+  # nothing on a call that changes nothing, and one code path is worth more than the
+  # distinction.
   defp stake_body(asset, amount, opts) do
-    %{"currency" => String.upcase(asset), "amount" => Decimal.to_string(amount, :normal)}
-    |> put_present("idempotency_key", Keyword.get(opts, :idempotency_key))
+    %{
+      "currency" => String.upcase(asset),
+      "amount" => Decimal.to_string(amount, :normal),
+      "idempotency_key" => Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate()
+    }
     |> Map.merge(Keyword.get(opts, :extra, %{}))
   end
-
-  defp put_present(map, _key, nil), do: map
-  defp put_present(map, key, value), do: Map.put(map, key, value)
 
   defp post(path, body, credentials: credentials, opts: opts) do
     encoded = Jason.encode!(body)

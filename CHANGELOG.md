@@ -20,6 +20,48 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Prime's staking writes retried three times with nothing the venue could dedupe on.**
+  `stake_body/3` sent `idempotency_key` only when the caller passed one
+  (`put_present`), while `request_opts/1` forwards `:retry_attempts` unchanged — so the
+  `Core.HttpClient` default of 3 applied. A `stake_portfolio/5`, `unstake_portfolio/5`,
+  `stake_wallet/6` or `unstake_wallet/6` that timed out on its first attempt was re-sent up
+  to twice more, and **staking the same amount twice is not a retry, it is a second
+  position.**
+
+  A key is now always sent, generated when the caller gives none — the remedy the venue's own
+  API supports, since this package was already sending that field whenever a caller supplied
+  it. `Rest.place_order/3` had settled the identical question the identical way ("re-sending
+  one returns the original order instead of placing a second"), and `dp_exchange_gemini`'s
+  `withdraw/6` does it with `clientTransferId`. This was the sibling those two left open, on
+  a money-moving path.
+
+  **The test pinned the bug**, and its reasoning was half right, which is why it survived:
+  "a key the caller cannot reproduce protects nothing on a retry it did not make". True of
+  the CALLER's retry — a second `stake_portfolio/5` call is a second stake and should not be
+  deduped. It is the wrong retry. `HttpClient` re-sends the identical body, and against a
+  generated key those attempts carry the same value. The test reasoned about one retry path
+  while the defect lived in the other. Note also that this file's `opts/2` helper pins
+  `retry_attempts: 0` for every other test in it, which is why the real default was invisible
+  here.
+
+- **`claim_rewards/4` is now sent once.** Same class, different remedy: its body is whatever
+  `opts[:body]` holds — opaque to this module — so injecting a key would be guessing at a
+  schema this package does not own. It takes the approach `dp_exchange_gemini`'s `post_once/4`
+  and `dp_exchange_schwab`'s order writes already use, via `Keyword.put_new/3` so a caller who
+  knows the venue's field can supply it and take the retries back. Both directions are tested,
+  with a staking call as the control — without it, "one request" could equally be a harness
+  that never retries.
+
+### Changed
+
+- **One idempotency-key generator, not two.** `DpExchange.Coinbase.IdempotencyKey` now holds
+  the v4 UUID both paths need — the venue names the same idea `client_order_id` on Advanced
+  Trade and `idempotency_key` on Prime. Two copies inside one package is the shape
+  `Core.Fanout`'s moduledoc records at five-package scale: a fix lands in one copy and not the
+  other. `Rest.generate_client_order_id/0` delegates to it and is otherwise unchanged.
+
 ## [0.3.40] - 2026-09-15
 
 ### Fixed

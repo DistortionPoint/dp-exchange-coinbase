@@ -34,7 +34,7 @@ defmodule DpExchange.Coinbase.Rest do
   live one.
   """
 
-  alias DpExchange.Coinbase.{Auth, SymbolFormat}
+  alias DpExchange.Coinbase.{Auth, IdempotencyKey, SymbolFormat}
   alias DpExchange.Core.{HttpClient, Instrument, Timeframe, Types}
 
   require Logger
@@ -2368,18 +2368,11 @@ defmodule DpExchange.Coinbase.Rest do
   # returns the original order instead of placing a second. That makes it worth generating
   # correctly — a colliding id would silently return someone else's order — and not worth a
   # library for sixteen bytes.
-  defp generate_client_order_id do
-    <<a::32, b::16, _version::4, c::12, _variant::2, d::62>> = :crypto.strong_rand_bytes(16)
-
-    :io_lib.format("~8.16.0b-~4.16.0b-4~3.16.0b-a~3.16.0b-~12.16.0b", [
-      a,
-      b,
-      c,
-      Bitwise.bsr(d, 50),
-      Bitwise.band(d, 0xFFFFFFFFFFFF)
-    ])
-    |> IO.iodata_to_binary()
-  end
+  # Moved to `DpExchange.Coinbase.IdempotencyKey` when `Prime`'s staking calls turned out to
+  # need the same thing under the venue's other name for it, `idempotency_key`. Two copies
+  # inside one package is the shape `Core.Fanout`'s moduledoc records at five-package scale:
+  # a fix lands in one copy and not the other.
+  defp generate_client_order_id, do: IdempotencyKey.generate()
 
   @doc """
   Cancels an order.
