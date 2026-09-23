@@ -188,6 +188,33 @@ defmodule DpExchange.Coinbase.SocketTest do
     test "a non-text frame is ignored" do
       assert {:ok, _state} = Socket.handle_frame({:binary, <<1, 2, 3>>}, state())
     end
+
+    test "a ticker event whose tickers is null does not crash the socket" do
+      # `Map.get(event, "tickers", [])` defaults an ABSENT key, not a present `null`, so
+      # `"tickers": null` reached `Enum.reduce/3` and raised `Protocol.UndefinedError` —
+      # inside `handle_frame/2`, which runs in the socket process. One malformed frame cost
+      # the connection, and a venue that kept sending the shape would have kept costing it.
+      # The `l2_data` path beside it was already total; this one was not.
+      payload = %{@ticker | "events" => [%{"type" => "update", "tickers" => nil}]}
+
+      assert {:ok, _state} = frame(payload)
+      refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
+    end
+
+    test "a non-map entry in events does not crash the socket either" do
+      # `Map.get/3` on a string raised `BadMapError` from the same line.
+      assert {:ok, _state} = frame(%{@ticker | "events" => ["not an event"]})
+    end
+
+    test "one unusable event does not cost its well-formed neighbours" do
+      # Dropping the malformed event must not drop the frame: the good ticker beside it is
+      # still delivered.
+      good = hd(@ticker["events"])
+      payload = %{@ticker | "events" => [%{"tickers" => nil}, "junk", good]}
+
+      assert {:ok, _state} = frame(payload)
+      assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "BTC-USD"}}
+    end
   end
 
   describe "the venue's own error shape" do

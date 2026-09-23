@@ -20,6 +20,22 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **One malformed ticker frame crashed the socket.** The `ticker` channel read
+  `Enum.reduce(Map.get(event, "tickers", []), ...)` inline. `Map.get/3`'s default covers an
+  ABSENT key and not a present `null`, so `"tickers": null` reached `Enum.reduce/3` and raised
+  `Protocol.UndefinedError`; an entry in `events` that was not a map raised `BadMapError` from
+  `Map.get/3` itself. Both measured, and both inside `handle_frame/2`, which runs in the socket
+  process — so the connection went down on one frame, reconnected, and would go down again
+  for as long as the venue kept sending that shape.
+
+  The `l2_data` path beside it was already total — `decode_book_event/3` guards with
+  `is_list/1` and ends in a catch-all — which is why only this channel could do it. The ticker
+  path now has the same shape, `decode_ticker_event/3`, and an unusable event is dropped
+  without costing the well-formed events in the same frame. Three tests, red against the
+  previous code.
+
 ## [0.3.42] - 2026-09-23
 
 ### Fixed

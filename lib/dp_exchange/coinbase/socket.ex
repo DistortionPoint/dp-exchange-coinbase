@@ -391,9 +391,7 @@ defmodule DpExchange.Coinbase.Socket do
        when is_list(events) do
     timestamp = Map.get(payload, "timestamp")
 
-    Enum.reduce(events, state, fn event, acc ->
-      Enum.reduce(Map.get(event, "tickers", []), acc, &deliver_ticker(&1, &2, timestamp))
-    end)
+    Enum.reduce(events, state, &decode_ticker_event(&1, &2, timestamp))
   end
 
   defp dispatch(%{"channel" => "l2_data", "events" => events} = payload, state)
@@ -519,6 +517,21 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   defp decode_book_event(_other, state, _timestamp), do: state
+
+  # The ticker twin of `decode_book_event/3` above, and total in the same way.
+  #
+  # This was `Enum.reduce(Map.get(event, "tickers", []), ...)` inline, which is not total.
+  # `Map.get/3`'s default covers an ABSENT `"tickers"` and not a present `null`, so
+  # `"tickers": null` reached `Enum.reduce/3` and raised `Protocol.UndefinedError`; and an
+  # entry in `events` that was not a map raised `BadMapError` from `Map.get/3` itself.
+  # Both measured, and both inside `handle_frame/2` — so the socket process died on one
+  # malformed frame, reconnected, and would die again for as long as the venue kept sending
+  # that shape. The `l2_data` path beside it was already guarded with `is_list/1` and a
+  # catch-all, which is why only this channel could do it.
+  defp decode_ticker_event(%{"tickers" => tickers}, state, timestamp) when is_list(tickers),
+    do: Enum.reduce(tickers, state, &deliver_ticker(&1, &2, timestamp))
+
+  defp decode_ticker_event(_unusable, state, _timestamp), do: state
 
   # Bids/asks are sorted ONCE here, decoding this one frame's own rows — not maintained
   # or re-sorted against anything held across frames, which is the work this module no
