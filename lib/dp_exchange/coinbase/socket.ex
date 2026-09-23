@@ -131,7 +131,7 @@ defmodule DpExchange.Coinbase.Socket do
   use WebSockex
 
   alias DpExchange.Coinbase.{Auth, Credentials, FrameSender, SymbolFormat}
-  alias DpExchange.Core.{Notice, Telemetry, Types}
+  alias DpExchange.Core.{Config, Notice, Telemetry, Types}
 
   require Logger
 
@@ -227,7 +227,7 @@ defmodule DpExchange.Coinbase.Socket do
     }
 
     opts = connection_opts(opts)
-    WebSockex.start_link(Keyword.get(opts, :url, @endpoint), __MODULE__, state, opts)
+    WebSockex.start_link(Config.opt(opts, :url, @endpoint), __MODULE__, state, opts)
   end
 
   # Explicit rather than inherited — see the moduledoc's budget arithmetic.

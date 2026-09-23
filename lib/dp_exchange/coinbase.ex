@@ -50,7 +50,7 @@ defmodule DpExchange.Coinbase do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Coinbase.{Feed, Prime, Rest, Supervisor}
-  alias DpExchange.Core.{Capabilities, Venue}
+  alias DpExchange.Core.{Capabilities, Config, Venue}
 
   # The venue serves none of these. **That is a claim about Coinbase, not about how far
   # this package got** — and the two are worth telling apart, because both answer a caller
@@ -585,7 +585,7 @@ defmodule DpExchange.Coinbase do
   # The feed process. Named so a consumer running two of this venue — different
   # credentials, different scopes — keeps them apart; defaulting to the module name
   # covers the single-venue case without ceremony.
-  defp feed(opts), do: Keyword.get(opts, :feed, Feed)
+  defp feed(opts), do: Config.opt(opts, :feed, Feed)
 
   defp alive?(name) when is_atom(name), do: is_pid(GenServer.whereis(name))
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)

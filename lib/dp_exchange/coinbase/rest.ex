@@ -35,7 +35,7 @@ defmodule DpExchange.Coinbase.Rest do
   """
 
   alias DpExchange.Coinbase.{Auth, IdempotencyKey, SymbolFormat}
-  alias DpExchange.Core.{HttpClient, Instrument, Timeframe, Types}
+  alias DpExchange.Core.{Config, HttpClient, Instrument, Timeframe, Types}
 
   require Logger
 
@@ -1296,7 +1296,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_trade_history(map(), keyword()) ::
           {:ok, [Types.Fill.t()]} | {:error, term()} | {:refused, term()}
   def get_trade_history(credentials, opts) do
-    wanted = Keyword.get(opts, :trade_types, ["FILL"])
+    wanted = Config.opt(opts, :trade_types, ["FILL"])
 
     with {:ok, rows} <- all_fills(credentials, opts, nil, [], 0) do
       rows
@@ -1551,7 +1551,7 @@ defmodule DpExchange.Coinbase.Rest do
       # `classify/1` can match the status exactly instead of searching the body for it.
       |> Keyword.put(:raw_status, true)
       # This venue's own limiter, configured from its own declared ceiling.
-      |> Keyword.put_new(:limiter, Keyword.get(opts, :limiter, DpExchange.Coinbase.RateLimiter))
+      |> Keyword.put_new(:limiter, Config.opt(opts, :limiter, DpExchange.Coinbase.RateLimiter))
 
     method
     |> HttpClient.request(url <> query(params), headers, nil, request_opts)
@@ -2350,7 +2350,7 @@ defmodule DpExchange.Coinbase.Rest do
       ])
       |> Keyword.put(:provider, :coinbase)
       |> Keyword.put(:raw_status, true)
-      |> Keyword.put_new(:limiter, Keyword.get(opts, :limiter, DpExchange.Coinbase.RateLimiter))
+      |> Keyword.put_new(:limiter, Config.opt(opts, :limiter, DpExchange.Coinbase.RateLimiter))
 
     method
     |> HttpClient.request(

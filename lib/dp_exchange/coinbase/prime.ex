@@ -55,7 +55,7 @@ defmodule DpExchange.Coinbase.Prime do
   """
 
   alias DpExchange.Coinbase.IdempotencyKey
-  alias DpExchange.Core.HttpClient
+  alias DpExchange.Core.{Config, HttpClient}
 
   @base_url "https://api.prime.coinbase.com"
   @api_path "/v1"
@@ -119,7 +119,7 @@ defmodule DpExchange.Coinbase.Prime do
   def query_transaction_validators(credentials, portfolio_id, opts) do
     post(
       "/portfolios/#{portfolio_id}/staking/transaction-validators/query",
-      Keyword.get(opts, :query, %{}),
+      Config.opt(opts, :query, %{}),
       credentials: credentials,
       opts: opts
     )
@@ -232,7 +232,7 @@ defmodule DpExchange.Coinbase.Prime do
   def claim_rewards(credentials, portfolio_id, wallet_id, opts) do
     post(
       "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/claim_rewards",
-      Keyword.get(opts, :body, %{}),
+      Config.opt(opts, :body, %{}),
       credentials: credentials,
       opts: Keyword.put_new(opts, :retry_attempts, 1)
     )
@@ -289,7 +289,7 @@ defmodule DpExchange.Coinbase.Prime do
       "amount" => Decimal.to_string(amount, :normal),
       "idempotency_key" => Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate()
     }
-    |> Map.merge(Keyword.get(opts, :extra, %{}))
+    |> Map.merge(Config.opt(opts, :extra, %{}))
   end
 
   defp post(path, body, credentials: credentials, opts: opts) do
@@ -355,7 +355,7 @@ defmodule DpExchange.Coinbase.Prime do
       :rate_limit_blocking
     ])
     |> Keyword.put(:provider, :coinbase)
-    |> Keyword.put_new(:limiter, Keyword.get(opts, :limiter, DpExchange.Coinbase.RateLimiter))
+    |> Keyword.put_new(:limiter, Config.opt(opts, :limiter, DpExchange.Coinbase.RateLimiter))
   end
 
   defp unwrap({:ok, %{status: status, body: body}}) when status in 200..299 and is_map(body),

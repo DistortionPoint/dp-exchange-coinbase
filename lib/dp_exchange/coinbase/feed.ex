@@ -1069,7 +1069,7 @@ defmodule DpExchange.Coinbase.Feed do
   use GenServer
 
   alias DpExchange.Coinbase.{Credentials, Rest, Socket}
-  alias DpExchange.Core.{Capabilities, Fanout, Notice, Types}
+  alias DpExchange.Core.{Capabilities, Config, Fanout, Notice, Types}
 
   require Logger
 
@@ -1449,7 +1449,7 @@ defmodule DpExchange.Coinbase.Feed do
 
   @spec subscribe(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
   def subscribe(feed \\ __MODULE__, symbols, opts \\ []) do
-    GenServer.call(feed, {:subscribe, symbols, Keyword.get(opts, :to, self())}, @call_timeout)
+    GenServer.call(feed, {:subscribe, symbols, Config.opt(opts, :to, self())}, @call_timeout)
   end
 
   @spec unsubscribe(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
@@ -1501,7 +1501,7 @@ defmodule DpExchange.Coinbase.Feed do
   # calling process for asking during exactly the conditions it exists to report.
   @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
   def subscribe_notices(feed \\ __MODULE__, opts \\ []),
-    do: GenServer.call(feed, {:subscribe_notices, Keyword.get(opts, :to, self())}, @call_timeout)
+    do: GenServer.call(feed, {:subscribe_notices, Config.opt(opts, :to, self())}, @call_timeout)
 
   # --- server ------------------------------------------------------------
 
@@ -1563,7 +1563,7 @@ defmodule DpExchange.Coinbase.Feed do
     # section. Production supplies none, so this default runs: the venue's own public
     # catalogue, reusing `Rest`'s existing products fetch rather than a second way to ask.
     alias_map_source =
-      Keyword.get(opts, :alias_map_source, default_alias_map_source(opts, credentials))
+      Config.opt(opts, :alias_map_source, default_alias_map_source(opts, credentials))
 
     {:ok,
      %{

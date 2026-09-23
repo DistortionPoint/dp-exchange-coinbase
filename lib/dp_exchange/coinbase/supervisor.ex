@@ -45,7 +45,7 @@ defmodule DpExchange.Coinbase.Supervisor do
   use Supervisor
 
   alias DpExchange.Coinbase.Feed
-  alias DpExchange.Core.DefaultRateLimiter
+  alias DpExchange.Core.{Config, DefaultRateLimiter}
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
@@ -70,11 +70,11 @@ defmodule DpExchange.Coinbase.Supervisor do
 
   @doc "The limiter this venue meters against, for `Core.HttpClient`'s `:limiter` option."
   @spec limiter_name(keyword()) :: atom()
-  def limiter_name(opts), do: Keyword.get(opts, :limiter, DpExchange.Coinbase.RateLimiter)
+  def limiter_name(opts), do: Config.opt(opts, :limiter, DpExchange.Coinbase.RateLimiter)
 
   @doc "This venue's feed process."
   @spec feed_name(keyword()) :: atom()
-  def feed_name(opts), do: Keyword.get(opts, :feed, Feed)
+  def feed_name(opts), do: Config.opt(opts, :feed, Feed)
 
   # Straight from the declaration. If a ceiling changes, it changes in one place.
   #

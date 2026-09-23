@@ -59,7 +59,7 @@ defmodule DpExchange.Coinbase.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Coinbase.Rest
-  alias DpExchange.Core.{Capabilities, FakeInjection, Instrument, Notice, Types, Venue}
+  alias DpExchange.Core.{Capabilities, Config, FakeInjection, Instrument, Notice, Types, Venue}
 
   @symbols ~w(BTC-USD BTC-USDC ETH-USD ETH-EUR)
 
@@ -208,7 +208,7 @@ defmodule DpExchange.Coinbase.Fake do
       case Map.fetch(@price, symbol) do
         {:ok, price} ->
           mid = Decimal.new(price)
-          limit = Keyword.get(opts, :limit, 3)
+          limit = Config.opt(opts, :limit, 3)
 
           {:ok,
            %Types.OrderBook{
@@ -411,7 +411,7 @@ defmodule DpExchange.Coinbase.Fake do
       # A REVERSAL alongside the FILL, because that is the distinction a consumer must handle:
       # summing a mixed list produces a position and a cost basis that are both wrong and both
       # plausible. The fake filters the same way the real package does.
-      wanted = Keyword.get(opts, :trade_types, ["FILL"])
+      wanted = Config.opt(opts, :trade_types, ["FILL"])
 
       rows = [
         {"FILL",
@@ -453,7 +453,7 @@ defmodule DpExchange.Coinbase.Fake do
   # difference, which is the property the facade exists to hold.
   @impl true
   def subscribe(symbols, opts \\ []) do
-    target = Keyword.get(opts, :to, self())
+    target = Config.opt(opts, :to, self())
 
     for symbol <- symbols, symbol in @symbols do
       case get_price(symbol, []) do
@@ -518,7 +518,7 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def subscribe_notices(opts \\ []) do
     send(
-      Keyword.get(opts, :to, self()),
+      Config.opt(opts, :to, self()),
       {:dp_exchange, :coinbase, Notice.new(:link_up, :coinbase)}
     )
 
@@ -570,7 +570,7 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   defp requested(range, timeframe) do
-    finish = Keyword.get(range, :end, @at)
+    finish = Config.opt(range, :end, @at)
     {:ok, width} = DpExchange.Core.Timeframe.seconds(timeframe)
 
     case Keyword.get(range, :start) do
