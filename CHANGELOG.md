@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.48] - 2026-09-24
+
 ### Documentation
 
 - **`usage-rules.md` described reconnect recovery as timer-only.** It now says a reconnected
