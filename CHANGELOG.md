@@ -20,6 +20,18 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A venue outage blocked `Feed` for most of every minute.** A reconnecting `Socket`
+  sleeps its backoff and answers no `WebSockex.send_frame/2`, so each frame `Feed` sent it
+  blocked `Feed` for the full 5s window, then counted as transient and was retried. The
+  resubscribe tick queued one reconcile per shard 1s apart, and with every shard down at
+  once these ran back to back, so a consumer call queued behind them exceeded its 15s
+  timeout. `Feed` now keeps `down_links`, the shard sockets between their `:link_down` and
+  `:reconnected` reports, and sends them nothing. Nothing is lost, because `:reconnected`
+  re-issues the shard's whole membership. Break-verified: the new test fails on the
+  previous code.
+
 ## [0.3.45] - 2026-09-24
 
 ### Fixed

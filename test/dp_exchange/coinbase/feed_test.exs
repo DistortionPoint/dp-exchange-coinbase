@@ -235,6 +235,31 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
     end
 
+    test "a shard whose link is down is not sent to until it reconnects" do
+      # A reconnecting socket answers no `send_frame/2`, so each frame sent to it blocked
+      # the feed for the whole 5s window, then was retried. See the moduledoc's "A socket
+      # that is reconnecting is not sent to".
+      socket = recording_socket(:ticker)
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{state | shards: %{{"ticker", 0} => %{socket: socket, symbols: ["BTC-USD"]}}}
+      end)
+
+      send(feed, {:dp_exchange, :coinbase, :link_down, socket})
+      send(feed, :resubscribe)
+      Feed.coverage(feed)
+
+      refute_receive {:frame, :ticker, _frame}, 200
+
+      send(feed, {:dp_exchange, :coinbase, :reconnected, socket})
+
+      assert_receive {:frame, :ticker, %{"type" => "subscribe", "product_ids" => ["BTC-USD"]}},
+                     1_000
+
+      assert :sys.get_state(feed).down_links == MapSet.new()
+    end
+
     test "a reconnect re-issues THAT shard at once, and no other" do
       # On the timer alone a reconnected shard carried nothing for up to 60s — see the
       # moduledoc's "A reconnect re-issues its shard at once; the timer is the net".

@@ -724,7 +724,26 @@ defmodule DpExchange.Coinbase.Feed do
   (`{:dp_exchange, :coinbase, :reconnected, pid}`, the counterpart of the `:link_down`
   report). This coordinator re-issues that one shard the moment it hears, without
   re-arming the timer and without touching any other shard. The timer still runs
-  unconditionally, because a report can be lost and the timer is what catches that.
+  unconditionally, for what no report covers: a venue that quietly stops serving a
+  channel on a connection that never dropped.
+
+  ## A socket that is reconnecting is not sent to
+
+  `Socket.handle_disconnect/2` sleeps its backoff (up to 30s) inside the socket process,
+  and WebSockex answers no `send_frame/2` while it reconnects. Each frame sent to such a
+  socket blocked THIS process for the full `@frame_window_ms` (5s), then counted as a
+  transient failure and was retried, blocking again. During a venue outage every shard is
+  in that state together, and the resubscribe tick queued one reconcile per shard 1s
+  apart. Those ran back to back, 5s each plus retries, so with a dozen shards this
+  coordinator was blocked most of every minute. Any consumer call (`@call_timeout`, 15s)
+  that queued behind them exited.
+
+  Now `state.down_links` holds each shard socket between its `:link_down` and
+  `:reconnected` reports, and no frame is sent to one (`sendable?/2`). Nothing skipped is
+  lost, because a reconnected socket carries no subscriptions and `:reconnected` re-issues
+  the shard's whole membership. Both reports are messages from a socket process to this
+  one, in order from one sender, so a socket marked down is unmarked when it comes back.
+  A shard whose socket crashes leaves the set with it.
 
   ## Every shard beyond the first must open on its own tick, not the same one
 
@@ -1596,6 +1615,10 @@ defmodule DpExchange.Coinbase.Feed do
        # all, and cleared (per symbol) the moment a retry actually sends. Absent from a
        # key entirely is the ordinary case — this map is normally empty.
        pending_unsubscribes: %{},
+       # Shard sockets whose link is down and not yet back: added on `:link_down`, removed
+       # on `:reconnected` or when the shard goes. Nothing is sent to one of these — see the
+       # moduledoc's "A socket that is reconnecting is not sent to" section.
+       down_links: MapSet.new(),
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
        # Monitor references for pid subscribers, so a dead one is dropped rather than walked
@@ -1876,7 +1899,12 @@ defmodule DpExchange.Coinbase.Feed do
         %{symbols: symbols} = Map.fetch!(state.shards, key)
         kind = channel_kind(channel)
 
-        {:noreply, %{state | delivering: drop_kind(state.delivering, symbols, kind)}}
+        {:noreply,
+         %{
+           state
+           | delivering: drop_kind(state.delivering, symbols, kind),
+             down_links: MapSet.put(state.down_links, socket)
+         }}
 
       nil ->
         {:noreply, state}
@@ -1890,6 +1918,8 @@ defmodule DpExchange.Coinbase.Feed do
   # NOT re-armed here: sending `:resubscribe` would start a second chain beside the first.
   # A pid that resolves to no shard is not this feed's to act on.
   def handle_info({:dp_exchange, :coinbase, :reconnected, socket}, state) do
+    state = %{state | down_links: MapSet.delete(state.down_links, socket)}
+
     case shard_key_for_socket(state, socket) do
       {channel, _index} = key ->
         %{symbols: symbols} = Map.fetch!(state.shards, key)
@@ -2418,7 +2448,7 @@ defmodule DpExchange.Coinbase.Feed do
     # chain falls back to once IT gives up — see `strand_unsubscribe/7` and the moduledoc's
     # "a stranded unsubscribe is not silently forgotten" section.
     {result, state} =
-      if Process.alive?(socket) do
+      if sendable?(state, socket) do
         case unsubscribe_step(socket, channel, removed) do
           :ok when added == [] ->
             {:ok, clear_pending_unsubscribe(state, key, removed)}
@@ -2567,7 +2597,7 @@ defmodule DpExchange.Coinbase.Feed do
          attempt,
          state
        ) do
-    if Process.alive?(socket) do
+    if sendable?(state, socket) do
       case unsubscribe_step(socket, channel, removed) do
         :ok ->
           state = clear_pending_unsubscribe(state, key, removed)
@@ -2731,7 +2761,7 @@ defmodule DpExchange.Coinbase.Feed do
   # elsewhere. A dead socket simply stops the chain: nothing subscribes it, and nothing
   # re-attempts against a corpse, matching every other dead-socket branch in this module.
   defp attempt_channel_subscribe(socket, channel, symbols, credentials, attempt, state) do
-    if Process.alive?(socket) do
+    if sendable?(state, socket) do
       case Socket.subscribe(socket, channel, symbols, credentials) do
         :ok ->
           :ok
@@ -2743,6 +2773,14 @@ defmodule DpExchange.Coinbase.Feed do
 
     {:noreply, state}
   end
+
+  # A frame is sent only to a live socket whose link is up. One reconnecting is asleep in
+  # its backoff, and `WebSockex.send_frame/2` would block THIS process for the whole
+  # `@frame_window_ms` — see the moduledoc's "A socket that is reconnecting is not sent to"
+  # section. What is skipped is not lost: the shard's membership is re-issued in full on
+  # `:reconnected`.
+  defp sendable?(state, socket),
+    do: Process.alive?(socket) and not MapSet.member?(state.down_links, socket)
 
   # Transient: the socket was busy decoding a burst or briefly unreachable, and the
   # identical request can reasonably succeed once it catches up — worth retrying.
@@ -2869,7 +2907,8 @@ defmodule DpExchange.Coinbase.Feed do
       state
       | shards: Map.delete(state.shards, key),
         pending_unsubscribes: Map.delete(state.pending_unsubscribes, key),
-        delivering: drop_kind(state.delivering, symbols, kind)
+        delivering: drop_kind(state.delivering, symbols, kind),
+        down_links: MapSet.delete(state.down_links, Map.fetch!(state.shards, key).socket)
     }
 
     notify_shard_crashed(state, channel, index, symbols, reason)
