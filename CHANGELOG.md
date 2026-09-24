@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.44] - 2026-09-24
+
 ### Fixed
 
 - **Seven endpoints raised on a `null` list.** `get_accounts/2`, `get_balances/2`,
