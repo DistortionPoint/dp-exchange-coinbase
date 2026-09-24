@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.45] - 2026-09-24
+
 ### Fixed
 
 - **A reconnected shard stayed silent for up to a minute.** WebSockex reconnects a shard's
