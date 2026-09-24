@@ -340,7 +340,18 @@ venue does publish one, it is the other half of this reconciliation.
 
 A WebSockex reconnect resubscribes nothing on its own, so a dropped-and-restored socket
 can come back up connected and silently subscribed to **nothing**. This package re-issues
-every shard's current subscriptions on a timer to cover that, unconditionally.
+that shard's subscriptions **the moment its socket reconnects**. Only the shard that
+dropped is re-issued, so there is no minute of silence waiting for the next timer tick. On
+top of that it re-issues every shard's current subscriptions on a timer, unconditionally,
+for what a reconnect report cannot cover: a channel the venue quietly stops serving on a
+connection that never dropped.
+
+**Nothing is sent to a shard while its socket is reconnecting.** A reconnecting socket is
+asleep in its backoff and answers no frame, and each frame sent to one used to block this
+package for five seconds. During a venue outage, with every shard down at once, that
+stalled it long enough for your own calls to time out. Frames for such a shard are now
+skipped, and nothing is lost by it, because the reconnect re-issues the shard's whole
+membership.
 
 ```elixir
 children = [{DpExchange.Coinbase, credentials: my_credentials(), resubscribe_interval_ms: 30_000}]

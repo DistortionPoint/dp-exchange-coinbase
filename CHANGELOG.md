@@ -20,6 +20,12 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`usage-rules.md` described reconnect recovery as timer-only.** It now says a reconnected
+  shard is re-issued at once and that a reconnecting socket is not sent to, both shipped in
+  0.3.45 and 0.3.46.
+
 ## [0.3.47] - 2026-09-24
 
 ### Fixed
