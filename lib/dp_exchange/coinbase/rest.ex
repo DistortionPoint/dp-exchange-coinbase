@@ -231,7 +231,7 @@ defmodule DpExchange.Coinbase.Rest do
     path = if credentials, do: "/products", else: "/market/products"
 
     case request(:get, path, credentials, opts) do
-      {:ok, %{body: %{"products" => products}}} -> {:ok, products}
+      {:ok, %{body: %{"products" => products}}} when is_list(products) -> {:ok, products}
       {:ok, _unexpected} -> {:error, :unexpected_response_shape}
       {:error, reason} -> classify(reason)
     end
@@ -339,7 +339,7 @@ defmodule DpExchange.Coinbase.Rest do
       |> put_unless_nil("cursor", cursor)
 
     case request(:get, "/accounts", credentials, opts, params) do
-      {:ok, %{body: %{"accounts" => accounts} = body}} ->
+      {:ok, %{body: %{"accounts" => accounts} = body}} when is_list(accounts) ->
         collected = [accounts | acc]
 
         # `has_next` is the venue's word for it. An empty page with `has_next` still true
@@ -1330,7 +1330,7 @@ defmodule DpExchange.Coinbase.Rest do
       |> put_unless_nil("cursor", cursor)
 
     case request(:get, "/orders/historical/fills", credentials, opts, params) do
-      {:ok, %{body: %{"fills" => fills} = body}} ->
+      {:ok, %{body: %{"fills" => fills} = body}} when is_list(fills) ->
         collected = [fills | acc]
         next = body["cursor"]
 
@@ -1953,7 +1953,7 @@ defmodule DpExchange.Coinbase.Rest do
   #
   # It is the same defect 2.10 of the coverage plan found in Schwab, and the reasoning
   # behind it was the same: "a bar's price, for a series, is where it ended".
-  defp to_candles(%{"candles" => candles}, symbol, timeframe) do
+  defp to_candles(%{"candles" => candles}, symbol, timeframe) when is_list(candles) do
     candles
     |> Enum.reduce_while({:ok, []}, fn candle, {:ok, acc} ->
       case to_candle(candle, symbol, timeframe) do

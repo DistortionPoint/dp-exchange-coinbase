@@ -20,6 +20,22 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Seven endpoints raised on a `null` list.** `get_accounts/2`, `get_balances/2`,
+  `get_trade_history/2`, `get_symbols/1`, `get_market_overview/1`, `list_instruments/1` and
+  `get_historical_prices/4` each matched `%{"key" => list}` without `when is_list(list)`, so a
+  `null` list got past the match and raised `Protocol.UndefinedError` further down. Each
+  already had an `{:error, :unexpected_response_shape}` fall-through; the guard is what routes
+  `null` to it, and `fetch_products/1` carrying three of them is why one guard covers three.
+
+  Found by feeding every active facade callback a set of plausible-but-wrong bodies — `[]`,
+  `null`, `{}`, an object whose list fields are all `null`, and `{"data": {}}` — and
+  flagging any call that raised, or that answered with a wrapper as a row or a record with
+  no identity. `Core.Venue`'s error discipline is that a facade answers and never raises in
+  the caller's process. `response_shape_test.exs` pins each body that used to fail, driven
+  through the facade, red against the previous code.
+
 ## [0.3.43] - 2026-09-23
 
 ### Fixed
