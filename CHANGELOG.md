@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.46] - 2026-09-24
+
 ### Fixed
 
 - **A venue outage blocked `Feed` for most of every minute.** A reconnecting `Socket`
