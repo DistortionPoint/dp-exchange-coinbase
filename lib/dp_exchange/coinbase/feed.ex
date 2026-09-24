@@ -745,6 +745,18 @@ defmodule DpExchange.Coinbase.Feed do
   one, in order from one sender, so a socket marked down is unmarked when it comes back.
   A shard whose socket crashes leaves the set with it.
 
+  ## A retired shard's socket is closed, not abandoned
+
+  A shard leaves `state.shards` when the universe shrinks past it
+  (`drop_unwanted_shards/4`), or once a vanishing shard has released everything it owed
+  (`finalize_shard/4`, `maybe_finalize_vanished_shard/2`). All three sites deleted the
+  entry and nothing else. The socket stayed alive, linked, connected to the venue and
+  reconnecting on every drop, forever, and its `:link_down`/`:link_up` notices kept
+  reaching consumers for a connection nothing used. A later growth opened a NEW socket for
+  the same key (`get_socket/1` always starts one), so each shrink-and-grow cycle left
+  another open connection behind. All three now go through `retire_shards/2`, which stops
+  the socket with the entry.
+
   ## Every shard beyond the first must open on its own tick, not the same one
 
   `shard_spacing_ms` staggers shard opens **relative to each other**, not relative to a
@@ -2369,7 +2381,7 @@ defmodule DpExchange.Coinbase.Feed do
         key in in_flight_keys or Map.has_key?(state.pending_unsubscribes, key)
       end)
 
-    %{state | shards: Map.drop(state.shards, dropped_keys)}
+    retire_shards(state, dropped_keys)
   end
 
   defp touch_shard(state, key, new_shards, sync: sync?, delay: delay) do
@@ -2548,7 +2560,7 @@ defmodule DpExchange.Coinbase.Feed do
     if Map.has_key?(state.pending_unsubscribes, key) do
       put_in(state.shards[key], %{socket: socket, symbols: wanted})
     else
-      %{state | shards: Map.delete(state.shards, key)}
+      retire_shards(state, [key])
     end
   end
 
@@ -2564,13 +2576,39 @@ defmodule DpExchange.Coinbase.Feed do
   # point — `reconcile_shard_in_place/8` set it optimistically before this message was
   # even scheduled — so an empty symbol list with nothing left pending is exactly
   # "vanished and now fully released."
+  # Every place a shard leaves `state.shards` for good comes through here, and its socket
+  # goes with it — see the moduledoc's "A retired shard's socket is closed, not abandoned".
+  # A socket another remaining shard still names is left alone. `:shutdown` stops a
+  # WebSockex process even mid-backoff, since it does not trap exits. The `:EXIT` that
+  # follows resolves to no shard and is ignored by `handle_info({:EXIT, _, _}, _)`.
+  defp retire_shards(state, []), do: state
+
+  defp retire_shards(state, keys) do
+    retired = state.shards |> Map.take(keys) |> Enum.map(fn {_key, shard} -> shard.socket end)
+    shards = Map.drop(state.shards, keys)
+    still_used = MapSet.new(shards, fn {_key, shard} -> shard.socket end)
+
+    closed =
+      retired
+      |> Enum.uniq()
+      |> Enum.filter(&(is_pid(&1) and not MapSet.member?(still_used, &1)))
+
+    Enum.each(closed, &Process.exit(&1, :shutdown))
+
+    %{
+      state
+      | shards: shards,
+        down_links: Enum.reduce(closed, state.down_links, &MapSet.delete(&2, &1))
+    }
+  end
+
   defp maybe_finalize_vanished_shard(state, key) do
     case Map.get(state.shards, key) do
       %{symbols: []} ->
         if Map.has_key?(state.pending_unsubscribes, key) do
           state
         else
-          %{state | shards: Map.delete(state.shards, key)}
+          retire_shards(state, [key])
         end
 
       _still_wanted_or_already_gone ->

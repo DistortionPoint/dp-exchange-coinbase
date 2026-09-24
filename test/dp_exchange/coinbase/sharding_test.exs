@@ -1261,7 +1261,30 @@ defmodule DpExchange.Coinbase.ShardingTest do
         }
       end)
 
-      %{feed: feed, old_socket: old_socket, target: level2_shard0}
+      %{
+        feed: feed,
+        old_socket: old_socket,
+        target: level2_shard0,
+        second_socket: level2_socket1,
+        wanted_list: wanted_list
+      }
+    end
+
+    test "a shard the universe shrinks past takes its socket with it" do
+      # All three sites that retire a shard used to delete its entry and nothing else: the
+      # socket stayed connected and reconnecting forever, and a later growth opened another.
+      # See the moduledoc's "A retired shard's socket is closed, not abandoned".
+      %{feed: feed, second_socket: second, wanted_list: wanted_list} =
+        feed_with_stale_level2_shard(& &1)
+
+      ref = Process.monitor(second)
+
+      assert :ok = Feed.update_symbols(feed, Enum.take(wanted_list, 30))
+
+      assert_receive {:DOWN, ^ref, :process, ^second, :shutdown}, 2_000
+
+      wait_until(fn -> not Map.has_key?(:sys.get_state(feed).shards, {"level2", 1}) end)
+      assert Process.alive?(feed)
     end
 
     test "a shard that would GAIN symbols reconciles on its EXISTING socket — never " <>

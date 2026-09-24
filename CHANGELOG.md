@@ -20,6 +20,18 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A retired shard's socket was never closed.** `Feed` retires a shard when the universe
+  shrinks past it (`drop_unwanted_shards/4`), or once a vanishing shard has released what
+  it owed (`finalize_shard/4`, `maybe_finalize_vanished_shard/2`). All three sites deleted
+  the entry and left the socket running: connected to the venue, reconnecting on every
+  drop, and sending `:link_down`/`:link_up` notices to consumers for a connection nothing
+  used. `get_socket/1` always opens a new socket, so each shrink-and-grow cycle left
+  another connection behind. All three now go through `retire_shards/2`, which stops the
+  socket (`:shutdown`) together with the entry. Break-verified: the new test fails on the
+  previous code.
+
 ## [0.3.46] - 2026-09-24
 
 ### Fixed
