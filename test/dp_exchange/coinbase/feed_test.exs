@@ -235,6 +235,62 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
     end
 
+    test "a reconnect re-issues THAT shard at once, and no other" do
+      # On the timer alone a reconnected shard carried nothing for up to 60s — see the
+      # moduledoc's "A reconnect re-issues its shard at once; the timer is the net".
+      ticker_socket = recording_socket(:ticker)
+      book_socket = recording_socket(:book)
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | shards: %{
+              {"ticker", 0} => %{socket: ticker_socket, symbols: ["BTC-USD", "ETH-USD"]},
+              {"level2", 0} => %{socket: book_socket, symbols: ["BTC-USD"]}
+            }
+        }
+      end)
+
+      send(feed, {:dp_exchange, :coinbase, :reconnected, ticker_socket})
+
+      assert_receive {:frame, :ticker, %{"type" => "subscribe"} = frame}, 1_000
+      assert frame["channel"] == "ticker"
+      assert Enum.sort(frame["product_ids"]) == ["BTC-USD", "ETH-USD"]
+      refute_receive {:frame, :book, _frame}, 100
+    end
+
+    test "a reconnect report from a socket this feed does not know sends nothing" do
+      stranger = recording_socket(:stranger)
+      feed = start_feed()
+
+      send(feed, {:dp_exchange, :coinbase, :reconnected, stranger})
+
+      refute_receive {:frame, :stranger, _frame}, 100
+      assert Process.alive?(feed)
+    end
+
+    # Answers every `WebSockex.send_frame/2` with `:ok` and forwards the decoded frame here,
+    # tagged, so a test can tell which shard's socket was written to.
+    defp recording_socket(tag) do
+      test = self()
+
+      pid =
+        spawn(fn ->
+          Stream.repeatedly(fn ->
+            receive do
+              {:"$websockex_send", from, {:text, raw}} ->
+                :gen.reply(from, :ok)
+                send(test, {:frame, tag, Jason.decode!(raw)})
+            end
+          end)
+          |> Stream.run()
+        end)
+
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      pid
+    end
+
     # A pid that stays alive for the test's duration and answers nothing — `Feed` only ever
     # compares these by identity here, never sends to them.
     defp idle_socket do

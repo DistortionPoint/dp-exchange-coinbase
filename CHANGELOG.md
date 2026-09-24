@@ -20,6 +20,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reconnected shard stayed silent for up to a minute.** WebSockex reconnects a shard's
+  `Socket` in place, with no subscriptions, and `Feed` only re-issued shards on its
+  resubscribe timer (60s by default). `Socket` now reports each re-connect
+  (`{:dp_exchange, :coinbase, :reconnected, pid}`, the counterpart of the existing
+  `:link_down` report, with the first connect excluded). `Feed` re-issues that one shard at
+  once through the same `:resubscribe_shard` step a tick uses, so a stranded unsubscribe
+  still goes first. It touches no other shard and does not re-arm the timer.
+  Break-verified: the new socket and feed tests fail on the previous code.
+
 ## [0.3.44] - 2026-09-24
 
 ### Fixed

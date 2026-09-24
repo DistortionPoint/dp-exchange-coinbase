@@ -717,6 +717,15 @@ defmodule DpExchange.Coinbase.Feed do
   not re-subscribing one it silently dropped costs the shard's whole coverage until
   someone notices a quiet chart.
 
+  ## A reconnect re-issues its shard at once; the timer is the net
+
+  On the timer alone, an ordinary reconnect meant up to the resubscribe interval (60s by
+  default) of silence on that shard. `Socket` now reports each RE-connect
+  (`{:dp_exchange, :coinbase, :reconnected, pid}`, the counterpart of the `:link_down`
+  report). This coordinator re-issues that one shard the moment it hears, without
+  re-arming the timer and without touching any other shard. The timer still runs
+  unconditionally, because a report can be lost and the timer is what catches that.
+
   ## Every shard beyond the first must open on its own tick, not the same one
 
   `shard_spacing_ms` staggers shard opens **relative to each other**, not relative to a
@@ -1868,6 +1877,30 @@ defmodule DpExchange.Coinbase.Feed do
         kind = channel_kind(channel)
 
         {:noreply, %{state | delivering: drop_kind(state.delivering, symbols, kind)}}
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
+  # One shard's socket reconnected and carries nothing now — see the moduledoc's "A
+  # reconnect re-issues its shard at once; the timer is the net" section. Only THAT shard
+  # is re-issued, through the same `:resubscribe_shard` step a timer tick schedules per
+  # shard, so a stranded unsubscribe still rides along ahead of the subscribe. The timer is
+  # NOT re-armed here: sending `:resubscribe` would start a second chain beside the first.
+  # A pid that resolves to no shard is not this feed's to act on.
+  def handle_info({:dp_exchange, :coinbase, :reconnected, socket}, state) do
+    case shard_key_for_socket(state, socket) do
+      {channel, _index} = key ->
+        %{symbols: symbols} = Map.fetch!(state.shards, key)
+        pending = Map.get(state.pending_unsubscribes, key, [])
+
+        send(
+          self(),
+          {:resubscribe_shard, key, socket, channel, pending, symbols, state.credentials}
+        )
+
+        {:noreply, state}
 
       nil ->
         {:noreply, state}

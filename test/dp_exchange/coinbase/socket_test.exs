@@ -10,7 +10,12 @@ defmodule DpExchange.Coinbase.SocketTest do
   # actual socket would make these tier-2; what matters here is the decode-and-dispatch
   # behaviour, which is where a venue quietly loses data.
   defp state(subscriber \\ nil) do
-    %{subscriber: subscriber || self(), credentials: nil, delivering: MapSet.new()}
+    %{
+      subscriber: subscriber || self(),
+      credentials: nil,
+      delivering: MapSet.new(),
+      connected_once?: false
+    }
   end
 
   defp frame(payload), do: Socket.handle_frame({:text, Jason.encode!(payload)}, state())
@@ -107,6 +112,17 @@ defmodule DpExchange.Coinbase.SocketTest do
   end
 
   describe "connection state becomes a notice, not a log line" do
+    test "only a RE-connect is reported to the feed, so it can re-issue the shard at once" do
+      # `Feed` subscribes a new shard itself after `start_link/1`; reporting the first
+      # connect too would send the same subscription twice.
+      assert {:ok, first} = Socket.handle_connect(%{}, state())
+      refute_received {:dp_exchange, :coinbase, :reconnected, _pid}
+
+      assert {:ok, _again} = Socket.handle_connect(%{}, first)
+      me = self()
+      assert_received {:dp_exchange, :coinbase, :reconnected, ^me}
+    end
+
     test "connecting reports link_up" do
       assert {:ok, _state} = Socket.handle_connect(%{}, state())
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :link_up}}

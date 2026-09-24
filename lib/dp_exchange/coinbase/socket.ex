@@ -223,7 +223,10 @@ defmodule DpExchange.Coinbase.Socket do
       credentials: opts |> Keyword.get(:credentials) |> Credentials.wrap(),
       # Observed delivery, not intended: a symbol enters this set when a payload for it
       # arrives, never when it is subscribed.
-      delivering: MapSet.new()
+      delivering: MapSet.new(),
+      # Whether `handle_connect/2` has run before — so only a RE-connect is reported to
+      # `Feed`. See `report_reconnected/1`.
+      connected_once?: false
     }
 
     opts = connection_opts(opts)
@@ -283,7 +286,8 @@ defmodule DpExchange.Coinbase.Socket do
     # droppable, and one that graphed notices would be graphing something it is meant to
     # handle. Both fire here because this one event is genuinely both.
     Telemetry.link_up(:coinbase)
-    {:ok, state}
+    if state.connected_once?, do: report_reconnected(state)
+    {:ok, %{state | connected_once?: true}}
   end
 
   @impl true
@@ -745,4 +749,18 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   defp report_link_down(_state), do: :ok
+
+  # The counterpart of `report_link_down/1`. WebSockex reconnects inside this process, and a
+  # reconnected socket carries no subscriptions. `Feed` re-issues every shard on a timer
+  # regardless, but that left up to a minute of silence on this shard after every ordinary
+  # reconnect. This tells `Feed` at once, so it can re-issue THIS shard now. The FIRST
+  # connect is not reported, because `Feed` subscribes a new shard itself once
+  # `start_link/1` returns, and a report would only send the same subscription twice.
+  # Lossy by contract, like `report_link_down/1`.
+  defp report_reconnected(%{subscriber: subscriber}) when is_pid(subscriber) do
+    send(subscriber, {:dp_exchange, :coinbase, :reconnected, self()})
+    :ok
+  end
+
+  defp report_reconnected(_state), do: :ok
 end

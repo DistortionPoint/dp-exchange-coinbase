@@ -21,7 +21,8 @@ defmodule DpExchange.Coinbase.NaNGuardTest do
   # here, so a guard matching only the canonical spelling would let `"inf"` straight through.
   @poison ["NaN", "nan", "-NaN", "Inf", "inf", "-Inf", "Infinity", "-Infinity"]
 
-  defp state, do: %{subscriber: self(), credentials: nil, delivering: MapSet.new()}
+  defp state,
+    do: %{subscriber: self(), credentials: nil, delivering: MapSet.new(), connected_once?: false}
 
   defp ticker(price) do
     %{
