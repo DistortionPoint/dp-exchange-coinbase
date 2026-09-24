@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.47] - 2026-09-24
+
 ### Fixed
 
 - **A retired shard's socket was never closed.** `Feed` retires a shard when the universe
