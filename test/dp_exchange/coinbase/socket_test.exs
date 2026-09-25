@@ -124,6 +124,22 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert_received {:dp_exchange, :coinbase, :reconnected, ^me}
     end
 
+    test "every connection subscribes to heartbeats, so a quiet one is not closed idle" do
+      # The venue closes a connection "within 60-90 seconds when no updates arrive"; its
+      # `heartbeats` channel keeps idle subscriptions open. See the moduledoc.
+      assert {:ok, connected} = Socket.handle_connect(%{}, state())
+      assert_received :subscribe_heartbeats
+
+      assert {:reply, {:text, raw}, _state} = Socket.handle_info(:subscribe_heartbeats, connected)
+      frame = Jason.decode!(raw)
+      assert frame == %{"type" => "subscribe", "channel" => "heartbeats"}
+      refute Map.has_key?(frame, "jwt")
+
+      # And again on a reconnect, which is a fresh session with no subscriptions.
+      assert {:ok, _again} = Socket.handle_connect(%{}, connected)
+      assert_received :subscribe_heartbeats
+    end
+
     test "connecting reports link_up" do
       assert {:ok, _state} = Socket.handle_connect(%{}, state())
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :link_up}}

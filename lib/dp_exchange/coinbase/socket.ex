@@ -97,6 +97,18 @@ defmodule DpExchange.Coinbase.Socket do
   this family's `usage-rules/feeds.md` for the full account of why those two signals
   are sufficient.
 
+  ## A quiet connection is kept open by the venue's heartbeats
+
+  The venue closes a connection "within 60-90 seconds when no updates arrive", and
+  publishes a `heartbeats` channel, needing no JWT, whose "Server pings every second so idle
+  subscriptions stay open" (its channel documentation, read 2026-09-25). This socket never
+  subscribed to it. So a shard carrying only quiet products, which a `level2` shard of
+  illiquid pairs routinely is, was closed by the venue every minute or so, reconnected,
+  resubscribed, and lost its book continuity each time, all from inactivity rather than
+  from any fault. Every connection now subscribes to `heartbeats` as soon as it is up,
+  including after a reconnect. The heartbeat frames themselves are dropped by `dispatch/2`,
+  which already had a clause for them.
+
   ## A dropped message is reported, not only a dropped connection
 
   The paragraph above treats a reconnect as the only place a gap can fall. The venue says
@@ -310,8 +322,20 @@ defmodule DpExchange.Coinbase.Socket do
     # handle. Both fire here because this one event is genuinely both.
     Telemetry.link_up(:coinbase)
     if state.connected_once?, do: report_reconnected(state)
+
+    # `handle_connect/2` cannot reply with a frame, so the heartbeat subscription goes out
+    # from `handle_info/2`, on this connection and on every reconnect. See the moduledoc's
+    # "A quiet connection is kept open by the venue's heartbeats".
+    send(self(), :subscribe_heartbeats)
     {:ok, %{state | connected_once?: true, last_seq: nil}}
   end
+
+  @impl true
+  def handle_info(:subscribe_heartbeats, state) do
+    {:reply, {:text, Jason.encode!(%{type: "subscribe", channel: "heartbeats"})}, state}
+  end
+
+  def handle_info(_message, state), do: {:ok, state}
 
   @impl true
   def handle_disconnect(%{reason: reason} = status, state) do

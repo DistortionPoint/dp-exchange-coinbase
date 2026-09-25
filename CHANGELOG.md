@@ -20,6 +20,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A quiet shard was closed by the venue every minute or so.** Coinbase closes a
+  connection "within 60-90 seconds when no updates arrive", and publishes a `heartbeats`
+  channel (no JWT) whose "Server pings every second so idle subscriptions stay open". `Socket`
+  never subscribed to it, so a shard of illiquid products, often a `level2` shard, was
+  closed from inactivity alone, reconnected and resubscribed, losing book continuity each
+  time. Every connection now subscribes to `heartbeats` as soon as it is up, including
+  after a reconnect. Break-verified: the new test fails on the previous code.
+
 ## [0.3.51] - 2026-09-25
 
 ### Fixed
