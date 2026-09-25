@@ -440,7 +440,9 @@ defmodule DpExchange.Coinbase.OrderBookTest do
                Rest.get_trades("BTC-USD", plug: responding(body), retry_attempts: 0)
 
       assert length(trades) == 2
-      assert Enum.map(trades, & &1.id) == ["t-1", "t-2"]
+      # Oldest first, by the print's own time: `t-2` is five seconds older, although the
+      # venue sent it second. See `Core.Venue`'s `get_trades` doc.
+      assert Enum.map(trades, & &1.id) == ["t-2", "t-1"]
       assert [%Types.Trade{} | _rest] = trades
     end
 

@@ -65,6 +65,25 @@ defmodule DpExchange.Coinbase.FillsTest do
     )
   end
 
+  describe "ordering" do
+    test "fills come back oldest first, whatever order the venue sent them in" do
+      # See `Core.Venue`'s `get_trade_history` doc.
+      body = %{
+        "fills" => [
+          fill(%{"trade_id" => "t-2", "trade_time" => "2026-08-31T10:00:02Z"}),
+          fill(%{"trade_id" => "t-0", "trade_time" => "2026-08-31T10:00:00Z"}),
+          fill(%{"trade_id" => "t-1", "trade_time" => "2026-08-31T10:00:01Z"})
+        ],
+        "cursor" => ""
+      }
+
+      assert {:ok, fills} =
+               Rest.get_trade_history(@credentials, plug: responding(body), retry_attempts: 0)
+
+      assert Enum.map(fills, & &1.trade_id) == ["t-0", "t-1", "t-2"]
+    end
+  end
+
   describe "the venue's own fill" do
     test "comes back as a Fill with the venue's numbers" do
       body = %{"fills" => [fill()], "cursor" => ""}

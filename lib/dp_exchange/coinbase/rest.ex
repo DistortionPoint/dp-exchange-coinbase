@@ -1308,7 +1308,8 @@ defmodule DpExchange.Coinbase.Rest do
         end
       end)
       |> case do
-        {:ok, fills} -> {:ok, Enum.reverse(fills)}
+        # Oldest first, by the venue's own time — see `Core.Venue`'s callback doc.
+        {:ok, fills} -> {:ok, fills |> Enum.reverse() |> Enum.sort_by(& &1.timestamp, DateTime)}
         error -> error
       end
     end
@@ -1695,7 +1696,8 @@ defmodule DpExchange.Coinbase.Rest do
       end
     end)
     |> case do
-      {:ok, decoded} -> {:ok, Enum.reverse(decoded)}
+      # Oldest first, by the venue's own time — see `Core.Venue`'s callback doc.
+      {:ok, decoded} -> {:ok, decoded |> Enum.reverse() |> Enum.sort_by(& &1.timestamp, DateTime)}
       error -> error
     end
   end

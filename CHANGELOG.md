@@ -20,6 +20,12 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_trades/2` and `get_trade_history/2` returned the venue's order.** They are now
+  oldest first by `:timestamp`, keeping the venue's order for equal timestamps, as
+  `Core.Venue` now documents. Break-verified: the new test fails on the previous code.
+
 ## [0.3.49] - 2026-09-25
 
 ### Fixed
