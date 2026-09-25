@@ -436,7 +436,7 @@ defmodule DpExchange.Coinbase.Rest do
         "target_portfolio_uuid" => to
       }
 
-      case post_json("/portfolios/move_funds", body, credentials, opts) do
+      case post_once("/portfolios/move_funds", body, credentials, opts) do
         {:ok, %{body: %{} = result}} -> {:ok, result}
         {:ok, _unexpected} -> {:error, :unexpected_response_shape}
         {:error, reason} -> classify(reason)
@@ -696,7 +696,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, Types.Portfolio.t()} | {:error, term()} | {:refused, term()}
   def create_portfolio(credentials, opts) do
     with {:ok, name} <- required_name(opts) do
-      case post_json("/portfolios", %{"name" => name}, credentials, opts) do
+      case post_once("/portfolios", %{"name" => name}, credentials, opts) do
         {:ok, %{body: %{"portfolio" => portfolio}}} when is_map(portfolio) ->
           to_portfolio(portfolio)
 
@@ -811,7 +811,7 @@ defmodule DpExchange.Coinbase.Rest do
       body = %{"from_account" => from, "to_account" => to}
 
       with {:ok, trade} <-
-             convert_trade(post_json("/convert/trade/#{trade_id}", body, credentials, opts)) do
+             convert_trade(post_once("/convert/trade/#{trade_id}", body, credentials, opts)) do
         to_conversion(trade, from, to)
       end
     end
@@ -1117,7 +1117,7 @@ defmodule DpExchange.Coinbase.Rest do
   def schedule_futures_sweep(credentials, opts) do
     body = put_unless_nil(%{}, "usd_amount", sweep_amount(Keyword.get(opts, :usd_amount)))
 
-    case post_json("/cfm/sweeps/schedule", body, credentials, opts) do
+    case post_once("/cfm/sweeps/schedule", body, credentials, opts) do
       {:ok, %{body: %{} = result}} -> {:ok, result}
       {:ok, _unexpected} -> {:error, :unexpected_response_shape}
       {:error, reason} -> classify(reason)
@@ -2323,6 +2323,20 @@ defmodule DpExchange.Coinbase.Rest do
   defp post_json(path, body, credentials, opts),
     do: json_request(:post, path, body, credentials, opts)
 
+  # One attempt, for a write the venue cannot tell from its own repeat. `Core.HttpClient`
+  # retries a 5xx or a transport error three times by default, and neither says whether the
+  # venue acted before it answered. A timed-out `move_funds` retried moves the funds again,
+  # and so does a retried sweep. A retried `convert/trade` commit or `orders/edit` that
+  # already took effect comes back refused, telling the caller a success failed, and a
+  # retried portfolio create leaves a duplicate. None carries an idempotency key this
+  # package can supply. `place_order/3` and `close_position/3` carry `client_order_id` and
+  # keep their retries.
+  #
+  # `put_new`, as `Prime.claim_rewards/4` does: a caller who knows how to make the request
+  # safe to repeat can still raise `:retry_attempts` deliberately.
+  defp post_once(path, body, credentials, opts),
+    do: post_json(path, body, credentials, Keyword.put_new(opts, :retry_attempts, 1))
+
   defp put_json(path, body, credentials, opts),
     do: json_request(:put, path, body, credentials, opts)
 
@@ -2787,7 +2801,7 @@ defmodule DpExchange.Coinbase.Rest do
         |> put_unless_nil("price", Map.get(changes, :price))
         |> put_unless_nil("size", Map.get(changes, :quantity))
 
-      case post_json("/orders/edit", body, credentials, opts) do
+      case post_once("/orders/edit", body, credentials, opts) do
         {:ok, %{body: response}} -> edit_result(response, order_id, credentials, opts)
         {:error, reason} -> classify(reason)
       end

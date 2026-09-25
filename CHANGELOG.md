@@ -20,6 +20,19 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Five writes the venue cannot tell from a repeat were retried.** `Core.HttpClient`
+  retries a 5xx or a transport error, and neither says whether the venue acted first.
+  `transfer_internal/4` (`move_funds`) and `schedule_futures_sweep/2` retried could move
+  the money again. `commit_conversion/3` and `replace_order/4` retried after taking effect
+  come back refused, reporting a success as a failure. `create_portfolio/2` retried leaves
+  a duplicate. None carries an idempotency key. They now go through `post_once/4`, which
+  makes one attempt unless the caller explicitly raises `:retry_attempts`, as
+  `Prime.claim_rewards/4` already did. `place_order/3` and `close_position/3` carry
+  `client_order_id` and keep their retries. Break-verified: five of the six new tests
+  fail on the previous code.
+
 ## [0.3.48] - 2026-09-24
 
 ### Documentation

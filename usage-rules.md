@@ -24,6 +24,12 @@ of two ways, and which one it is depends on what the endpoint gives it:
   key this package can add without guessing at a schema it does not own. If you know the
   venue's field for it, put it in `opts[:body]` and pass `retry_attempts:` to take the
   retries back.
+- **Portfolio moves, futures sweeps, conversion commits, order edits and portfolio
+  creates are sent once**: `transfer_internal/4`, `schedule_futures_sweep/2`,
+  `commit_conversion/3`, `replace_order/4` and `create_portfolio/2`. None has a key the
+  venue honours. Before 0.3.49 they were retried, so a timed-out move could move the funds
+  twice. A transport error on one of these means **the outcome is unknown**: read the
+  portfolio, sweep, conversion or order back before issuing it again.
 
 ## BREAKING — `Quote` and `OrderBook` no longer carry `:timestamp`
 
