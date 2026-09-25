@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.52] - 2026-09-25
+
 ### Fixed
 
 - **A quiet shard was closed by the venue every minute or so.** Coinbase closes a
