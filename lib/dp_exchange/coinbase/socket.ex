@@ -109,6 +109,24 @@ defmodule DpExchange.Coinbase.Socket do
   including after a reconnect. The heartbeat frames themselves are dropped by `dispatch/2`,
   which already had a clause for them.
 
+  ## A connection that has gone silent is closed
+
+  A network path can die without either end being told. TCP notices only when it next
+  sends, and this socket sends almost nothing once subscribed, so a half-open connection
+  stayed "connected" for as long as the operating system's own timeouts allowed, often
+  hours. It delivered nothing, reported `:link_up` from its last good moment, and was never
+  reconnected.
+
+  With `heartbeats` subscribed, the venue sends a frame every second, so silence is
+  evidence. Each connection checks every `@silence_check_every_ms` (15s). After
+  `@silence_ms` (90s) without any frame, it raises a `:degraded` notice
+  (`details.reason: :silent_connection`) and closes. The close takes the ordinary
+  `handle_disconnect/2` path: `:link_down`, reconnect, re-issue. 90s is the top of the
+  venue's own idle-close window, so if the heartbeat subscription were ever refused the
+  venue would close the connection first, and this check would never reap a healthy one.
+  The check carries this connection's ref and a stale one is not re-armed, the same rule
+  as `dp_exchange_webull`'s keep-alive ping, so reconnects cannot stack check chains.
+
   ## A dropped message is reported, not only a dropped connection
 
   The paragraph above treats a reconnect as the only place a gap can fall. The venue says
@@ -176,6 +194,11 @@ defmodule DpExchange.Coinbase.Socket do
   # See the moduledoc: chosen against `Feed`'s 15_000 ms `@call_timeout`, not inherited
   # from WebSockex's own defaults (6_000 ms connect + 5_000 ms recv).
   @socket_connect_timeout_ms 3_000
+
+  # See the moduledoc's "A connection that has gone silent is closed". The first is the top
+  # of the venue's own idle-close window; the second is how often a connection looks.
+  @silence_ms 90_000
+  @silence_check_every_ms 15_000
   @socket_recv_timeout_ms 3_000
 
   @base_reconnect_delay_ms 1_000
@@ -261,7 +284,11 @@ defmodule DpExchange.Coinbase.Socket do
       connected_once?: false,
       # The last `sequence_num` on THIS connection, `nil` until the first message. See
       # `sequenced/2`. Reset on every connect, because the venue numbers per connection.
-      last_seq: nil
+      last_seq: nil,
+      # When the last frame of any kind arrived, and the ref of this connection's silence
+      # check. See the moduledoc's "A connection that has gone silent is closed".
+      last_frame_at: nil,
+      silence_check: nil
     }
 
     opts = connection_opts(opts)
@@ -327,7 +354,17 @@ defmodule DpExchange.Coinbase.Socket do
     # from `handle_info/2`, on this connection and on every reconnect. See the moduledoc's
     # "A quiet connection is kept open by the venue's heartbeats".
     send(self(), :subscribe_heartbeats)
-    {:ok, %{state | connected_once?: true, last_seq: nil}}
+    check = make_ref()
+    schedule_silence_check(check)
+
+    {:ok,
+     %{
+       state
+       | connected_once?: true,
+         last_seq: nil,
+         last_frame_at: now_ms(),
+         silence_check: check
+     }}
   end
 
   @impl true
@@ -335,7 +372,35 @@ defmodule DpExchange.Coinbase.Socket do
     {:reply, {:text, Jason.encode!(%{type: "subscribe", channel: "heartbeats"})}, state}
   end
 
+  # This connection's own check. One whose ref is not current belongs to a connection that
+  # has since dropped, and is not re-armed, so its chain ends there.
+  def handle_info({:silence_check, check}, %{silence_check: check} = state) do
+    silent_for = now_ms() - state.last_frame_at
+
+    if silent_for >= @silence_ms do
+      notify(
+        state,
+        Notice.new(:degraded, :coinbase,
+          message:
+            "no frame, not even a heartbeat, for #{silent_for}ms — closing the connection " <>
+              "and reconnecting",
+          details: %{reason: :silent_connection, silent_for_ms: silent_for}
+        )
+      )
+
+      {:close, %{state | silence_check: nil}}
+    else
+      schedule_silence_check(check)
+      {:ok, state}
+    end
+  end
+
   def handle_info(_message, state), do: {:ok, state}
+
+  defp schedule_silence_check(check),
+    do: Process.send_after(self(), {:silence_check, check}, @silence_check_every_ms)
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   @impl true
   def handle_disconnect(%{reason: reason} = status, state) do
@@ -391,6 +456,7 @@ defmodule DpExchange.Coinbase.Socket do
     # sending", and a frame this package could not read is still a frame the venue sent.
     # Counting only what parsed would make a decoder bug here look like a silent venue.
     Telemetry.link_event(:coinbase, :frame, byte_size(payload))
+    state = %{state | last_frame_at: now_ms()}
 
     case Jason.decode(payload) do
       {:ok, decoded} -> {:ok, sequenced(decoded, state)}

@@ -27,7 +27,9 @@ defmodule DpExchange.Coinbase.NaNGuardTest do
       credentials: nil,
       delivering: MapSet.new(),
       connected_once?: false,
-      last_seq: nil
+      last_seq: nil,
+      last_frame_at: nil,
+      silence_check: nil
     }
 
   defp ticker(price) do

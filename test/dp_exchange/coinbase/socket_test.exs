@@ -15,7 +15,9 @@ defmodule DpExchange.Coinbase.SocketTest do
       credentials: nil,
       delivering: MapSet.new(),
       connected_once?: false,
-      last_seq: nil
+      last_seq: nil,
+      last_frame_at: nil,
+      silence_check: nil
     }
   end
 
@@ -138,6 +140,49 @@ defmodule DpExchange.Coinbase.SocketTest do
       # And again on a reconnect, which is a fresh session with no subscriptions.
       assert {:ok, _again} = Socket.handle_connect(%{}, connected)
       assert_received :subscribe_heartbeats
+    end
+
+    test "a connection silent past the limit says so and closes, so it reconnects" do
+      # A half-open connection used to stay "connected" for as long as the OS allowed. With
+      # a heartbeat every second, silence is evidence. See the moduledoc's "A connection
+      # that has gone silent is closed".
+      check = make_ref()
+      now = System.monotonic_time(:millisecond)
+      silent = %{state() | silence_check: check, last_frame_at: now - 100_000}
+
+      assert {:close, _state} = Socket.handle_info({:silence_check, check}, silent)
+
+      assert_received {:dp_exchange, :coinbase,
+                       %Notice{kind: :degraded, details: %{reason: :silent_connection}}}
+    end
+
+    test "a connection that heard something recently is left alone" do
+      check = make_ref()
+
+      live = %{
+        state()
+        | silence_check: check,
+          last_frame_at: System.monotonic_time(:millisecond)
+      }
+
+      assert {:ok, ^live} = Socket.handle_info({:silence_check, check}, live)
+      refute_received {:dp_exchange, :coinbase, %Notice{kind: :degraded}}
+    end
+
+    test "a check left over from an earlier connection does nothing" do
+      now = System.monotonic_time(:millisecond)
+      current = %{state() | silence_check: make_ref(), last_frame_at: now - 100_000}
+
+      assert {:ok, ^current} = Socket.handle_info({:silence_check, make_ref()}, current)
+      refute_received {:dp_exchange, :coinbase, %Notice{kind: :degraded}}
+    end
+
+    test "any frame counts as hearing from the venue" do
+      # Monotonic time can be negative, so the comparison is against the stale value.
+      long_ago = System.monotonic_time(:millisecond) - 100_000
+      stale = %{state() | last_frame_at: long_ago}
+      {:ok, heard} = Socket.handle_frame({:text, ~s({"channel":"heartbeats"})}, stale)
+      assert heard.last_frame_at > long_ago
     end
 
     test "connecting reports link_up" do

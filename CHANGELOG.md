@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A half-open connection stayed "connected" indefinitely.** When a network path dies
+  without either end being told, TCP notices only when it next sends, and a subscribed
+  socket sends almost nothing, so a dead connection delivered nothing for as long as the
+  OS timeouts allowed and was never reconnected. With `heartbeats` subscribed (0.3.52) the
+  venue sends a frame every second, so each connection now checks every 15s. After 90s
+  without any frame it raises a `:degraded` notice (`:silent_connection`) and closes,
+  taking the ordinary disconnect-and-reconnect path. 90s is the top of the venue's own
+  idle-close window, so this never reaps a healthy connection even if the heartbeat
+  subscription were refused. The check is keyed to its connection and a stale one is not
+  re-armed, so reconnects cannot stack check chains. Break-verified: two of the four new
+  tests fail on the previous code.
+
 ## [0.3.52] - 2026-09-25
 
 ### Fixed
