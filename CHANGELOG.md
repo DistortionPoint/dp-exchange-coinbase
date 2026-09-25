@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.50] - 2026-09-25
+
 ### Fixed
 
 - **`get_trades/2` and `get_trade_history/2` returned the venue's order.** They are now
