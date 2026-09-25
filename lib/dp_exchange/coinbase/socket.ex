@@ -97,6 +97,26 @@ defmodule DpExchange.Coinbase.Socket do
   this family's `usage-rules/feeds.md` for the full account of why those two signals
   are sufficient.
 
+  ## A dropped message is reported, not only a dropped connection
+
+  The paragraph above treats a reconnect as the only place a gap can fall. The venue says
+  otherwise. Every message envelope carries `sequence_num`, a "Per-connection message
+  sequence number; use it to detect dropped or out-of-order messages" (the AsyncAPI
+  schema, read 2026-09-25). The overview adds that "the WebSocket servers receive market
+  data in a manner that can result in dropped messages" although the transport is TCP, and
+  that a number lower than the previous one "can be ignored". This socket read none of it,
+  so a `level2` delta dropped mid-connection reached no one, and a consumer maintaining a
+  book kept applying deltas to one that had silently gone wrong.
+
+  `sequenced/2` now tracks the last number on this connection, reset on every connect.
+  A jump raises a `:data_quality` `Core.Notice` (`severity: :warning`,
+  `details.reason: :sequence_gap`) with how many messages were lost. That is a
+  consumer's signal to re-read the book, exactly as `:link_up` already is. A number at or
+  below the last raises one with `:out_of_order` and the message is ignored, as the venue
+  advises: a stale delta applied after newer ones would corrupt any book built from them.
+  `:sequence` on the book types stays `nil`, because this is not a book sequence. It
+  numbers every message on the connection, across channels and products.
+
   ## The connect timeouts are chosen against `Feed`'s call budget, not inherited by accident
 
   `WebSockex.start_link/4` opens a raw TCP connection and then waits for the HTTP
@@ -226,7 +246,10 @@ defmodule DpExchange.Coinbase.Socket do
       delivering: MapSet.new(),
       # Whether `handle_connect/2` has run before — so only a RE-connect is reported to
       # `Feed`. See `report_reconnected/1`.
-      connected_once?: false
+      connected_once?: false,
+      # The last `sequence_num` on THIS connection, `nil` until the first message. See
+      # `sequenced/2`. Reset on every connect, because the venue numbers per connection.
+      last_seq: nil
     }
 
     opts = connection_opts(opts)
@@ -287,7 +310,7 @@ defmodule DpExchange.Coinbase.Socket do
     # handle. Both fire here because this one event is genuinely both.
     Telemetry.link_up(:coinbase)
     if state.connected_once?, do: report_reconnected(state)
-    {:ok, %{state | connected_once?: true}}
+    {:ok, %{state | connected_once?: true, last_seq: nil}}
   end
 
   @impl true
@@ -346,7 +369,7 @@ defmodule DpExchange.Coinbase.Socket do
     Telemetry.link_event(:coinbase, :frame, byte_size(payload))
 
     case Jason.decode(payload) do
-      {:ok, decoded} -> {:ok, dispatch(decoded, state)}
+      {:ok, decoded} -> {:ok, sequenced(decoded, state)}
       # A payload that did not parse is reported, not swallowed and not fatal.
       {:error, _reason} -> {:ok, report_quality(state, payload)}
     end
@@ -713,6 +736,57 @@ defmodule DpExchange.Coinbase.Socket do
       parsed -> {:ok, parsed}
     end
   end
+
+  # The venue's `sequence_num`: "Per-connection message sequence number; use it to detect
+  # dropped or out-of-order messages" (the AsyncAPI schema for every channel's envelope,
+  # read 2026-09-25). Its overview adds that the servers "can result in dropped messages"
+  # although the transport is TCP, and that a number lower than the last "can be ignored".
+  # See the moduledoc's "A dropped message is reported, not only a dropped connection".
+  defp sequenced(%{"sequence_num" => seq} = decoded, state) when is_integer(seq) do
+    case state.last_seq do
+      nil ->
+        dispatch(decoded, %{state | last_seq: seq})
+
+      last when seq == last + 1 ->
+        dispatch(decoded, %{state | last_seq: seq})
+
+      last when seq > last + 1 ->
+        report_sequence(state, :sequence_gap, %{
+          expected: last + 1,
+          got: seq,
+          dropped: seq - last - 1
+        })
+
+        dispatch(decoded, %{state | last_seq: seq})
+
+      last ->
+        # Already superseded. Applying a stale book delta after newer ones would corrupt any
+        # book built from them, and the venue says such a message can be ignored.
+        report_sequence(state, :out_of_order, %{last: last, got: seq})
+        state
+    end
+  end
+
+  defp sequenced(decoded, state), do: dispatch(decoded, state)
+
+  defp report_sequence(state, reason, details) do
+    notify(
+      state,
+      Notice.new(:data_quality, :coinbase,
+        severity: :warning,
+        message: sequence_message(reason, details),
+        details: Map.put(details, :reason, reason)
+      )
+    )
+  end
+
+  defp sequence_message(:sequence_gap, %{dropped: dropped}),
+    do:
+      "#{dropped} message(s) dropped by the venue on this connection; a book built from " <>
+        "deltas is no longer reliable — re-read it"
+
+  defp sequence_message(:out_of_order, _details),
+    do: "a message arrived after a newer one and was ignored, as the venue advises"
 
   defp report_quality(state, detail) do
     notify(

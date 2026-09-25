@@ -14,7 +14,8 @@ defmodule DpExchange.Coinbase.SocketTest do
       subscriber: subscriber || self(),
       credentials: nil,
       delivering: MapSet.new(),
-      connected_once?: false
+      connected_once?: false,
+      last_seq: nil
     }
   end
 
@@ -151,6 +152,56 @@ defmodule DpExchange.Coinbase.SocketTest do
       Socket.handle_connect(%{}, state())
       assert_received {:dp_exchange, :coinbase, %Notice{kind: kind}}
       refute to_string(kind) =~ ~r/socket|ws|websocket/
+    end
+  end
+
+  describe "sequence_num — a dropped message is reported, not only a dropped connection" do
+    # The venue: "Per-connection message sequence number; use it to detect dropped or
+    # out-of-order messages." See the moduledoc's section of the same name.
+    defp numbered(seq), do: {:text, Jason.encode!(Map.put(@ticker, "sequence_num", seq))}
+
+    defp feed(frames, state) do
+      Enum.reduce(frames, state, fn frame, acc ->
+        {:ok, next} = Socket.handle_frame(frame, acc)
+        next
+      end)
+    end
+
+    test "consecutive numbers deliver everything and raise nothing" do
+      feed([numbered(10), numbered(11), numbered(12)], state())
+
+      for _each <- 1..3, do: assert_received({:dp_exchange, :coinbase, %Types.Quote{}})
+      refute_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+    end
+
+    test "a jump says how many messages the venue dropped, and still delivers the message" do
+      feed([numbered(10), numbered(14)], state())
+
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality} = notice}
+      assert notice.details.reason == :sequence_gap
+      assert notice.details.dropped == 3
+      assert notice.severity == :warning
+
+      for _each <- 1..2, do: assert_received({:dp_exchange, :coinbase, %Types.Quote{}})
+    end
+
+    test "a message older than the last is ignored, as the venue advises, and said so" do
+      state = feed([numbered(10), numbered(11)], state())
+      for _each <- 1..2, do: assert_received({:dp_exchange, :coinbase, %Types.Quote{}})
+
+      after_stale = feed([numbered(9)], state)
+
+      refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
+      assert_received {:dp_exchange, :coinbase, %Notice{details: %{reason: :out_of_order}}}
+      assert after_stale.last_seq == 11
+    end
+
+    test "a new connection starts its own count, so a reconnect is not reported as a gap" do
+      state = feed([numbered(500)], state())
+      {:ok, reconnected} = Socket.handle_connect(%{}, state)
+      feed([numbered(0)], reconnected)
+
+      refute_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
     end
   end
 

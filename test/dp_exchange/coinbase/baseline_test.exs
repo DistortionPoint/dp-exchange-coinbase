@@ -28,7 +28,13 @@ defmodule DpExchange.Coinbase.BaselineTest do
   @moduletag :capture_log
 
   defp state,
-    do: %{subscriber: self(), credentials: nil, delivering: MapSet.new(), connected_once?: false}
+    do: %{
+      subscriber: self(),
+      credentials: nil,
+      delivering: MapSet.new(),
+      connected_once?: false,
+      last_seq: nil
+    }
 
   defp frame(payload), do: Socket.handle_frame({:text, Jason.encode!(payload)}, state())
 

@@ -22,7 +22,13 @@ defmodule DpExchange.Coinbase.NaNGuardTest do
   @poison ["NaN", "nan", "-NaN", "Inf", "inf", "-Inf", "Infinity", "-Infinity"]
 
   defp state,
-    do: %{subscriber: self(), credentials: nil, delivering: MapSet.new(), connected_once?: false}
+    do: %{
+      subscriber: self(),
+      credentials: nil,
+      delivering: MapSet.new(),
+      connected_once?: false,
+      last_seq: nil
+    }
 
   defp ticker(price) do
     %{

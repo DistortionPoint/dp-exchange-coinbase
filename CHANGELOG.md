@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A message the venue dropped mid-connection went unreported.** Every Coinbase
+  WebSocket envelope carries `sequence_num`, which the venue's own schema describes as a
+  "Per-connection message sequence number; use it to detect dropped or out-of-order
+  messages", and its overview says the servers can drop messages although the transport is
+  TCP. `Socket` read none of it, so a dropped `level2` delta left any book built from
+  deltas silently wrong, with no notice. It now tracks the number per connection. A jump
+  raises a `:data_quality` notice (`:sequence_gap`, with how many were lost). A message
+  older than the last is ignored, as the venue advises, and reported as `:out_of_order`,
+  because a stale delta applied after newer ones corrupts a book. `usage-rules.md` says
+  to re-read the book on a gap, as on `:link_up`. Break-verified: two of the four new
+  tests fail on the previous code.
+
 ## [0.3.50] - 2026-09-25
 
 ### Fixed

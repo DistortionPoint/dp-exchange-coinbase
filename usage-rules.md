@@ -332,6 +332,14 @@ sending your subscribe frames, capping throughput and starving `ticker`.
   yourself from the stream of deltas — that is now genuinely your job, not a trap this
   package used to spring on whoever forgot to check.
 
+**A gap can open without a reconnect, and you are told when it does.** The venue numbers
+every message on a connection and says its servers can drop messages even though the
+transport is TCP. This package checks that numbering. A jump raises a `:data_quality`
+notice with `details.reason: :sequence_gap` and the number of messages lost. Treat it
+exactly as `:link_up` below: the book you built from deltas is no longer reliable, so
+re-read it. A message older than one already delivered is dropped, as the venue advises,
+with `details.reason: :out_of_order`.
+
 **Reconnect reconciliation is now your problem, and here is what to reconcile with.** A
 dropped-and-restored connection does not promise the deltas after it are contiguous with
 the deltas before it. `subscribe_notices/1`'s `:link_down` and `:link_up` bracket where a
