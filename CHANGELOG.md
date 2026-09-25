@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.49] - 2026-09-25
+
 ### Fixed
 
 - **Five writes the venue cannot tell from a repeat were retried.** `Core.HttpClient`
