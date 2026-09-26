@@ -564,7 +564,12 @@ defmodule DpExchange.Coinbase.Socket do
       else: :credentials_rejected
   end
 
-  defp deliver_ticker(%{"product_id" => product} = ticker, state, timestamp) do
+  # `is_binary/1` on `product_id` here and in `decode_book_event/3`: `SymbolFormat` raises
+  # on anything else, and a raise in a frame handler takes this whole connection down.
+  # Found by mutating real frames (2026-09-26): `"product_id": {}` or `0` crashed the socket.
+  # A non-string id now falls to the catch-all, exactly as an absent one already did.
+  defp deliver_ticker(%{"product_id" => product} = ticker, state, timestamp)
+       when is_binary(product) do
     symbol = SymbolFormat.to_canonical_symbol(product)
 
     case build_quote(ticker, symbol, timestamp) do
@@ -618,7 +623,7 @@ defmodule DpExchange.Coinbase.Socket do
          state,
          timestamp
        )
-       when is_list(rows) do
+       when is_binary(product) and is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(product)
     deliver_snapshot(state, symbol, rows, timestamp)
   end
@@ -628,7 +633,7 @@ defmodule DpExchange.Coinbase.Socket do
          state,
          timestamp
        )
-       when is_list(rows) do
+       when is_binary(product) and is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(product)
     deliver_delta(state, symbol, rows, timestamp)
   end

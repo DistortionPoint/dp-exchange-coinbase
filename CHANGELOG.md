@@ -20,6 +20,15 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A frame with a non-string `product_id` crashed the socket.** `SymbolFormat` raises on
+  anything but a string, and a raise in `handle_frame/2` takes the whole connection down,
+  so one malformed ticker or `l2_data` event cost a reconnect. Found by mutating every
+  value of real frames into wrong shapes. The ticker and both book clauses now require a
+  string id and otherwise fall to their catch-alls, as an absent id already did.
+  Break-verified: both new tests fail on the previous code.
+
 ## [0.3.53] - 2026-09-25
 
 ### Fixed

@@ -266,6 +266,34 @@ defmodule DpExchange.Coinbase.SocketTest do
     end
   end
 
+  describe "a malformed frame does not take the connection down" do
+    # Found by mutating real frames, 2026-09-26: a non-string `product_id` made
+    # `SymbolFormat` raise inside `handle_frame/2`, and a raise there drops the connection.
+    test "a ticker row whose product_id is not a string is skipped" do
+      for bad <- [0, %{}, [], true] do
+        payload =
+          update_in(@ticker["events"], fn [event] ->
+            [update_in(event["tickers"], fn [row] -> [Map.put(row, "product_id", bad)] end)]
+          end)
+
+        assert {:ok, _state} = Socket.handle_frame({:text, Jason.encode!(payload)}, state())
+        refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
+      end
+    end
+
+    test "a book event whose product_id is not a string is skipped" do
+      for type <- ["snapshot", "update"], bad <- [0, %{}] do
+        frame = %{
+          "channel" => "l2_data",
+          "timestamp" => "2026-08-28T14:53:45.649112Z",
+          "events" => [%{"type" => type, "product_id" => bad, "updates" => []}]
+        }
+
+        assert {:ok, _state} = Socket.handle_frame({:text, Jason.encode!(frame)}, state())
+      end
+    end
+  end
+
   describe "ticker payloads" do
     test "become Quotes delivered to the subscriber" do
       assert {:ok, _state} = frame(@ticker)
