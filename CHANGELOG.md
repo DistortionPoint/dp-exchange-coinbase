@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.54] - 2026-09-26
+
 ### Fixed
 
 - **A frame with a non-string `product_id` crashed the socket.** `SymbolFormat` raises on
