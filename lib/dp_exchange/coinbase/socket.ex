@@ -182,12 +182,27 @@ defmodule DpExchange.Coinbase.Socket do
   `{:error, reason}` synchronously either way, exactly as the dependency's own defaults
   did — only the margin the caller gets to work with after a slow or absent venue
   changes. A caller passing either key explicitly overrides it.
-  """
 
-  use WebSockex
+  **The two are also the whole handshake's deadline.** `socket_recv_timeout` on its own
+  bounds each `recv` of the upgrade response, not the response: every chunk restarts it.
+  So a peer that trickled the response kept `start_link/1`, and that `handle_call/3` in
+  `Feed`, waiting indefinitely. Measured 2026-09-27 against a local server sending one
+  byte every 200 ms: still connecting at 12 s. The vendored
+  `DpExchange.Coinbase.Vendor.WebSockex` ends the handshake at connect plus recv, as
+  `%WebSockex.ConnError{original: :timeout}`, on a start and on every reconnect.
+  """
 
   alias DpExchange.Coinbase.{Auth, Credentials, FrameSender, SymbolFormat}
   alias DpExchange.Core.{Config, Notice, Telemetry, Types}
+
+  # `use` and `start_link/4` go to this package's vendored fork, never the real
+  # `WebSockex`, whose `open_loop/3` has no handshake deadline and whose `websocket_loop/3`
+  # crashes on a malformed close frame. See `DpExchange.Coinbase.Vendor.WebSockex`. Aliased
+  # as `VendoredWebSockex`, never over `WebSockex`, so `WebSockex.ConnError` and the rest
+  # still name the real dependency's structs.
+  alias DpExchange.Coinbase.Vendor.WebSockex, as: VendoredWebSockex
+
+  use VendoredWebSockex
 
   require Logger
 
@@ -305,7 +320,13 @@ defmodule DpExchange.Coinbase.Socket do
     }
 
     opts = connection_opts(opts)
-    WebSockex.start_link(Config.opt(opts, :url, @endpoint), __MODULE__, state, opts)
+
+    VendoredWebSockex.start_link(
+      Config.opt(opts, :url, @endpoint),
+      __MODULE__,
+      state,
+      opts
+    )
   end
 
   # Explicit rather than inherited — see the moduledoc's budget arithmetic.

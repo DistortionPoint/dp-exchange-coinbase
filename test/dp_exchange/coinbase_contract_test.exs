@@ -10,6 +10,10 @@ defmodule DpExchange.CoinbaseContractTest do
     fake: DpExchange.Coinbase.Fake,
     symbol_format: DpExchange.Coinbase.SymbolFormat,
     sample_pairs: ~w(BTC-USD ETH-USD BTC-USDC),
+    # `lib/vendor/` is third-party code, a patched websockex fork (see
+    # `DpExchange.Coinbase.Vendor.WebSockex`). The scanning assertions are written for this
+    # family's own conventions, so they read `lib/dp_exchange` only, as Webull's do.
+    package_root: "lib/dp_exchange",
     credentials: %{
       api_key: "test-key",
       api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="

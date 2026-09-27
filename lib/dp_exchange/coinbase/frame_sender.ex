@@ -63,6 +63,9 @@ defmodule DpExchange.Coinbase.FrameSender do
   person tidying up deletes it.
   """
 
+  # The vendored fork, never the real `WebSockex` — see `DpExchange.Coinbase.Socket`.
+  alias DpExchange.Coinbase.Vendor.WebSockex, as: VendoredWebSockex
+
   require Logger
 
   @typedoc "Anything `WebSockex.send_frame/2` accepts."
@@ -76,7 +79,7 @@ defmodule DpExchange.Coinbase.FrameSender do
   """
   @spec send(pid(), frame(), String.t()) :: :ok | {:error, term()}
   def send(pid, frame, context \\ "frame") do
-    WebSockex.send_frame(pid, frame)
+    VendoredWebSockex.send_frame(pid, frame)
   catch
     # BOUNDARY: `WebSockex.send_frame/2` exits rather than returning on timeout, and that
     # exit would otherwise kill the process sending this frame. Converting it to a value
