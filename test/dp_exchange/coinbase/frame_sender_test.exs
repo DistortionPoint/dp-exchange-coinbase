@@ -83,4 +83,22 @@ defmodule DpExchange.Coinbase.FrameSenderTest do
       assert Process.alive?(self())
     end
   end
+
+  describe "a send to a socket that is gone" do
+    test "neither logs nor returns the frame, which can carry a signed JWT" do
+      dead = spawn(fn -> :ok end)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}
+
+      frame = {:text, ~s({"type":"subscribe","jwt":"SECRET-JWT-SHOULD-NOT-APPEAR"})}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:send_exit, :noproc}} = FrameSender.send(dead, frame, "subscribe")
+        end)
+
+      assert log =~ "send exited"
+      refute log =~ "SECRET-JWT"
+    end
+  end
 end

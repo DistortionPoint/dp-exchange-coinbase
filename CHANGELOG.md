@@ -20,6 +20,15 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Security
+
+- **A failed frame send no longer logs or returns the frame, which can carry a signed JWT.**
+  `send_frame/3` exits with `{reason, {module, :call, [pid, frame]}}`. `FrameSender`
+  logged that whole tuple and returned it as `{:error, {:send_exit, reason}}`. So a socket
+  that died while an authenticated `level2` or `user` subscribe was in flight put the
+  subscribe frame, and the live JWT inside it, into the logs and into the error the caller
+  reports. Only the inner reason is kept now: `{:send_exit, :noproc}`.
+
 ## [0.3.60] - 2026-09-27
 
 ### Security

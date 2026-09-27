@@ -95,8 +95,17 @@ defmodule DpExchange.Coinbase.FrameSender do
 
     # BOUNDARY: the socket is already gone. Same reasoning — the caller decides what to
     # do about it, and it can only make that decision if it is still alive.
-    :exit, reason ->
+    :exit, exit_reason ->
+      reason = without_frame(exit_reason)
       Logger.warning("[FrameSender] #{context}: send exited: #{inspect(reason)}")
       {:error, {:send_exit, reason}}
   end
+
+  # `send_frame/3` exits with `{reason, {module, :call, [pid, frame]}}`, and the frame is the
+  # message being sent. Kept, it was logged by `inspect/1` above and handed back in
+  # `{:send_exit, _}` to whoever reports it next. A subscribe frame on an authenticated
+  # channel carries a signed JWT, so a socket that died mid-send put a live credential into
+  # the logs. Only the reason is kept: `:noproc`, `:normal`, and so on.
+  defp without_frame({reason, {_module, :call, _args}}), do: reason
+  defp without_frame(reason), do: reason
 end
