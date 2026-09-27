@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.55] - 2026-09-27
+
 ### Fixed
 
 - **One bogus `sequence_num` dropped every message after it until the next reconnect.**
