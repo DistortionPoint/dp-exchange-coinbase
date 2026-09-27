@@ -493,8 +493,6 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   matching the venue's JSON does not, and was relying on something the contract never
   offered.
 
-### Fixed
-
 - **A venue timestamp outside the epoch range raised out of the decoder, and zero quietly
   became 1970.** The time helpers used `DateTime.from_unix!/2`, which handles neither case.
 
@@ -660,6 +658,7 @@ pipeline no longer produces the gap.
   A consumer matching only `{:ok, _}` needs no change. One that enumerates error reasons now
   has them, each with whether retrying is worth anything — which is the part that decides
   what a caller does next, and the part a bare list of atoms would leave out.
+
 ## [0.3.21] - 2026-09-12
 
 ### Fixed
@@ -958,6 +957,7 @@ pipeline no longer produces the gap.
   *above* the ceiling can never be satisfied however long you wait; a weight *at* the ceiling
   succeeds from a fresh one. Together they pin the ceiling exactly, which is what the test
   meant to assert all along. Twelve consecutive `--cover` runs clean.
+
 ## [0.3.10] - 2026-09-11
 
 ### Added
@@ -996,6 +996,7 @@ pipeline no longer produces the gap.
 
   No vendor drift: every cited documentation source resolves exactly as recorded, and the
   committed endpoint inventories match the vendors' current indexes.
+
 ## [0.3.9] - 2026-09-11
 
 ### Changed
