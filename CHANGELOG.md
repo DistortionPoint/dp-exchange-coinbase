@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.61] - 2026-09-27
+
 ### Security
 
 - **A failed frame send no longer logs or returns the frame, which can carry a signed JWT.**
