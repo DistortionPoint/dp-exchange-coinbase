@@ -338,7 +338,10 @@ transport is TCP. This package checks that numbering. A jump raises a `:data_qua
 notice with `details.reason: :sequence_gap` and the number of messages lost. Treat it
 exactly as `:link_up` below: the book you built from deltas is no longer reliable, so
 re-read it. A message older than one already delivered is dropped, as the venue advises,
-with `details.reason: :out_of_order`.
+with `details.reason: :out_of_order`. If several such messages arrive in a row, counting up
+one at a time, the baseline this package held was wrong, not the messages. It adopts the
+venue's numbering, says so once with `details.reason: :sequence_reset`, and delivers
+again. Treat that like a gap: re-read the book.
 
 **Reconnect reconciliation is now your problem, and here is what to reconcile with.** A
 dropped-and-restored connection does not promise the deltas after it are contiguous with

@@ -147,6 +147,12 @@ defmodule DpExchange.Coinbase.Socket do
   `:sequence` on the book types stays `nil`, because this is not a book sequence. It
   numbers every message on the connection, across channels and products.
 
+  A late message is dropped, but a wrong baseline must not drop everything. One bogus high
+  number used to make every genuine message after it "late", until the next reconnect. So
+  when `@stale_run_to_rebase` (5) late messages arrive in a row, each exactly one above
+  the last, the baseline is taken to be wrong. The stream's numbering is adopted, and one
+  `:data_quality` notice with `details.reason: :sequence_reset` says so. See `stale/4`.
+
   ## The connect timeouts are chosen against `Feed`'s call budget, not inherited by accident
 
   `WebSockex.start_link/4` opens a raw TCP connection and then waits for the HTTP
@@ -198,6 +204,10 @@ defmodule DpExchange.Coinbase.Socket do
   # See the moduledoc's "A connection that has gone silent is closed". The first is the top
   # of the venue's own idle-close window; the second is how often a connection looks.
   @silence_ms 90_000
+
+  # Consecutive, one-apart "stale" messages that mean the baseline, not the messages, is
+  # wrong. See `stale/4`.
+  @stale_run_to_rebase 5
   @silence_check_every_ms 15_000
   @socket_recv_timeout_ms 3_000
 
@@ -285,6 +295,9 @@ defmodule DpExchange.Coinbase.Socket do
       # The last `sequence_num` on THIS connection, `nil` until the first message. See
       # `sequenced/2`. Reset on every connect, because the venue numbers per connection.
       last_seq: nil,
+      # `{last stale seq, run length}` while stale messages arrive in a consecutive run, else
+      # `nil`. See `stale/4` on why a run of them re-bases the sequence.
+      stale_run: nil,
       # When the last frame of any kind arrived, and the ref of this connection's silence
       # check. See the moduledoc's "A connection that has gone silent is closed".
       last_frame_at: nil,
@@ -362,6 +375,7 @@ defmodule DpExchange.Coinbase.Socket do
        state
        | connected_once?: true,
          last_seq: nil,
+         stale_run: nil,
          last_frame_at: now_ms(),
          silence_check: check
      }}
@@ -840,10 +854,10 @@ defmodule DpExchange.Coinbase.Socket do
   defp sequenced(%{"sequence_num" => seq} = decoded, state) when is_integer(seq) do
     case state.last_seq do
       nil ->
-        dispatch(decoded, %{state | last_seq: seq})
+        dispatch(decoded, %{state | last_seq: seq, stale_run: nil})
 
       last when seq == last + 1 ->
-        dispatch(decoded, %{state | last_seq: seq})
+        dispatch(decoded, %{state | last_seq: seq, stale_run: nil})
 
       last when seq > last + 1 ->
         report_sequence(state, :sequence_gap, %{
@@ -852,17 +866,41 @@ defmodule DpExchange.Coinbase.Socket do
           dropped: seq - last - 1
         })
 
-        dispatch(decoded, %{state | last_seq: seq})
+        dispatch(decoded, %{state | last_seq: seq, stale_run: nil})
 
       last ->
-        # Already superseded. Applying a stale book delta after newer ones would corrupt any
-        # book built from them, and the venue says such a message can be ignored.
-        report_sequence(state, :out_of_order, %{last: last, got: seq})
-        state
+        stale(decoded, seq, last, state)
     end
   end
 
   defp sequenced(decoded, state), do: dispatch(decoded, state)
+
+  # An older number than the last. Normally a late message: ignored, as the venue advises,
+  # because applying a stale book delta after newer ones would corrupt any book built from
+  # them.
+  #
+  # **But one bogus high number made every genuine message after it "stale"**, dropping all
+  # of them until the next reconnect: measured 2026-09-26, 100 of the next 100 dropped. A
+  # genuine stream below a wrong baseline still counts up one at a time, which late
+  # messages do not. So once `@stale_run_to_rebase` stale messages arrive, each exactly one
+  # above the last, the baseline is taken to be wrong. The stream's own numbering is
+  # adopted, one `:sequence_reset` notice says so (a book built from deltas should be
+  # re-read, as after any gap), and delivery resumes.
+  defp stale(decoded, seq, last, state) do
+    run =
+      case state.stale_run do
+        {previous, count} when seq == previous + 1 -> count + 1
+        _new_run -> 1
+      end
+
+    if run >= @stale_run_to_rebase do
+      report_sequence(state, :sequence_reset, %{last: last, got: seq})
+      dispatch(decoded, %{state | last_seq: seq, stale_run: nil})
+    else
+      report_sequence(state, :out_of_order, %{last: last, got: seq})
+      %{state | stale_run: {seq, run}}
+    end
+  end
 
   defp report_sequence(state, reason, details) do
     notify(
@@ -879,6 +917,11 @@ defmodule DpExchange.Coinbase.Socket do
     do:
       "#{dropped} message(s) dropped by the venue on this connection; a book built from " <>
         "deltas is no longer reliable — re-read it"
+
+  defp sequence_message(:sequence_reset, %{got: got}),
+    do:
+      "the venue's numbering is continuing from #{got}, below this connection's last; " <>
+        "adopting it — a book built from deltas should be re-read"
 
   defp sequence_message(:out_of_order, _details),
     do: "a message arrived after a newer one and was ignored, as the venue advises"

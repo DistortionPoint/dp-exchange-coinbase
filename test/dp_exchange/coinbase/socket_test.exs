@@ -16,6 +16,7 @@ defmodule DpExchange.Coinbase.SocketTest do
       delivering: MapSet.new(),
       connected_once?: false,
       last_seq: nil,
+      stale_run: nil,
       last_frame_at: nil,
       silence_check: nil
     }
@@ -263,6 +264,32 @@ defmodule DpExchange.Coinbase.SocketTest do
       feed([numbered(0)], reconnected)
 
       refute_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+    end
+
+    test "one bogus high number does not drop every message after it" do
+      # A genuine stream below a wrong baseline counts up one at a time. After a short run of
+      # that the baseline is re-based, said once, and delivery resumes. It used to drop every
+      # message until the next reconnect. See `Socket.stale/4`.
+      state = feed([numbered(1), numbered(9_999_999)], state())
+      drain = fn drain -> receive do: (_msg -> drain.(drain)), after: (0 -> :ok) end
+      drain.(drain)
+
+      after_run = feed(for(seq <- 2..12, do: numbered(seq)), state)
+
+      assert_received {:dp_exchange, :coinbase, %Notice{details: %{reason: :sequence_reset}}}
+      assert after_run.last_seq == 12
+
+      quotes = for {:dp_exchange, :coinbase, %Types.Quote{}} <- collect([]), do: :quote
+      # 2..5 are dropped as late while the run builds; 6..12 are delivered.
+      assert length(quotes) == 7
+    end
+  end
+
+  defp collect(acc) do
+    receive do
+      msg -> collect([msg | acc])
+    after
+      0 -> acc
     end
   end
 

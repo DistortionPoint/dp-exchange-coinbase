@@ -28,6 +28,7 @@ defmodule DpExchange.Coinbase.NaNGuardTest do
       delivering: MapSet.new(),
       connected_once?: false,
       last_seq: nil,
+      stale_run: nil,
       last_frame_at: nil,
       silence_check: nil
     }

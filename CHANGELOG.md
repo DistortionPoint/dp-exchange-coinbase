@@ -20,6 +20,18 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **One bogus `sequence_num` dropped every message after it until the next reconnect.**
+  The sequence check added in 0.3.51 ignores a message numbered at or below the last, as
+  the venue advises for late messages. So after one wrongly high number, every genuine
+  message was "late": measured at 100 of the next 100 dropped, each with its own notice.
+  A genuine stream below a wrong baseline still counts up one at a time, which late
+  messages do not. Five stale messages in a row, each one above the last, now re-base the
+  sequence, with one `:sequence_reset` notice, and delivery resumes (99 of 103 delivered
+  in the same scenario). A single late message is still dropped. Break-verified: the new
+  test fails on the previous code.
+
 ## [0.3.54] - 2026-09-26
 
 ### Fixed
