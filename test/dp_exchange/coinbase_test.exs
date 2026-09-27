@@ -746,4 +746,39 @@ defmodule DpExchange.CoinbaseTest do
                Coinbase.replace_order(@creds, "abc", %{side: :sell}, retry_attempts: 0)
     end
   end
+
+  describe "a streaming call answers rather than exiting the caller" do
+    # Every streaming callback's spec is a value. A bare `GenServer.call/3` into the feed
+    # exited the caller instead: `:noproc` with no feed running, `:timeout` with a busy one.
+    # A `:timeout` needs the feed's full call budget to observe, so a feed that exits mid-call
+    # stands in for it here. Both go through the same `catch`.
+    test "with no feed running" do
+      opts = [feed: :"absent_feed_#{System.unique_integer([:positive])}"]
+
+      assert DpExchange.Coinbase.subscribe(["BTC-USD"], opts) == {:error, :feed_not_started}
+      assert DpExchange.Coinbase.unsubscribe(["BTC-USD"], opts) == :ok
+      assert DpExchange.Coinbase.update_symbols(["BTC-USD"], opts) == {:error, :feed_not_started}
+      assert DpExchange.Coinbase.subscribe_notices(opts) == {:error, :feed_not_started}
+      assert DpExchange.Coinbase.coverage(opts) == %{}
+    end
+
+    test "with a feed that exits while answering" do
+      name = :"dying_feed_#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      spawn(fn ->
+        Process.register(self(), name)
+        send(test_pid, :registered)
+
+        receive do
+          {:"$gen_call", _from, _request} -> exit(:boom)
+        end
+      end)
+
+      assert_receive :registered
+
+      assert DpExchange.Coinbase.subscribe(["BTC-USD"], feed: name) ==
+               {:error, {:feed_exited, :boom}}
+    end
+  end
 end
