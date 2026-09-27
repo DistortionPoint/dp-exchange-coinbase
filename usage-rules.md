@@ -104,6 +104,26 @@ Running two — two credentials, two scopes — needs distinct names:
  {DpExchange.Coinbase, name: :cb_b, feed: :cb_b_feed, limiter: :cb_b_limiter}]
 ```
 
+## A connect that never finishes ends at a deadline, and a malformed close frame is a reconnect
+
+Two things this package's socket does that the `websockex` library it is built on does not.
+Both come from a private, patched fork of websockex 0.5.1's process loop,
+``DpExchange.Coinbase.Vendor.WebSockex``, carried from `dp_exchange_webull` on 2026-09-27.
+
+- **The opening handshake has a deadline**: `socket_connect_timeout` plus
+  `socket_recv_timeout`. Upstream bounds each read of the upgrade response separately, so
+  a peer that trickled the response held a connect open indefinitely. A connect that
+  misses the deadline now fails with `%WebSockex.ConnError{original: :timeout}`, the same
+  error a plain read timeout gives. On a reconnect, that means backoff and another try, not
+  a socket stuck connecting.
+- **A close frame with an invalid status code disconnects.** Upstream raised on it and
+  crashed the socket before its reconnect logic ran. It now produces an ordinary
+  `:link_down` and reconnect.
+
+**This package depends on `{:websockex, "== 0.5.1"}` exactly.** The fork calls that
+release's internals. If your application pins a different websockex version, dependency
+resolution will fail, so resolve to 0.5.1.
+
 ## A shard's socket crash costs one shard, never your whole subscription
 
 Each `level2`/`ticker` shard runs on its own socket, and that socket is a **linked**
