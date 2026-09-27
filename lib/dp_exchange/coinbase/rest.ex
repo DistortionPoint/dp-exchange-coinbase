@@ -231,11 +231,25 @@ defmodule DpExchange.Coinbase.Rest do
     path = if credentials, do: "/products", else: "/market/products"
 
     case request(:get, path, credentials, opts) do
-      {:ok, %{body: %{"products" => products}}} when is_list(products) -> {:ok, products}
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+      {:ok, %{body: %{"products" => products}}} when is_list(products) ->
+        {:ok, Enum.filter(products, &named_product?/1)}
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_response_shape}
+
+      {:error, reason} ->
+        classify(reason)
     end
   end
+
+  # A catalogue row that names no product is skipped, never raised on. It used to reach
+  # `SymbolFormat.to_canonical_symbol/1` as whatever was there — `nil`, a map, a list — and
+  # raise out of all four catalogue calls, so one malformed row among hundreds took the whole
+  # catalogue with it. A REST mutation fuzz (2026-09-27) found it. A row that names nothing
+  # cannot be traded, subscribed or aliased, so leaving it out drops no instrument anyone
+  # could reach, and `Robinhood`'s catalogue made the same call on 2026-09-26.
+  defp named_product?(%{"product_id" => product_id}) when is_binary(product_id), do: true
+  defp named_product?(_unnamed), do: false
 
   defp market_overview_row(product) do
     symbol = SymbolFormat.to_canonical_symbol(product["product_id"])
@@ -569,13 +583,14 @@ defmodule DpExchange.Coinbase.Rest do
         "total_fees" => summary["total_fees"]
       }
 
-      rows =
-        summary
-        |> Map.get("volume_breakdown", [])
-        |> List.wrap()
-        |> Enum.map(&Map.merge(&1, totals))
+      rows = summary |> Map.get("volume_breakdown", []) |> List.wrap()
 
-      {:ok, rows}
+      # A breakdown row that is not an object is refused, not merged into: `Map.merge/2`
+      # raised on it (REST fuzz, 2026-09-27). Dropping it would leave a volume band out of
+      # what reads as the account's whole breakdown.
+      if Enum.all?(rows, &is_map/1),
+        do: {:ok, Enum.map(rows, &Map.merge(&1, totals))},
+        else: {:error, :unexpected_response_shape}
     end
   end
 
@@ -649,6 +664,8 @@ defmodule DpExchange.Coinbase.Rest do
   # family, so that check never ran. A portfolio with no id names nothing: every later call
   # that takes a `portfolio_uuid` has no value to pass, and a caller holding one cannot tell
   # it apart from a portfolio that simply has not been fetched yet.
+  defp to_portfolio(row) when not is_map(row), do: {:error, :unexpected_response_shape}
+
   defp to_portfolio(row) do
     with {:ok, id} <- required_id(row["uuid"], :id) do
       {:ok,
@@ -994,7 +1011,7 @@ defmodule DpExchange.Coinbase.Rest do
   # `symbol` has no such reading. A position naming no instrument cannot be sized, closed or
   # reconciled by anyone — it is not a weaker claim about what is held, it is not a claim at
   # all — and unlike a side or a size there is no "the venue declined to say" case for it.
-  defp to_position(row) do
+  defp to_position(%{} = row) do
     with {:ok, symbol} <- required_position_field(row["product_id"], :symbol) do
       {:ok,
        position_struct(
@@ -1005,6 +1022,10 @@ defmodule DpExchange.Coinbase.Rest do
        )}
     end
   end
+
+  # A row that is not an object at all used to raise out of `row["product_id"]`. It is the
+  # same unreadable row as one with no product, and refuses the reply the same way.
+  defp to_position(_not_a_row), do: {:error, :unexpected_response_shape}
 
   # One unreadable row refuses the whole reply rather than leaving a gap in it. A position
   # list with an entry silently missing reads as "you hold none of that instrument", which is
@@ -1225,6 +1246,9 @@ defmodule DpExchange.Coinbase.Rest do
   # honestly be `nil` while `:currency` may not, and cites this venue's derivation as the
   # reason: an unknown total is a real answer with a real `available_balance` beside it, an
   # unattributable row is not an answer at all.
+  defp to_balance(account, _asked_at) when not is_map(account),
+    do: {:error, :unexpected_response_shape}
+
   defp to_balance(account, asked_at) do
     available = amount(account["available_balance"])
     hold = amount(account["hold"])
@@ -1300,7 +1324,9 @@ defmodule DpExchange.Coinbase.Rest do
 
     with {:ok, rows} <- all_fills(credentials, opts, nil, [], 0) do
       rows
-      |> Enum.filter(&(&1["trade_type"] in wanted))
+      # A row that is not an object is kept so `to_fill/1` can refuse it. Filtering it out
+      # here would drop it silently, and a fill history with a gap is a truncated one.
+      |> Enum.filter(&(not is_map(&1) or &1["trade_type"] in wanted))
       |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
         case to_fill(row) do
           {:ok, fill} -> {:cont, {:ok, [fill | acc]}}
@@ -1374,6 +1400,8 @@ defmodule DpExchange.Coinbase.Rest do
   #
   # `parse_time/1` already guarded the timestamp for exactly this reason. These two are the
   # same argument applied to the other two fields that carry the execution itself.
+  defp to_fill(row) when not is_map(row), do: {:error, :unexpected_response_shape}
+
   defp to_fill(row) do
     with {:ok, timestamp} <- parse_time(row["trade_time"]),
          {:ok, quantity} <- required_decimal(row["size"], :quantity),
@@ -1630,7 +1658,7 @@ defmodule DpExchange.Coinbase.Rest do
   # Measured 2026-08-28: **both endpoints return the trades shape.** Either the public
   # response changed or the assumption was never right; the branch is gone either way,
   # because two formatters for one shape is a second place to be wrong about the venue.
-  defp to_quote(%{"trades" => [trade | _rest]} = _body, symbol) do
+  defp to_quote(%{"trades" => [trade | _rest]} = _body, symbol) when is_map(trade) do
     with {:ok, at} <- parse_time(trade["time"]),
          {:ok, price} <- required_decimal(trade["price"], :price) do
       {:ok,
@@ -1712,6 +1740,8 @@ defmodule DpExchange.Coinbase.Rest do
   # `""`, which passes every `nil` check a consumer might write while identifying nothing.
   # `dp_exchange_gemini` carried exactly that substitution in its own `to_trade/2`, which is
   # what prompted checking this one.
+  defp to_trade(trade, _symbol) when not is_map(trade), do: {:error, :unexpected_response_shape}
+
   defp to_trade(trade, symbol) do
     with {:ok, at} <- parse_time(trade["time"]),
          {:ok, id} <- required_trade_id(trade["trade_id"]),
@@ -1801,7 +1831,7 @@ defmodule DpExchange.Coinbase.Rest do
       observed_at = DateTime.utc_now()
 
       case request(:get, "/best_bid_ask", credentials, opts, %{"product_ids" => native}) do
-        {:ok, %{body: %{"pricebooks" => [pricebook | _rest]}}} ->
+        {:ok, %{body: %{"pricebooks" => [pricebook | _rest]}}} when is_map(pricebook) ->
           build_top_of_book(native, pricebook, observed_at)
 
         # NOT a refusal — see the moduledoc's "An empty `pricebooks` array is silence, not
@@ -1895,9 +1925,14 @@ defmodule DpExchange.Coinbase.Rest do
     path = if credentials, do: "/product_book", else: "/market/product_book"
 
     case request(:get, path, credentials, opts, params) do
-      {:ok, %{body: %{"pricebook" => pricebook}}} -> build_order_book(native, pricebook)
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+      {:ok, %{body: %{"pricebook" => pricebook}}} when is_map(pricebook) ->
+        build_order_book(native, pricebook)
+
+      {:ok, _unexpected} ->
+        {:error, :unexpected_response_shape}
+
+      {:error, reason} ->
+        classify(reason)
     end
   end
 
@@ -1970,6 +2005,9 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp to_candles(_body, _symbol, _timeframe), do: {:error, :unexpected_response_shape}
+
+  defp to_candle(candle, _symbol, _timeframe) when not is_map(candle),
+    do: {:error, :unexpected_response_shape}
 
   defp to_candle(candle, symbol, timeframe) do
     with {:ok, opened_at} <- candle_start(candle["start"]),
@@ -2089,7 +2127,11 @@ defmodule DpExchange.Coinbase.Rest do
   defp required_id(nil, field), do: {:error, {:missing_required_field, field}}
   defp required_id("", field), do: {:error, {:missing_required_field, field}}
   defp required_id(value, _field) when is_binary(value), do: {:ok, value}
-  defp required_id(value, _field), do: {:ok, to_string(value)}
+  defp required_id(value, _field) when is_integer(value), do: {:ok, Integer.to_string(value)}
+
+  # A map or a list is not an id, and `to_string/1` raised on it out of
+  # `get_trade_history/2`. A float is not one either: `1.0e18` is not the order it names.
+  defp required_id(_value, _field), do: {:error, :unexpected_response_shape}
 
   # An unmappable product id is refused rather than carried as `nil`. A fill whose symbol is
   # `nil` reconciles against nothing, and `canonical_or_nil/1` was answering `nil` for an
@@ -2293,7 +2335,7 @@ defmodule DpExchange.Coinbase.Rest do
   defp to_placed_order(%{"success" => true, "success_response" => success}, request) do
     {:ok,
      %Types.Order{
-       id: success["order_id"],
+       id: success_order_id(success),
        symbol: Map.fetch!(request, :symbol),
        side: Map.fetch!(request, :side),
        order_type: Map.get(request, :order_type, :limit),
@@ -2415,7 +2457,8 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp cancel_result(%{"results" => results}, order_id) when is_list(results) do
-    case Enum.find(results, &(&1["order_id"] == order_id)) do
+    # A row that is not an object cannot be about this order; it used to raise here.
+    case Enum.find(results, &(is_map(&1) and &1["order_id"] == order_id)) do
       %{"success" => true} -> {:ok, :cancelled}
       %{"failure_reason" => reason} -> {:refused, {:cancel_rejected, reason}}
       # The venue answered about orders, and none of them was the one asked about. That is
@@ -2437,7 +2480,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
   def get_order(credentials, order_id, opts) do
     case request(:get, "/orders/historical/#{order_id}", credentials, opts) do
-      {:ok, %{body: %{"order" => order}}} -> {:ok, to_order(order)}
+      {:ok, %{body: %{"order" => order}}} when is_map(order) -> {:ok, to_order(order)}
       {:ok, %{body: _other}} -> {:error, :unexpected_response_shape}
       {:error, reason} -> classify(reason)
     end
@@ -2467,7 +2510,12 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, [Types.Order.t()]} | {:error, term()} | {:refused, term()}
   def get_orders(credentials, opts) do
     with {:ok, orders} <- all_orders(credentials, opts, nil, [], 0) do
-      {:ok, Enum.map(orders, &to_order/1)}
+      # A row that is not an object refuses the whole list. It used to raise out of
+      # `to_order/1`; skipping it instead would hand back the truncated order list this
+      # function's doc already names as the wrong shape.
+      if Enum.all?(orders, &is_map/1),
+        do: {:ok, Enum.map(orders, &to_order/1)},
+        else: {:error, :unexpected_response_shape}
     end
   end
 
@@ -2566,8 +2614,14 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp quantity_from_configuration(_absent), do: nil
 
-  defp canonical_or_nil(nil), do: nil
-  defp canonical_or_nil(native), do: SymbolFormat.to_canonical_symbol(native)
+  # Only a string is a product id. Anything else used to reach
+  # `SymbolFormat.to_canonical_symbol/1` and raise out of `get_order/3`, `get_orders/2` and
+  # `get_trade_history/2`; it is now the same absent symbol as `nil`, which `to_order/1`
+  # carries as `nil` and `required_symbol/1` refuses.
+  defp canonical_or_nil(native) when is_binary(native),
+    do: SymbolFormat.to_canonical_symbol(native)
+
+  defp canonical_or_nil(_absent), do: nil
 
   defp side_atom("BUY"), do: :buy
   defp side_atom("SELL"), do: :sell
@@ -2738,6 +2792,14 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  # `success: true` means the venue placed an order, so an unreadable `success_response`
+  # must not become an error: a caller reading `{:error, _}` would believe nothing was placed
+  # and act on that, with a live order at the venue. It used to raise instead, which told the
+  # caller the same wrong thing. The id is `nil` — exactly what an omitted `order_id` already
+  # produced — so the order is reported as accepted and unidentified, which is what is known.
+  defp success_order_id(%{"order_id" => id}), do: id
+  defp success_order_id(_unreadable), do: nil
+
   defp to_closing_order(%{"success" => true, "success_response" => success} = response, symbol) do
     # The venue echoes the order it placed in `order_configuration`, which is the only
     # statement of what this order *is* — the caller never said. Read from there rather
@@ -2746,7 +2808,7 @@ defmodule DpExchange.Coinbase.Rest do
 
     {:ok,
      %Types.Order{
-       id: success["order_id"],
+       id: success_order_id(success),
        symbol: symbol,
        # **Not inferred.** A closing order's side is the opposite of the position's, and
        # this package never read the position — the venue did. Filling in `:sell` because

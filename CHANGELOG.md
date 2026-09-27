@@ -20,6 +20,33 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A REST response carrying a value of the wrong type no longer raises in the caller's
+  process.** A mutation fuzz (2026-09-27) replaced every nested value of real response
+  bodies with the wrong shape (`nil`, `true`, `[]`, `[%{}]`, a map, a string, numbers
+  outside every range), one value at a time, across 29 endpoints. 255 of those mutations
+  raised. Now each gets an answer that follows its endpoint's existing policy:
+  - A list row that is not an object refuses the whole reply with
+    `{:error, :unexpected_response_shape}`. This covers balances, positions, fills,
+    candles, trades, the ticker, orders, portfolios and the trade-volume breakdown. Skipping
+    the row would return a list with a silent gap in it.
+  - The same applies to a non-object `order`, `pricebook` or `pricebooks` entry.
+  - In the product catalogue (`get_symbols/1`, `list_instruments/1`,
+    `get_market_overview/1`, `get_alias_map/1`), a row with no string `product_id` is
+    skipped. A row that names no product cannot be traded or subscribed, so skipping it
+    removes nothing a caller could use. Before, one bad row among hundreds took down the
+    whole catalogue.
+  - A fill whose `order_id` is a map or a list is refused, where before it was passed to
+    `to_string/1` and raised. A fill whose `product_id` is not a string is refused as a
+    missing symbol. On an order, a `product_id` that is not a string gives `symbol: nil`.
+  - `place_order/3` and `close_position/3` handle `success: true` with an unreadable
+    `success_response` the same way as an omitted `order_id`: the order is reported as
+    accepted with `id: nil`. It is not reported as an error, because the order is live
+    at the venue.
+  - A `cancel_order/3` result row that is not an object is not treated as a result for
+    the order that was asked about.
+
 ## [0.3.56] - 2026-09-27
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
