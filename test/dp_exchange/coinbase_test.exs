@@ -781,4 +781,17 @@ defmodule DpExchange.CoinbaseTest do
                {:error, {:feed_exited, :boom}}
     end
   end
+
+  describe "symbols are upper-cased on the way in" do
+    # `Feed` drops a payload for a symbol it does not want, and the venue delivers `BTC-USD`,
+    # so a `btc-usd` subscription left untouched would receive nothing at all.
+    test "a lower-case symbol is wanted under its canonical form" do
+      name = :"case_feed_#{System.unique_integer([:positive])}"
+      {:ok, _pid} = DpExchange.Coinbase.Feed.start_link(name: name, subscriber: self())
+
+      Coinbase.update_symbols(["btc-usd"], feed: name)
+
+      assert MapSet.member?(:sys.get_state(name).wanted, "BTC-USD")
+    end
+  end
 end
