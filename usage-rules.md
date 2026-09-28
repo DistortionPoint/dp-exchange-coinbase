@@ -561,7 +561,7 @@ Every new socket this package opens — either channel — takes the next tick o
 spacing, so several shards do not connect in the same instant: opening more than one
 connection at once is a connect burst Coinbase answers with resets (see this file's
 `level2` sections above and `feed.ex`'s own moduledoc for the measured incidents behind
-that). The same spacing now also staggers `reconcile_shard/7`'s frames when one
+that). The same spacing now also staggers the subscription changes sent when one
 `update_symbols/2` call touches several already-open shards at once, not only when
 opening a brand-new one.
 

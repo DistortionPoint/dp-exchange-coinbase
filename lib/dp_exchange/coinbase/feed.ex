@@ -290,8 +290,8 @@ defmodule DpExchange.Coinbase.Feed do
   long-lived sockets were exactly the case that distinction mattered for.
 
   **The code was checked, not guessed, while the answer was still unknown.**
-  `reconcile_shard/7` — reached from `reshard/1` whenever `subscribe/3`, `unsubscribe/2` or
-  `update_symbols/2` changed a shard `Feed` already had a socket open for — computed
+  `reconcile_shard_in_place/8` — reached from `reshard/1` whenever `subscribe/3`,
+  `unsubscribe/2` or `update_symbols/2` changed a shard `Feed` already had a socket open for —
   `added = wanted -- current` and sent exactly those newly-added symbols to
   `Socket.subscribe/4` on the same already-open socket, never a fresh one.
   `wanted_symbols` per shard is always `≤ @level2_pairs_per_socket` by construction, so no
@@ -351,7 +351,7 @@ defmodule DpExchange.Coinbase.Feed do
   ## Unsubscribe before subscribe — what replaced socket replacement
 
   Socket replacement bought a guarantee this package no longer needs to buy that way.
-  `reconcile_shard/7`'s `"level2"` clause is gone; every shard, either channel, now
+  `reconcile_shard_in_place/8`'s `"level2"` clause is gone; every shard, either channel, now
   reconciles on its EXISTING socket through one function, `reconcile_shard_in_place/7` —
   the mechanism `ticker` already used, since it never had a ceiling to protect against in
   the first place. For a shard whose membership changes, `removed` is unsubscribed and
@@ -773,7 +773,7 @@ defmodule DpExchange.Coinbase.Feed do
   comes from, and how a consumer can change it.
 
   **This staggering has to reach an already-open shard too, not only a brand-new
-  connection.** `reconcile_shard/7` used to receive the same `delay` `reshard/1` computes
+  connection.** `reconcile_shard_in_place/8` used to receive the same `delay` `reshard/1` computes
   for it and drop it on the floor — every already-open shard `update_symbols/2` touches in
   one call had its `level2` subscribe scheduled at the identical instant. That is not the
   connect burst above (no new socket opens), but it is a related hazard: `Socket.
@@ -781,7 +781,7 @@ defmodule DpExchange.Coinbase.Feed do
   5s window — for as long as its target socket takes to acknowledge, and several such
   messages landing in this process's own mailbox together serialise into back-to-back
   blocking sends, stalling `coverage/1` and every other call to this `Feed` for as long as
-  the slowest one takes. Fixed the same way: `delay` now reaches `reconcile_shard/7` and
+  the slowest one takes. Fixed the same way: `delay` now reaches `reconcile_shard_in_place/8` and
   staggers its frames exactly as it already staggered a new shard's.
 
   ## `shard_spacing_ms` — a supervision option, so a test does not have to wait out a
@@ -2309,7 +2309,7 @@ defmodule DpExchange.Coinbase.Feed do
     # reach the venue as an unsubscribe on every symbol the shard was carrying, or the
     # venue keeps streaming them while this package's own bookkeeping has already
     # forgotten it asked to. Folded into `new_shards` as an explicit empty entry so
-    # `reconcile_shard/7`'s ordinary removed-symbols path handles it — the same
+    # `reconcile_shard_in_place/8`'s ordinary removed-symbols path handles it — the same
     # operation, not a special case.
     vanishing_keys = existing_keys -- wanted_keys
     new_shards = Enum.reduce(vanishing_keys, new_shards, &Map.put(&2, &1, []))
