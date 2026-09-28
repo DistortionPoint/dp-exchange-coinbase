@@ -295,20 +295,31 @@ defmodule DpExchange.Coinbase.Prime do
   defp post(path, body, credentials: credentials, opts: opts) do
     encoded = Jason.encode!(body)
 
-    with {:ok, headers} <- headers(:post, path, encoded, credentials) do
-      :post
-      |> HttpClient.request(@base_url <> @api_path <> path, headers, encoded, request_opts(opts))
-      |> unwrap()
-    end
+    headers = signer(:post, path, encoded, credentials)
+
+    :post
+    |> HttpClient.request(@base_url <> @api_path <> path, headers, encoded, request_opts(opts))
+    |> unwrap()
   end
 
   defp get(path, credentials: credentials, opts: opts) do
-    with {:ok, headers} <- headers(:get, path, "", credentials) do
-      :get
-      |> HttpClient.request(@base_url <> @api_path <> path, headers, nil, request_opts(opts))
-      |> unwrap()
-    end
+    :get
+    |> HttpClient.request(
+      @base_url <> @api_path <> path,
+      signer(:get, path, "", credentials),
+      nil,
+      request_opts(opts)
+    )
+    |> unwrap()
   end
+
+  # Signed per attempt, not once per call: `Core.HttpClient` retries a timeout or a 5xx, and
+  # a retry carrying the first attempt's `X-CB-ACCESS-TIMESTAMP` ages with every attempt
+  # until the venue refuses it as a credential problem. `Core.HttpClient` calls this again
+  # for each attempt. Every write here already survives a retry — the staking writes carry
+  # an idempotency key, and `claim_rewards/4` is sent once.
+  defp signer(method, path, body, credentials),
+    do: fn -> headers(method, path, body, credentials) end
 
   # Prime signs `timestamp + method + requestPath + body`, HMAC-SHA256 under the signing
   # key, base64-encoded. The path signed is the one after the host and **includes** the

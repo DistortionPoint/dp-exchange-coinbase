@@ -20,6 +20,15 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- A retried request is signed again. `Core.HttpClient` retries a timeout or a 5xx, and every
+  retry carried the first attempt's credentials: a JWT whose 120-second `exp` the default
+  retry budget (about 127 seconds) can outrun, and a Prime `X-CB-ACCESS-TIMESTAMP` that aged
+  with every attempt. Either was refused as a credential failure. Headers are now a function
+  `Core.HttpClient` calls per attempt. Orders stay safe to retry through `client_order_id`,
+  Prime staking writes through their idempotency key. Requires `dp_exchange_core` 0.3.46.
+
 ## [0.3.74] - 2026-09-28
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

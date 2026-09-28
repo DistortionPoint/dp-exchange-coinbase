@@ -1544,16 +1544,29 @@ defmodule DpExchange.Coinbase.Rest do
   # The `nil` branch is a different case and is not a failure: Coinbase serves market
   # data anonymously, so a call made deliberately without credentials takes the public
   # path with no headers at all.
-  defp request(method, path, credentials, opts, params \\ %{}) do
-    with {:ok, headers} <- request_headers(method, @api_path <> path, credentials) do
-      send_request(method, path, headers, opts, params)
-    end
-  end
+  defp request(method, path, credentials, opts, params \\ %{}),
+    do:
+      send_request(
+        method,
+        path,
+        request_headers(method, @api_path <> path, credentials),
+        opts,
+        params
+      )
 
-  defp request_headers(_method, _path, nil), do: {:ok, []}
+  defp request_headers(_method, _path, nil), do: []
 
-  defp request_headers(method, path, credentials),
-    do: Auth.rest_headers(method, path, nil, credentials)
+  defp request_headers(method, path, credentials), do: signer(method, path, credentials)
+
+  # Signed per attempt, not once per call. `Core.HttpClient` retries a timeout or a 5xx up to
+  # three times, each bounded at 30 seconds, with backoff between — about 127 seconds in all,
+  # past the JWT's 120-second `exp`. A last retry carrying the first attempt's token was
+  # refused as an authentication failure, naming credentials that were fine. `Core.HttpClient`
+  # calls this function again for each attempt, so each carries a token minted for it.
+  #
+  # A retried order stays safe: `client_order_id` is the venue's documented idempotency key.
+  defp signer(method, path, credentials),
+    do: fn -> Auth.rest_headers(method, path, nil, credentials) end
 
   defp send_request(method, path, headers, opts, params) do
     url = @base_url <> @api_path <> path
@@ -2390,9 +2403,7 @@ defmodule DpExchange.Coinbase.Rest do
   # to reject as an opaque 401. A malformed `api_secret` reaching `place_order/3` used to
   # do exactly that.
   defp json_request(method, path, body, credentials, opts) do
-    with {:ok, headers} <- Auth.rest_headers(method, @api_path <> path, nil, credentials) do
-      send_json_request(method, path, headers, body, opts)
-    end
+    send_json_request(method, path, signer(method, @api_path <> path, credentials), body, opts)
   end
 
   defp send_json_request(method, path, headers, body, opts) do

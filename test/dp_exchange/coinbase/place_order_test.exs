@@ -600,4 +600,32 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       end
     end
   end
+
+  describe "a retried order" do
+    test "carries a token minted for its own attempt, not the first attempt's" do
+      # The JWT expires 120 seconds after it is minted, and the default retry budget runs
+      # past that: a last retry carrying the first attempt's token was refused as a
+      # credential failure. Each token carries a random nonce, so two attempts signed
+      # separately never share one.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:authorization, Plug.Conn.get_req_header(conn, "authorization")})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(503, Jason.encode!(%{"message" => "unavailable"}))
+      end
+
+      Rest.place_order(@credentials, limit_request(),
+        plug: plug,
+        retry_attempts: 2,
+        retry_delay: 1
+      )
+
+      assert_received {:authorization, [first]}
+      assert_received {:authorization, [second]}
+      refute first == second
+    end
+  end
 end

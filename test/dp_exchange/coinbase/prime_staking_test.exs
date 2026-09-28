@@ -699,4 +699,31 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       assert Process.get(:rate_limiter_call) == :check
     end
   end
+
+  describe "a retried Prime request" do
+    test "is signed again, with its own timestamp" do
+      # A retry carrying the first attempt's `X-CB-ACCESS-TIMESTAMP` ages with every attempt
+      # until the venue refuses it. The first attempt is held past a second so a timestamp
+      # re-read for the retry cannot equal the first one.
+      me = self()
+      counter = :counters.new(1, [])
+
+      plug = fn conn ->
+        :counters.add(counter, 1, 1)
+        send(me, {:timestamp, Plug.Conn.get_req_header(conn, "x-cb-access-timestamp")})
+        if :counters.get(counter, 1) == 1, do: Process.sleep(1_100)
+        Plug.Conn.resp(conn, 503, "unavailable")
+      end
+
+      Prime.stake_portfolio(@credentials, "pf-1", "ETH", Decimal.new("1"),
+        plug: plug,
+        retry_attempts: 2,
+        retry_delay: 1
+      )
+
+      assert_received {:timestamp, [first]}
+      assert_received {:timestamp, [second]}
+      assert String.to_integer(second) > String.to_integer(first)
+    end
+  end
 end
