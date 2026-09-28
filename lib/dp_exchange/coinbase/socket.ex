@@ -322,12 +322,20 @@ defmodule DpExchange.Coinbase.Socket do
     opts = connection_opts(opts)
 
     VendoredWebSockex.start_link(
-      Config.opt(opts, :url, @endpoint),
+      Config.opt(opts, :url, default_endpoint()),
       __MODULE__,
       state,
       opts
     )
   end
+
+  # The venue's own endpoint, unless the application config names another with
+  # `:websocket_url`. The seam exists for tests. A tier-1 run sets it in `config/test.exs` to
+  # a closed local port, so a socket that no test aimed elsewhere fails at once instead of
+  # dialling the venue. Measured 2026-09-27: this package's suite had been opening live
+  # connections to the venue on every run, from tests that never meant to. A consumer can
+  # use it for a proxy. `config/` does not ship, so a consumer's default is still the venue.
+  defp default_endpoint, do: Config.get(:dp_exchange_coinbase, :websocket_url, @endpoint)
 
   # Explicit rather than inherited — see the moduledoc's budget arithmetic.
   # `Keyword.put_new/3` so a caller supplying either key wins. Exposed (not `defp`) and
