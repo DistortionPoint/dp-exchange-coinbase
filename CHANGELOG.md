@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.67] - 2026-09-28
+
 ### Added
 
 - **`config :dp_exchange_coinbase, websocket_url: ...` overrides the endpoint a socket dials
