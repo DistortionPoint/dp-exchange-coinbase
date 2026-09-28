@@ -291,7 +291,8 @@ defmodule DpExchange.Coinbase.Feed do
 
   **The code was checked, not guessed, while the answer was still unknown.**
   `reconcile_shard_in_place/8` — reached from `reshard/1` whenever `subscribe/3`,
-  `unsubscribe/2` or `update_symbols/2` changed a shard `Feed` already had a socket open for —
+  `unsubscribe/2` or `update_symbols/2` changed a shard `Feed` already had a socket open
+  for — computed
   `added = wanted -- current` and sent exactly those newly-added symbols to
   `Socket.subscribe/4` on the same already-open socket, never a fresh one.
   `wanted_symbols` per shard is always `≤ @level2_pairs_per_socket` by construction, so no
