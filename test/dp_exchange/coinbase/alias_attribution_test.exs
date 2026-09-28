@@ -185,6 +185,24 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       assert Feed.coverage(feed) == %{"XLM-USDC" => :stream}
     end
 
+    test "with the map loaded, a frame for an unsubscribed symbol is dropped" do
+      # The venue keeps sending for a moment after an unsubscribe. Such a frame fell through
+      # to "deliver under the venue's own id", reaching subscribers who had asked to stop,
+      # and it went into `delivering`, which a streaming route never ages out. So
+      # `coverage/1` answered `:stream` for the unsubscribed symbol indefinitely.
+      feed = start_aliased_feed(fn -> {:ok, @alias_map} end)
+
+      Feed.subscribe(feed, ~w(BTC-USD), to: self())
+      wait_until(fn -> :sys.get_state(feed).alias_map_status == :ok end)
+      Feed.unsubscribe(feed, ~w(BTC-USD))
+
+      send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
+      :sys.get_state(feed)
+
+      refute_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "BTC-USD"}}
+      assert Feed.coverage(feed) == %{}
+    end
+
     test "subscribing to both the alias and the canonical name delivers both, from one frame" do
       # The venue treats the two as one market. A caller that asked for both is entitled
       # to both, from whichever single id the venue actually tags the frame with.

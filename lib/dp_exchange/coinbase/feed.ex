@@ -3219,12 +3219,23 @@ defmodule DpExchange.Coinbase.Feed do
       |> Enum.uniq()
       |> Enum.filter(&MapSet.member?(state.wanted, &1))
 
-    # Nothing in `wanted` resolved — the map is empty (unfetched, permanently failed, or
-    # the venue genuinely aliases nothing here, which look identical by design) or this
-    # frame is for a symbol outside `wanted` altogether (in-flight just after an
-    # unsubscribe, or a raw `send/2` in a test). Either way: deliver under whatever the
-    # venue actually sent, the exact pre-fix behaviour, never a fabricated name.
-    if targets == [], do: [delivered], else: targets
+    # Nothing in `wanted` resolved. Which of two things that means depends on the map.
+    #
+    # **Map not loaded** (unfetched, pending, or given up): an aliased delivery cannot be
+    # told apart from an unwanted one, so this delivers under whatever the venue actually
+    # sent, never a fabricated name. That is the pre-alias-map behaviour, and dropping here
+    # would lose real data for a wanted symbol the venue renamed.
+    #
+    # **Map loaded:** the frame is for a symbol nobody wants, most often one still in
+    # flight just after an unsubscribe. It used to be delivered here too, which reached the
+    # subscribers who had just asked to stop, and it went into `delivering`, which a
+    # streaming route never ages out. So one late frame left `coverage/1` answering
+    # `:stream` for an unsubscribed symbol indefinitely (found 2026-09-27). It is dropped.
+    cond do
+      targets != [] -> targets
+      state.alias_map_status == :ok -> []
+      true -> [delivered]
+    end
   end
 
   # Fired once, when the alias-map fetch gives up for good (permanently, or after
