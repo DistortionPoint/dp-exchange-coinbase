@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.79] - 2026-09-29
+
 ### Fixed
 
 Checked against the vendor's Advanced Trade and Prime specs, fetched 2026-09-29 and now
