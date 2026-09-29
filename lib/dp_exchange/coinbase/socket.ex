@@ -210,7 +210,7 @@ defmodule DpExchange.Coinbase.Socket do
 
   # `ticker` is public and takes no token — attaching one where it is not required is the
   # incident above. `user`'s `SubscribeUser` payload lists `jwt` in its own `required` array
-  # (docs/reference/coinbase/openapi/at-async.json:752-765): no credential, no subscribe.
+  # (docs/reference/coinbase/openapi/at-async.json:755-806, `required` at 762-766): no credential, no subscribe.
   #
   # `level2` is different, and this package used to treat it the same as `user`.
   # `SubscribeLevel2`'s `jwt` is described as "Optional here; recommended for connection
@@ -615,8 +615,14 @@ defmodule DpExchange.Coinbase.Socket do
 
   defp dispatch(%{"channel" => "heartbeats"}, state), do: state
 
+  # Every data channel `at-async.json` documents that this package never subscribes to. The
+  # list named three of them; `ticker_batch`, `status` and `futures_balance_summary` (the
+  # envelope `channel` consts at at-async.json:1011, 931 and 1177) fell to the catch-all below
+  # and were dropped with no notice, which is the silence this clause exists to prevent.
+  @unsubscribed_data_channels ~w(market_trades candles user ticker_batch status futures_balance_summary)
+
   defp dispatch(%{"channel" => channel, "events" => _events}, state)
-       when channel in ["market_trades", "candles", "user"] do
+       when channel in @unsubscribed_data_channels do
     # Recognised, and not delivered. This package declares `streamable: [:quotes,
     # :order_book]`, so these channels are never subscribed — arriving means the venue
     # sent something this package did not ask for, which is worth noticing rather than

@@ -20,6 +20,12 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- A frame on the `ticker_batch`, `status` or `futures_balance_summary` channel, none of which
+  this package subscribes to, now raises a `:data_quality` notice like the other unrequested
+  channels. They fell through and were dropped with no notice.
+
 ## [0.3.79] - 2026-09-29
 
 ### Fixed
