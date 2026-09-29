@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.78] - 2026-09-29
+
 ### Fixed
 
 - `get_trade_volume/2` refuses a `volume_breakdown` that is an object rather than a list. It
