@@ -583,14 +583,25 @@ defmodule DpExchange.Coinbase.Rest do
         "total_fees" => summary["total_fees"]
       }
 
-      rows = summary |> Map.get("volume_breakdown", []) |> List.wrap()
-
       # A breakdown row that is not an object is refused, not merged into: `Map.merge/2`
       # raised on it (REST fuzz, 2026-09-27). Dropping it would leave a volume band out of
       # what reads as the account's whole breakdown.
-      if Enum.all?(rows, &is_map/1),
-        do: {:ok, Enum.map(rows, &Map.merge(&1, totals))},
-        else: {:error, :unexpected_response_shape}
+      #
+      # The breakdown itself must be a list, or absent. It went through `List.wrap/1`, so an
+      # object in its place became a one-row breakdown with the account totals merged in: a
+      # band the venue never listed, reported as the account's whole volume picture.
+      case Map.get(summary, "volume_breakdown") do
+        nil ->
+          {:ok, []}
+
+        rows when is_list(rows) ->
+          if Enum.all?(rows, &is_map/1),
+            do: {:ok, Enum.map(rows, &Map.merge(&1, totals))},
+            else: {:error, :unexpected_response_shape}
+
+        _unreadable ->
+          {:error, :unexpected_response_shape}
+      end
     end
   end
 

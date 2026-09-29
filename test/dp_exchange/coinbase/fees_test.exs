@@ -156,6 +156,14 @@ defmodule DpExchange.Coinbase.FeesTest do
                Rest.get_trade_volume(@credentials, plug: responding(body), retry_attempts: 0)
     end
 
+    test "a breakdown that is an object, not a list, is refused rather than read as one band" do
+      # `List.wrap/1` made it a one-row breakdown with the totals merged in.
+      body = summary(%{"volume_breakdown" => %{"volume_type" => "X", "volume" => 1}})
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_trade_volume(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
     test "a body with no breakdown key is an empty list, not a crash" do
       body = Map.delete(summary(), "volume_breakdown")
 

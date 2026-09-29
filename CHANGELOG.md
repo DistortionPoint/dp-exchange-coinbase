@@ -20,6 +20,12 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- `get_trade_volume/2` refuses a `volume_breakdown` that is an object rather than a list. It
+  was wrapped into a one-row breakdown with the account totals merged in, a band the venue
+  never listed. An absent breakdown is still empty.
+
 ## [0.3.77] - 2026-09-29
 
 ### Fixed
