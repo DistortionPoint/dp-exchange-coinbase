@@ -1,0 +1,747 @@
+{
+  "trade": {
+    "status": "TRADE_STATUS_CREATED",
+    "user_entered_amount": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "amount": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "subtotal": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "total": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "fees": [
+      {
+        "amount": {
+          "value": "125.50",
+          "currency": "USD"
+        },
+        "disclosure": {
+          "link": {}
+        },
+        "waived_details": {
+          "amount": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "source": "WAIVED_FEE_SOURCE_TRADE_INCENTIVE"
+        },
+        "metadata": {
+          "netburn": {
+            "threshold": {
+              "value": "125.50",
+              "currency": "USD"
+            },
+            "netburn_value": {
+              "value": "125.50",
+              "currency": "USD"
+            }
+          }
+        }
+      }
+    ],
+    "total_fee": {
+      "amount": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "disclosure": {
+        "link": {}
+      },
+      "waived_details": {
+        "amount": {
+          "value": "125.50",
+          "currency": "USD"
+        },
+        "source": "WAIVED_FEE_SOURCE_TRADE_INCENTIVE"
+      },
+      "metadata": {
+        "netburn": {
+          "threshold": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "netburn_value": {
+            "value": "125.50",
+            "currency": "USD"
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "INVALID",
+      "blockchain_address": {},
+      "coinbase_account": {},
+      "blockchain_transaction": {},
+      "fedwire": {
+        "account_holder": {
+          "address": {
+            "lines": []
+          }
+        },
+        "bank": {
+          "address": {
+            "lines": []
+          },
+          "type": "CHIPS_IDENTIFIER"
+        },
+        "intermediary_bank": {
+          "address": {
+            "lines": []
+          },
+          "type": "CHIPS_IDENTIFIER"
+        }
+      },
+      "swift": {
+        "account_holder": {},
+        "institution": {},
+        "intermediary": {}
+      },
+      "card": {
+        "first_data_token": {},
+        "merchant": {},
+        "vault_token": {},
+        "worldpay_params": {},
+        "checkout_token": {},
+        "stripe_params": {
+          "address_line1_check": "STRIPE_CARD_CHECK_STATUS_PASS",
+          "address_postal_code_check": "STRIPE_CARD_CHECK_STATUS_PASS",
+          "cvc_check": "STRIPE_CARD_CHECK_STATUS_PASS"
+        },
+        "bin_info": {
+          "type": "CREDIT",
+          "visa": {},
+          "mastercard": {}
+        },
+        "scheme": "VISA",
+        "address": {},
+        "customer_info": {
+          "dob": {}
+        },
+        "expiry_date": {},
+        "cdv_amount_1": {},
+        "cdv_amount_2": {},
+        "worldpay_card_cdv_status": {},
+        "card_source": "CARD_IO_SCAN",
+        "coinbase_credit_card_params": {},
+        "address_verification_info": {
+          "avs_street_address": "ADDRESS_VERIFICATION_STATUS_MATCH",
+          "avs_postal_code": "ADDRESS_VERIFICATION_STATUS_MATCH"
+        },
+        "account_name_inquiry": {
+          "first_name_match": "MATCH_RESULT_MATCH",
+          "middle_name_match": "MATCH_RESULT_MATCH",
+          "last_name_match": "MATCH_RESULT_MATCH",
+          "name_match_indicator": "NAME_MATCH_INDICATOR_PERFORMED"
+        },
+        "customer_dob": {}
+      },
+      "zengin": {
+        "account_holder": {},
+        "institution": {}
+      },
+      "uk": {
+        "account_holder": {
+          "address": {},
+          "account_type": "UK_ACCOUNT_TYPE_SAVINGS"
+        },
+        "institution": {},
+        "open_banking_details": {}
+      },
+      "sepa": {
+        "account_holder": {},
+        "institution": {}
+      },
+      "paypal": {
+        "account_holder": {},
+        "merchant": {},
+        "metadata": {},
+        "billing_address": {}
+      },
+      "ledger_account": {
+        "owner": {
+          "type": "INVESTMENT_VEHICLE"
+        }
+      },
+      "external_payment_method": {},
+      "pro_account": {},
+      "rtp": {
+        "account_holder": {},
+        "institution": {}
+      },
+      "venue": {},
+      "ledger_named_account": {},
+      "custodial_pool": {},
+      "apple_pay": {
+        "braintree": {},
+        "apple_pay": {},
+        "address": {},
+        "scheme": "VISA",
+        "prepaid": "UNCERTAIN",
+        "debit": "UNCERTAIN"
+      },
+      "default_account": {},
+      "remitly": {
+        "account_holder": {}
+      },
+      "pro_internal_account": {},
+      "dapp_wallet_account": {},
+      "google_pay": {
+        "braintree": {},
+        "google_pay": {},
+        "address": {},
+        "scheme": "VISA",
+        "prepaid": "UNCERTAIN",
+        "debit": "UNCERTAIN"
+      },
+      "dapp_wallet_blockchain_address": {},
+      "zaakpay_mobikwik": {},
+      "deneb_upi": {
+        "address": {}
+      },
+      "bank_account": {
+        "cdv_amount_1": {},
+        "cdv_amount_2": {},
+        "giactInfo": {},
+        "vendor_verification_status": {},
+        "plaid_verification_info": {
+          "balance": {}
+        },
+        "stripe_verification_info": {
+          "balance": {}
+        }
+      },
+      "identity_contract_call": {},
+      "deneb_imps": {
+        "address": {}
+      },
+      "allocation": {
+        "legs": [
+          {
+            "movements": [
+              {
+                "source_account": {
+                  "owner": {
+                    "type": "INVESTMENT_VEHICLE"
+                  }
+                },
+                "destination_account": {
+                  "owner": {
+                    "type": "INVESTMENT_VEHICLE"
+                  }
+                },
+                "amount": {},
+                "fee": {}
+              }
+            ]
+          }
+        ]
+      },
+      "liquidity_pool": {},
+      "zengin_v2": {
+        "account_holder": {},
+        "institution": {}
+      },
+      "direct_deposit": {},
+      "sepa_v2": {
+        "account": {},
+        "address": {},
+        "banking_circle_token": {},
+        "institution": {},
+        "open_banking_details": {}
+      },
+      "zepto": {
+        "account": {},
+        "institution": {}
+      },
+      "pix_ebanx": {
+        "deposit": {},
+        "withdrawal": {}
+      },
+      "signet": {},
+      "derivative_settlement": {
+        "account_settlements": [
+          {
+            "amount": {},
+            "source_ledger_account": {
+              "owner": {
+                "type": "INVESTMENT_VEHICLE"
+              }
+            },
+            "source_ledger_named_account": {},
+            "target_ledger_account": {
+              "owner": {
+                "type": "INVESTMENT_VEHICLE"
+              }
+            },
+            "target_ledger_named_account": {},
+            "new_hold_amount": {}
+          }
+        ],
+        "equity_reset": {
+          "amount": {},
+          "equity_account": {
+            "owner": {
+              "type": "INVESTMENT_VEHICLE"
+            }
+          }
+        }
+      },
+      "user": {},
+      "sg_fast": {
+        "account": {},
+        "institution": {},
+        "direct_debit_auth_state": "STATE_PENDING"
+      },
+      "interac": {
+        "account": {}
+      },
+      "intra_bank": {},
+      "cbit": {},
+      "ideal": {},
+      "sofort": {},
+      "sg_paynow": {
+        "identifier_type": "TYPE_NRIC"
+      },
+      "checkout_payment_link": {},
+      "email_address": {},
+      "phone_number": {},
+      "vendor_payment": {},
+      "ctn": {},
+      "bancomat_pay": {
+        "account": {}
+      },
+      "hot_wallet": {},
+      "nova_account": {},
+      "magic_spend_blockchain_address": {},
+      "transfer_pointer": {},
+      "eft": {
+        "account": {
+          "trustly_account_token_status": "TRUSTLY_TOKEN_STATUS_ACTIVE"
+        }
+      },
+      "wallace_account": {},
+      "manual": {},
+      "argentine_bank_account": {},
+      "representment": {},
+      "banking_circle_now": {},
+      "trustly": {},
+      "blik": {},
+      "mb_way": {},
+      "pix": {
+        "pix_account_type": "ACCOUNT_TYPE_CHECKING"
+      },
+      "magic_wallet": {},
+      "samsung_pay": {
+        "samsung_pay": {},
+        "address": {},
+        "scheme": "VISA",
+        "prepaid": "UNCERTAIN",
+        "debit": "UNCERTAIN"
+      },
+      "cad_wire": {},
+      "wab_intra_bank": {},
+      "india_bank_account": {},
+      "jpmorgan_kinexys": {},
+      "sic": {},
+      "spei": {}
+    },
+    "target": {
+      "type": "INVALID",
+      "blockchain_address": {},
+      "coinbase_account": {},
+      "blockchain_transaction": {},
+      "fedwire": {
+        "account_holder": {
+          "address": {
+            "lines": []
+          }
+        },
+        "bank": {
+          "address": {
+            "lines": []
+          },
+          "type": "CHIPS_IDENTIFIER"
+        },
+        "intermediary_bank": {
+          "address": {
+            "lines": []
+          },
+          "type": "CHIPS_IDENTIFIER"
+        }
+      },
+      "swift": {
+        "account_holder": {},
+        "institution": {},
+        "intermediary": {}
+      },
+      "card": {
+        "first_data_token": {},
+        "merchant": {},
+        "vault_token": {},
+        "worldpay_params": {},
+        "checkout_token": {},
+        "stripe_params": {
+          "address_line1_check": "STRIPE_CARD_CHECK_STATUS_PASS",
+          "address_postal_code_check": "STRIPE_CARD_CHECK_STATUS_PASS",
+          "cvc_check": "STRIPE_CARD_CHECK_STATUS_PASS"
+        },
+        "bin_info": {
+          "type": "CREDIT",
+          "visa": {},
+          "mastercard": {}
+        },
+        "scheme": "VISA",
+        "address": {},
+        "customer_info": {
+          "dob": {}
+        },
+        "expiry_date": {},
+        "cdv_amount_1": {},
+        "cdv_amount_2": {},
+        "worldpay_card_cdv_status": {},
+        "card_source": "CARD_IO_SCAN",
+        "coinbase_credit_card_params": {},
+        "address_verification_info": {
+          "avs_street_address": "ADDRESS_VERIFICATION_STATUS_MATCH",
+          "avs_postal_code": "ADDRESS_VERIFICATION_STATUS_MATCH"
+        },
+        "account_name_inquiry": {
+          "first_name_match": "MATCH_RESULT_MATCH",
+          "middle_name_match": "MATCH_RESULT_MATCH",
+          "last_name_match": "MATCH_RESULT_MATCH",
+          "name_match_indicator": "NAME_MATCH_INDICATOR_PERFORMED"
+        },
+        "customer_dob": {}
+      },
+      "zengin": {
+        "account_holder": {},
+        "institution": {}
+      },
+      "uk": {
+        "account_holder": {
+          "address": {},
+          "account_type": "UK_ACCOUNT_TYPE_SAVINGS"
+        },
+        "institution": {},
+        "open_banking_details": {}
+      },
+      "sepa": {
+        "account_holder": {},
+        "institution": {}
+      },
+      "paypal": {
+        "account_holder": {},
+        "merchant": {},
+        "metadata": {},
+        "billing_address": {}
+      },
+      "ledger_account": {
+        "owner": {
+          "type": "INVESTMENT_VEHICLE"
+        }
+      },
+      "external_payment_method": {},
+      "pro_account": {},
+      "rtp": {
+        "account_holder": {},
+        "institution": {}
+      },
+      "venue": {},
+      "ledger_named_account": {},
+      "custodial_pool": {},
+      "apple_pay": {
+        "braintree": {},
+        "apple_pay": {},
+        "address": {},
+        "scheme": "VISA",
+        "prepaid": "UNCERTAIN",
+        "debit": "UNCERTAIN"
+      },
+      "default_account": {},
+      "remitly": {
+        "account_holder": {}
+      },
+      "pro_internal_account": {},
+      "dapp_wallet_account": {},
+      "google_pay": {
+        "braintree": {},
+        "google_pay": {},
+        "address": {},
+        "scheme": "VISA",
+        "prepaid": "UNCERTAIN",
+        "debit": "UNCERTAIN"
+      },
+      "dapp_wallet_blockchain_address": {},
+      "zaakpay_mobikwik": {},
+      "deneb_upi": {
+        "address": {}
+      },
+      "bank_account": {
+        "cdv_amount_1": {},
+        "cdv_amount_2": {},
+        "giactInfo": {},
+        "vendor_verification_status": {},
+        "plaid_verification_info": {
+          "balance": {}
+        },
+        "stripe_verification_info": {
+          "balance": {}
+        }
+      },
+      "identity_contract_call": {},
+      "deneb_imps": {
+        "address": {}
+      },
+      "allocation": {
+        "legs": [
+          {
+            "movements": [
+              {
+                "source_account": {
+                  "owner": {
+                    "type": "INVESTMENT_VEHICLE"
+                  }
+                },
+                "destination_account": {
+                  "owner": {
+                    "type": "INVESTMENT_VEHICLE"
+                  }
+                },
+                "amount": {},
+                "fee": {}
+              }
+            ]
+          }
+        ]
+      },
+      "liquidity_pool": {},
+      "zengin_v2": {
+        "account_holder": {},
+        "institution": {}
+      },
+      "direct_deposit": {},
+      "sepa_v2": {
+        "account": {},
+        "address": {},
+        "banking_circle_token": {},
+        "institution": {},
+        "open_banking_details": {}
+      },
+      "zepto": {
+        "account": {},
+        "institution": {}
+      },
+      "pix_ebanx": {
+        "deposit": {},
+        "withdrawal": {}
+      },
+      "signet": {},
+      "derivative_settlement": {
+        "account_settlements": [
+          {
+            "amount": {},
+            "source_ledger_account": {
+              "owner": {
+                "type": "INVESTMENT_VEHICLE"
+              }
+            },
+            "source_ledger_named_account": {},
+            "target_ledger_account": {
+              "owner": {
+                "type": "INVESTMENT_VEHICLE"
+              }
+            },
+            "target_ledger_named_account": {},
+            "new_hold_amount": {}
+          }
+        ],
+        "equity_reset": {
+          "amount": {},
+          "equity_account": {
+            "owner": {
+              "type": "INVESTMENT_VEHICLE"
+            }
+          }
+        }
+      },
+      "user": {},
+      "sg_fast": {
+        "account": {},
+        "institution": {},
+        "direct_debit_auth_state": "STATE_PENDING"
+      },
+      "interac": {
+        "account": {}
+      },
+      "intra_bank": {},
+      "cbit": {},
+      "ideal": {},
+      "sofort": {},
+      "sg_paynow": {
+        "identifier_type": "TYPE_NRIC"
+      },
+      "checkout_payment_link": {},
+      "email_address": {},
+      "phone_number": {},
+      "vendor_payment": {},
+      "ctn": {},
+      "bancomat_pay": {
+        "account": {}
+      },
+      "hot_wallet": {},
+      "nova_account": {},
+      "magic_spend_blockchain_address": {},
+      "transfer_pointer": {},
+      "eft": {
+        "account": {
+          "trustly_account_token_status": "TRUSTLY_TOKEN_STATUS_ACTIVE"
+        }
+      },
+      "wallace_account": {},
+      "manual": {},
+      "argentine_bank_account": {},
+      "representment": {},
+      "banking_circle_now": {},
+      "trustly": {},
+      "blik": {},
+      "mb_way": {},
+      "pix": {
+        "pix_account_type": "ACCOUNT_TYPE_CHECKING"
+      },
+      "magic_wallet": {},
+      "samsung_pay": {
+        "samsung_pay": {},
+        "address": {},
+        "scheme": "VISA",
+        "prepaid": "UNCERTAIN",
+        "debit": "UNCERTAIN"
+      },
+      "cad_wire": {},
+      "wab_intra_bank": {},
+      "india_bank_account": {},
+      "jpmorgan_kinexys": {},
+      "sic": {},
+      "spei": {}
+    },
+    "unit_price": {
+      "target_to_fiat": {
+        "amount": {
+          "value": "125.50",
+          "currency": "USD"
+        }
+      },
+      "target_to_source": {
+        "amount": {
+          "value": "125.50",
+          "currency": "USD"
+        }
+      },
+      "source_to_fiat": {
+        "amount": {
+          "value": "125.50",
+          "currency": "USD"
+        }
+      }
+    },
+    "user_warnings": [
+      {
+        "link": {},
+        "context": {
+          "details": []
+        }
+      }
+    ],
+    "cancellation_reason": {
+      "error_code": "ERROR_CODES_AUTHENTICATION_ERROR",
+      "error_cta": "ERROR_CTA_BUY_MINIMUM",
+      "error_metadata": {
+        "limit_amount": {
+          "value": "125.50",
+          "currency": "USD"
+        },
+        "suggested_pm_category": "ASSET"
+      }
+    },
+    "subscription_info": {
+      "used_zero_fee_trading": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "remaining_free_trading_volume": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "max_free_trading_volume": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "fee_without_subscription_benefit": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "payment_method_fee_without_subscription_benefit": {
+        "value": "125.50",
+        "currency": "USD"
+      }
+    },
+    "exchange_rate": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "tax_details": [
+      {
+        "amount": {
+          "value": "125.50",
+          "currency": "USD"
+        }
+      }
+    ],
+    "trade_incentive_info": {
+      "fee_without_incentive": {
+        "value": "125.50",
+        "currency": "USD"
+      }
+    },
+    "total_fee_without_tax": {
+      "amount": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "disclosure": {
+        "link": {}
+      },
+      "waived_details": {
+        "amount": {
+          "value": "125.50",
+          "currency": "USD"
+        },
+        "source": "WAIVED_FEE_SOURCE_TRADE_INCENTIVE"
+      },
+      "metadata": {
+        "netburn": {
+          "threshold": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "netburn_value": {
+            "value": "125.50",
+            "currency": "USD"
+          }
+        }
+      }
+    },
+    "fiat_denoted_total": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "id": "b6ec2e9a-1b6a-4b6a-9e1a-000000000001"
+  }
+}

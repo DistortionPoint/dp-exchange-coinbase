@@ -1,0 +1,24 @@
+{
+  "channel": "status",
+  "timestamp": "2026-08-28T14:53:45.649112Z",
+  "sequence_num": 0,
+  "events": [
+    {
+      "type": "snapshot",
+      "products": [
+        {
+          "product_type": "SPOT",
+          "id": "BTC-USD",
+          "base_currency": "BTC",
+          "quote_currency": "USD",
+          "base_increment": "0.00000001",
+          "quote_increment": "0.01",
+          "display_name": "BTC-USD",
+          "status": "online",
+          "status_message": "",
+          "min_market_funds": "1"
+        }
+      ]
+    }
+  ]
+}

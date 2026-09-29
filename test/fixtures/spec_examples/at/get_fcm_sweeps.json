@@ -1,0 +1,11 @@
+{
+  "sweeps": [
+    {
+      "requested_amount": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "status": "PENDING"
+    }
+  ]
+}

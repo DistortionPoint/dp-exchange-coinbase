@@ -20,6 +20,13 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- Spec-example tests drive every REST operation, Prime staking call and WebSocket channel
+  this package uses with the vendor's own documented examples (or schema-built instances,
+  each cited), and check requests against the documented parameters. Fixtures live under
+  `test/fixtures/spec_examples/` with a README citing each source line.
+
 ## [0.3.80] - 2026-09-29
 
 ### Fixed

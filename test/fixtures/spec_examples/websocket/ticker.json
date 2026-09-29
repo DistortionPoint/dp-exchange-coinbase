@@ -1,0 +1,27 @@
+{
+  "channel": "ticker",
+  "timestamp": "2026-08-28T14:53:45.649112Z",
+  "sequence_num": 0,
+  "events": [
+    {
+      "type": "snapshot",
+      "tickers": [
+        {
+          "type": "ticker",
+          "product_id": "BTC-USD",
+          "price": "79478.7",
+          "volume_24_h": "1234.5",
+          "low_24_h": "78000.0",
+          "high_24_h": "80500.0",
+          "low_52_w": "40000.0",
+          "high_52_w": "99000.0",
+          "price_percent_chg_24_h": "1.25",
+          "best_bid": "79478.0",
+          "best_ask": "79479.0",
+          "best_bid_quantity": "0.5",
+          "best_ask_quantity": "0.4"
+        }
+      ]
+    }
+  ]
+}

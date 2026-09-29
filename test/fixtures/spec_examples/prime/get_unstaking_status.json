@@ -1,0 +1,22 @@
+{
+  "current_timestamp": "2025-10-17T15:30:00Z",
+  "validators": [
+    {
+      "statuses": [
+        {
+          "amount": "16",
+          "unstake_type": "UNSTAKE_TYPE_PARTIAL",
+          "finishing_at": "2025-10-27T00:00:00Z",
+          "remaining_hours": 672,
+          "requested_at": "2025-09-29T12:00:00Z",
+          "estimate_type": "LIVE",
+          "estimate_description": "Live estimate based on current network conditions"
+        }
+      ],
+      "validator_address": "0xva11da700000000000000000000000000000001"
+    }
+  ],
+  "portfolio_id": "3d95870b-2f9e-4a1e-b0a3-000000portfolio",
+  "wallet_id": "1a2b3c4d-9f8e-4a1e-b0a3-0000000wallet",
+  "wallet_address": "0xabc1230000000000000000000000000000dead"
+}

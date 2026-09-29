@@ -1,0 +1,14 @@
+{
+  "trades": [
+    {
+      "trade_id": "34b080bf-fcfd-445a-832b-46b5ddc65601",
+      "product_id": "BTC-USD",
+      "price": "140.91",
+      "size": "4",
+      "time": "2021-05-31T09:59:59Z",
+      "side": "BUY"
+    }
+  ],
+  "best_bid": "291.13",
+  "best_ask": "292.40"
+}

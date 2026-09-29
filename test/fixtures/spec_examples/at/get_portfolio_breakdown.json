@@ -1,0 +1,195 @@
+{
+  "breakdown": {
+    "portfolio": {
+      "type": "DEFAULT",
+      "name": "Default Portfolio",
+      "uuid": "8bfc20d7-f7c6-4422-bf07-8243ca4169fe",
+      "deleted": false
+    },
+    "portfolio_balances": {
+      "total_balance": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "total_futures_balance": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "total_cash_equivalent_balance": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "total_crypto_balance": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "futures_unrealized_pnl": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "perp_unrealized_pnl": {
+        "value": "125.50",
+        "currency": "USD"
+      },
+      "total_equities_balance": {
+        "value": "125.50",
+        "currency": "USD"
+      }
+    },
+    "spot_positions": [
+      {
+        "cost_basis": {
+          "value": "125.50",
+          "currency": "USD"
+        },
+        "average_entry_price": {
+          "value": "125.50",
+          "currency": "USD"
+        },
+        "account_type": "ACCOUNT_TYPE_WALLET"
+      }
+    ],
+    "perp_positions": [
+      {
+        "vwap": {
+          "userNativeCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "rawCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          }
+        },
+        "position_side": "FUTURES_POSITION_SIDE_LONG",
+        "unrealized_pnl": {
+          "userNativeCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "rawCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          }
+        },
+        "mark_price": {
+          "userNativeCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "rawCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          }
+        },
+        "liquidation_price": {
+          "userNativeCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "rawCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          }
+        },
+        "im_notional": {
+          "userNativeCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "rawCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          }
+        },
+        "mm_notional": {
+          "userNativeCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "rawCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          }
+        },
+        "position_notional": {
+          "userNativeCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "rawCurrency": {
+            "value": "125.50",
+            "currency": "USD"
+          }
+        },
+        "margin_type": "MARGIN_TYPE_CROSS"
+      }
+    ],
+    "futures_positions": [
+      {
+        "side": "FUTURES_POSITION_SIDE_LONG"
+      }
+    ],
+    "prediction_markets_positions": [
+      {
+        "product_type": "PRODUCT_TYPE_ALL",
+        "prediction_markets": {
+          "side": "PREDICTION_MARKETS_POSITION_SIDE_LONG",
+          "average_entry_price": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "current_price": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "unrealized_pnl": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "notional_value": {
+            "value": "125.50",
+            "currency": "USD"
+          },
+          "cost_basis": {
+            "value": "125.50",
+            "currency": "USD"
+          }
+        }
+      }
+    ],
+    "equity_positions": [
+      {
+        "total_balance_fiat": {
+          "value": "125.50",
+          "currency": "USD"
+        },
+        "total_balance_equity": {
+          "value": "125.50",
+          "currency": "USD"
+        },
+        "available_to_trade_equity": {
+          "value": "125.50",
+          "currency": "USD"
+        },
+        "available_to_trade_fiat": {
+          "value": "125.50",
+          "currency": "USD"
+        },
+        "account_type": "ACCOUNT_TYPE_WALLET",
+        "cost_basis": {
+          "value": "125.50",
+          "currency": "USD"
+        },
+        "average_entry_price": {
+          "value": "125.50",
+          "currency": "USD"
+        },
+        "unrealized_pnl": {
+          "value": "125.50",
+          "currency": "USD"
+        }
+      }
+    ]
+  }
+}

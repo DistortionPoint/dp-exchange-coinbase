@@ -1,0 +1,31 @@
+{
+  "fills": [
+    {
+      "entry_id": "22222-2222222-22222222",
+      "trade_id": "1111-11111-111111",
+      "order_id": "0000-000000-000000",
+      "trade_time": "2021-05-31T09:59:59Z",
+      "trade_type": "FILL",
+      "price": "10000.00",
+      "size": "0.001",
+      "commission": "1.25",
+      "product_id": "BTC-USD",
+      "sequence_timestamp": "2021-05-31T09:58:59Z",
+      "liquidity_indicator": "MAKER",
+      "size_in_quote": false,
+      "user_id": "3333-333333-3333333",
+      "side": "BUY",
+      "retail_portfolio_id": "4444-444444-4444444",
+      "fillSource": "FILL_SOURCE_CLOB",
+      "commission_detail_total": {},
+      "order_data_source": "ORDER_DATA_SOURCE_TRADING_PROXY",
+      "future_legs": [
+        {
+          "side": "BUY"
+        }
+      ]
+    }
+  ],
+  "cursor": "789100",
+  "proof_token_required": true
+}

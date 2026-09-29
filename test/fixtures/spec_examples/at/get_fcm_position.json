@@ -1,0 +1,12 @@
+{
+  "position": {
+    "side": "LONG",
+    "product_id": "BIT-28JUL23-CDE",
+    "expiration_time": "2023-07-28T00:00:00Z",
+    "number_of_contracts": "10",
+    "current_price": "27000.50",
+    "avg_entry_price": "26500.00",
+    "unrealized_pnl": "500.00",
+    "daily_realized_pnl": "120.00"
+  }
+}

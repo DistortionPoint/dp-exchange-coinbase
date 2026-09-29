@@ -1,0 +1,14 @@
+{
+  "errors": [
+    {
+      "edit_failure_reason": "COMMANDER_REJECTED_EDIT_ORDER",
+      "preview_failure_reason": "PREVIEW_MISSING_COMMISSION_RATE"
+    }
+  ],
+  "quote_size": 10,
+  "base_size": 0.001,
+  "commission_detail_total": {},
+  "pnl_configuration": {
+    "trigger_bracket_pnl": {}
+  }
+}

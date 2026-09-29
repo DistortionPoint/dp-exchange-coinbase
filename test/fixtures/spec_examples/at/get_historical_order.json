@@ -1,0 +1,253 @@
+{
+  "order": {
+    "order_id": "0000-000000-000000",
+    "product_id": "BTC-USD",
+    "user_id": "2222-000000-000000",
+    "order_configuration": {
+      "market_market_ioc": {
+        "quote_size": "10.00",
+        "base_size": "0.001",
+        "currency_size": {
+          "value": "1.23",
+          "currency": "BTC"
+        }
+      },
+      "market_market_fok": {
+        "quote_size": "10.00",
+        "base_size": "0.001"
+      },
+      "sor_limit_ioc": {
+        "quote_size": "10.00",
+        "base_size": "0.001",
+        "limit_price": "10000.00"
+      },
+      "limit_limit_gtc": {
+        "quote_size": "10.00",
+        "base_size": "0.001",
+        "limit_price": "10000.00",
+        "post_only": false,
+        "currency_size": {
+          "value": "1.23",
+          "currency": "BTC"
+        }
+      },
+      "limit_limit_gtd": {
+        "quote_size": "10.00",
+        "base_size": "0.001",
+        "limit_price": "10000.00",
+        "end_time": "2021-05-31T09:59:59Z",
+        "post_only": false,
+        "currency_size": {
+          "value": "1.23",
+          "currency": "BTC"
+        }
+      },
+      "limit_limit_fok": {
+        "quote_size": "10.00",
+        "base_size": "0.001",
+        "limit_price": "10000.00"
+      },
+      "twap_limit_gtd": {
+        "quote_size": "10.00",
+        "base_size": "0.001",
+        "start_time": "2021-05-31T07:59:59Z",
+        "end_time": "2021-05-31T09:59:59Z",
+        "limit_price": "10000.00",
+        "number_buckets": "5",
+        "bucket_size": "2.00",
+        "bucket_duration": "300s"
+      },
+      "stop_limit_stop_limit_gtc": {
+        "base_size": "0.001",
+        "limit_price": "10000.00",
+        "stop_price": "20000.00",
+        "stop_direction": "20000.00"
+      },
+      "stop_limit_stop_limit_gtd": {
+        "base_size": 0.001,
+        "limit_price": "10000.00",
+        "stop_price": "20000.00",
+        "end_time": "2021-05-31T09:59:59Z",
+        "stop_direction": "20000.00"
+      },
+      "trigger_bracket_gtc": {
+        "base_size": 0.001,
+        "limit_price": "10000.00",
+        "stop_trigger_price": "20000.00"
+      },
+      "trigger_bracket_gtd": {
+        "base_size": 0.001,
+        "limit_price": "10000.00",
+        "stop_trigger_price": "20000.00",
+        "end_time": "2021-05-31T09:59:59Z"
+      },
+      "scaled_limit_gtc": {
+        "orders": [
+          {
+            "quote_size": "10.00",
+            "base_size": "0.001",
+            "limit_price": "10000.00",
+            "post_only": false,
+            "currency_size": {
+              "value": "1.23",
+              "currency": "BTC"
+            }
+          }
+        ],
+        "price_distribution": "FLAT",
+        "size_distribution": "INCREASING"
+      }
+    },
+    "side": "BUY",
+    "client_order_id": "11111-000000-000000",
+    "status": "PENDING",
+    "time_in_force": "GOOD_UNTIL_DATE_TIME",
+    "created_time": "2021-05-31T09:59:59Z",
+    "completion_percentage": "50",
+    "filled_size": "0.001",
+    "average_filled_price": "50",
+    "number_of_fills": "2",
+    "filled_value": "10000",
+    "pending_cancel": true,
+    "size_in_quote": false,
+    "total_fees": "5.00",
+    "size_inclusive_of_fees": false,
+    "trigger_status": "INVALID_ORDER_TYPE",
+    "order_type": "MARKET",
+    "reject_reason": "HOLD_FAILURE",
+    "product_type": "SPOT",
+    "order_placement_source": "RETAIL_SIMPLE",
+    "edit_history": [
+      {
+        "price": "19000.00",
+        "size": "0.001"
+      }
+    ],
+    "margin_type": "CROSS",
+    "retail_portfolio_id": "b87a2d3f-8a1e-49b3-a4ea-402d8c389aca",
+    "originating_order_id": "b87a2d3f-8a1e-49b3-a4ea-402d8c389aca",
+    "attached_order_id": "b87a2d3f-8a1e-49b3-a4ea-402d8c389aca",
+    "attached_order_configuration": {
+      "market_market_ioc": {
+        "quote_size": "10.00",
+        "base_size": "0.001",
+        "currency_size": {
+          "value": "1.23",
+          "currency": "BTC"
+        }
+      },
+      "market_market_fok": {
+        "quote_size": "10.00",
+        "base_size": "0.001"
+      },
+      "sor_limit_ioc": {
+        "quote_size": "10.00",
+        "base_size": "0.001",
+        "limit_price": "10000.00"
+      },
+      "limit_limit_gtc": {
+        "quote_size": "10.00",
+        "base_size": "0.001",
+        "limit_price": "10000.00",
+        "post_only": false,
+        "currency_size": {
+          "value": "1.23",
+          "currency": "BTC"
+        }
+      },
+      "limit_limit_gtd": {
+        "quote_size": "10.00",
+        "base_size": "0.001",
+        "limit_price": "10000.00",
+        "end_time": "2021-05-31T09:59:59Z",
+        "post_only": false,
+        "currency_size": {
+          "value": "1.23",
+          "currency": "BTC"
+        }
+      },
+      "limit_limit_fok": {
+        "quote_size": "10.00",
+        "base_size": "0.001",
+        "limit_price": "10000.00"
+      },
+      "twap_limit_gtd": {
+        "quote_size": "10.00",
+        "base_size": "0.001",
+        "start_time": "2021-05-31T07:59:59Z",
+        "end_time": "2021-05-31T09:59:59Z",
+        "limit_price": "10000.00",
+        "number_buckets": "5",
+        "bucket_size": "2.00",
+        "bucket_duration": "300s"
+      },
+      "stop_limit_stop_limit_gtc": {
+        "base_size": "0.001",
+        "limit_price": "10000.00",
+        "stop_price": "20000.00",
+        "stop_direction": "20000.00"
+      },
+      "stop_limit_stop_limit_gtd": {
+        "base_size": 0.001,
+        "limit_price": "10000.00",
+        "stop_price": "20000.00",
+        "end_time": "2021-05-31T09:59:59Z",
+        "stop_direction": "20000.00"
+      },
+      "trigger_bracket_gtc": {
+        "base_size": 0.001,
+        "limit_price": "10000.00",
+        "stop_trigger_price": "20000.00"
+      },
+      "trigger_bracket_gtd": {
+        "base_size": 0.001,
+        "limit_price": "10000.00",
+        "stop_trigger_price": "20000.00",
+        "end_time": "2021-05-31T09:59:59Z"
+      },
+      "scaled_limit_gtc": {
+        "orders": [
+          {
+            "quote_size": "10.00",
+            "base_size": "0.001",
+            "limit_price": "10000.00",
+            "post_only": false,
+            "currency_size": {
+              "value": "1.23",
+              "currency": "BTC"
+            }
+          }
+        ],
+        "price_distribution": "FLAT",
+        "size_distribution": "INCREASING"
+      }
+    },
+    "current_pending_replace": {
+      "price": "19000.00",
+      "size": "0.001"
+    },
+    "commission_detail_total": {},
+    "workable_size": "3",
+    "workable_size_completion_pct": "50",
+    "product_details": {
+      "equity_details": {}
+    },
+    "cost_basis_method": "COST_BASIS_METHOD_HIFO",
+    "displayed_order_config": "INSTANT_GFD",
+    "equity_trading_session": "EQUITY_TRADING_SESSION_NORMAL",
+    "prediction_side": "PREDICTION_SIDE_YES",
+    "total_value_after_fees_native": {
+      "value": "1.23",
+      "currency": "BTC"
+    },
+    "outstanding_hold_amount_native": {
+      "value": "1.23",
+      "currency": "BTC"
+    },
+    "total_fees_native": {
+      "value": "1.23",
+      "currency": "BTC"
+    },
+    "total_value_after_fees": "10025.00"
+  }
+}

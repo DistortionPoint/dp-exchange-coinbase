@@ -1,0 +1,19 @@
+{
+  "channel": "l2_data",
+  "timestamp": "2026-08-28T14:53:46.649112Z",
+  "sequence_num": 1,
+  "events": [
+    {
+      "type": "update",
+      "product_id": "BTC-USD",
+      "updates": [
+        {
+          "side": "bid",
+          "event_time": "2026-08-28T14:53:46.600000Z",
+          "price_level": "79478.0",
+          "new_quantity": "0"
+        }
+      ]
+    }
+  ]
+}

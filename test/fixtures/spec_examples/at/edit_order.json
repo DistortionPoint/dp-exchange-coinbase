@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "errors": [
+    {
+      "edit_failure_reason": "COMMANDER_REJECTED_EDIT_ORDER",
+      "preview_failure_reason": "PREVIEW_MISSING_COMMISSION_RATE"
+    }
+  ]
+}

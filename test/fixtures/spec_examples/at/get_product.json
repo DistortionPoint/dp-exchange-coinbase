@@ -1,0 +1,99 @@
+{
+  "product_id": "BTC-USD",
+  "price": "140.21",
+  "price_percentage_change_24h": "9.43%",
+  "volume_24h": "1908432",
+  "volume_percentage_change_24h": "9.43%",
+  "base_increment": "0.00000001",
+  "quote_increment": "0.00000001",
+  "quote_min_size": "0.00000001",
+  "quote_max_size": "1000",
+  "base_min_size": "0.00000001",
+  "base_max_size": "1000",
+  "base_name": "Bitcoin",
+  "quote_name": "US Dollar",
+  "watched": true,
+  "is_disabled": false,
+  "new": true,
+  "cancel_only": true,
+  "limit_only": true,
+  "post_only": true,
+  "trading_disabled": false,
+  "auction_mode": true,
+  "product_type": "SPOT",
+  "quote_currency_id": "USD",
+  "base_currency_id": "BTC",
+  "fcm_trading_session_details": {
+    "session_state": "FCM_TRADING_SESSION_STATE_PRE_OPEN",
+    "closed_reason": "FCM_TRADING_SESSION_CLOSED_REASON_REGULAR_MARKET_CLOSE",
+    "maintenance": {}
+  },
+  "mid_market_price": "140.22",
+  "alias": "BTC-USD",
+  "alias_to": [
+    "BTC-USDC"
+  ],
+  "base_display_symbol": "BTC",
+  "quote_display_symbol": "USD",
+  "view_only": true,
+  "price_increment": "0.00000001",
+  "display_name": "BTC PERP",
+  "product_venue": "neptune",
+  "approximate_quote_24h_volume": "1908432",
+  "new_at": "2021-07-01T00:00:00Z",
+  "market_cap": "1500000000000",
+  "icon_color": "red",
+  "icon_url": "https://example.com",
+  "display_name_overwrite": "Bitcoin Perpetual",
+  "about_description": "nano Crude Oil Futures is a monthly cash-settled contract that allows participants to manage risk, trade on margin, or speculate on the price of oil.",
+  "future_product_details": {
+    "risk_managed_by": "MANAGED_BY_FCM",
+    "contract_expiry_type": "EXPIRING",
+    "perpetual_details": {},
+    "region_enabled": {},
+    "intraday_margin_rate": {
+      "long_margin_rate": "0.5",
+      "short_margin_rate": "0.5"
+    },
+    "overnight_margin_rate": {
+      "long_margin_rate": "0.5",
+      "short_margin_rate": "0.5"
+    },
+    "futures_asset_type": "FUTURES_ASSET_TYPE_CRYPTO",
+    "futures_asset_types": [
+      "FUTURES_ASSET_TYPE_CRYPTO"
+    ],
+    "trading_hours_type": "TRADING_HOURS_TYPE_EQUITY_INDEX",
+    "deribit_product_details": {
+      "tick_size_steps": [
+        {}
+      ]
+    }
+  },
+  "equity_product_details": {
+    "equity_subtype": "EQUITY_PRODUCT_SUBTYPE_COMMON_STOCK",
+    "trading_day_info": {
+      "trade_date_type": "TRADE_DATE_TYPE_REGULAR",
+      "trading_sessions": [
+        {
+          "session_type": "EQUITY_TRADING_SESSION_NORMAL"
+        }
+      ]
+    },
+    "current_session": "EQUITY_TRADING_SESSION_NORMAL",
+    "recent_trading_days": {
+      "trading_days": [
+        {
+          "trade_date_type": "TRADE_DATE_TYPE_REGULAR",
+          "trading_sessions": [
+            {
+              "session_type": "EQUITY_TRADING_SESSION_NORMAL"
+            }
+          ]
+        }
+      ]
+    },
+    "equity_trading_flags": {}
+  },
+  "status": "online"
+}

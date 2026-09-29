@@ -1,0 +1,64 @@
+{
+  "balance_summary": {
+    "futures_buying_power": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "total_usd_balance": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "cbi_usd_balance": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "cfm_usd_balance": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "total_open_orders_hold_amount": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "unrealized_pnl": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "daily_realized_pnl": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "initial_margin": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "available_margin": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "liquidation_threshold": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "liquidation_buffer_amount": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "intraday_margin_window_measure": {
+      "margin_window_type": "FCM_MARGIN_WINDOW_TYPE_OVERNIGHT",
+      "margin_level": "MARGIN_LEVEL_TYPE_BASE"
+    },
+    "overnight_margin_window_measure": {
+      "margin_window_type": "FCM_MARGIN_WINDOW_TYPE_OVERNIGHT",
+      "margin_level": "MARGIN_LEVEL_TYPE_BASE"
+    },
+    "total_pending_transfers_amount": {
+      "value": "125.50",
+      "currency": "USD"
+    },
+    "funding_pnl": {
+      "value": "125.50",
+      "currency": "USD"
+    }
+  }
+}

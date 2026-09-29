@@ -1,0 +1,14 @@
+{
+  "transaction_validators": [
+    {
+      "validator_status": "VALIDATOR_STATUS_PENDING",
+      "transaction_id": "8f14e45f-ceea-467e-0000-000000000txn",
+      "validator_address": "0xva11da700000000000000000000000000000001"
+    }
+  ],
+  "pagination": {
+    "sort_direction": "DESC",
+    "next_cursor": "",
+    "has_next": false
+  }
+}

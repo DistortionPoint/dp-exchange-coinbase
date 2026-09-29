@@ -1,0 +1,51 @@
+{
+  "errs": [],
+  "warning": [],
+  "quote_size": 10,
+  "base_size": 0.001,
+  "leverage": "2.0",
+  "pnl_configuration": {
+    "trigger_bracket_pnl": {}
+  },
+  "twap_bucket_metadata": {},
+  "margin_ratio_data": {},
+  "commission_detail_total": {},
+  "scaled_metadata": {
+    "scaled_order_distribution": [
+      {
+        "errs": [
+          "PREVIEW_MISSING_COMMISSION_RATE"
+        ],
+        "warning": [
+          "BIG_ORDER"
+        ]
+      }
+    ]
+  },
+  "compliance_limit_data": {
+    "total_limit": {
+      "value": "1.23",
+      "currency": "BTC"
+    },
+    "remaining_limits": {
+      "value": "1.23",
+      "currency": "BTC"
+    }
+  },
+  "prediction_order_metadata": {
+    "minimum_total": {
+      "value": "1.23",
+      "currency": "BTC"
+    },
+    "maximum_total": {
+      "value": "1.23",
+      "currency": "BTC"
+    }
+  },
+  "max_loss": "10.00",
+  "order_total": "10025.00",
+  "commission_total": "25.00",
+  "best_bid": "39999.50",
+  "best_ask": "40000.50",
+  "is_max": false
+}
