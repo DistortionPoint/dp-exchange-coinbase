@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.75] - 2026-09-29
+
 ### Fixed
 
 - A retried request is signed again. `Core.HttpClient` retries a timeout or a 5xx, and every
