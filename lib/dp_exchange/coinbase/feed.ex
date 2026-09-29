@@ -1329,13 +1329,15 @@ defmodule DpExchange.Coinbase.Feed do
         do: channel
   end
 
-  # A credential-less caller only ever wanted the public `ticker` channel — see `Socket`'s
-  # `@authenticated_channels`. Sending a doomed `level2` subscribe would either report a
-  # `credentials_required` error as a call's synchronous result (masking that `ticker` works
-  # fine) or cost a wire round trip to learn what the credential's absence already answers.
-  # This is a NARROWING of what was asked for, never a widening: asking for `:quotes` alone
-  # with credentials present still yields `ticker` alone.
-  defp channel_permitted?("level2", nil), do: false
+  # `level2` used to be refused here for a credential-less caller, on the reasoning that
+  # `Socket`'s `@authenticated_channels` would refuse it anyway and this saved a wire round
+  # trip. That reasoning no longer holds: `SubscribeLevel2`'s `jwt` is documented "Optional
+  # here; recommended for connection reliability."
+  # (docs/reference/coinbase/openapi/at-async.json:685-687), not required, and `Socket` now
+  # sends the subscribe with a JWT when credentials are available and without one when they
+  # are not — see `Socket.subscription_message/3`. Every channel in `@channels_in_order` is
+  # therefore permitted regardless of credentials; only `user`, which this list never
+  # carries, genuinely needs one.
   defp channel_permitted?(_channel, _credentials), do: true
 
   # Each channel's own grouping, at its own size — see `shards/1` and `level2_shards/2`.

@@ -75,7 +75,12 @@ defmodule DpExchange.Coinbase.BaselineTest do
                      "type" => "snapshot",
                      "product_id" => "BTC-USD",
                      "updates" => [
-                       %{"side" => "bid", "price_level" => "77791.77", "new_quantity" => "1.0"}
+                       %{
+                         "event_time" => "2026-08-28T14:53:45.000000Z",
+                         "side" => "bid",
+                         "price_level" => "77791.77",
+                         "new_quantity" => "1.0"
+                       }
                      ]
                    }
                  ]

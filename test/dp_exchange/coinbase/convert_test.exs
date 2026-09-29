@@ -70,7 +70,18 @@ defmodule DpExchange.Coinbase.ConvertTest do
             "status" => "TRADE_STATUS_CREATED",
             "user_entered_amount" => %{"value" => "100", "currency" => "USD"},
             "total" => %{"value" => "99.9", "currency" => "USDC"},
-            "fees" => %{"value" => "0.1", "currency" => "USD"}
+            # `fees` is an array of `Fee` objects, each with its own `amount`
+            # (docs/reference/coinbase/openapi/at-spec.yaml:9968, :10830-10840) — this fixture
+            # used to pin `fees` as a single Amount map, a shape the venue never sends and the
+            # old code never actually read correctly (`decimal/1` on a list silently produced
+            # `nil`). `total_fee` is the venue's own rollup Fee and what `Conversion.fee` reads.
+            "fees" => [
+              %{"title" => "Coinbase Fee", "amount" => %{"value" => "0.05", "currency" => "USD"}}
+            ],
+            "total_fee" => %{
+              "title" => "Total Fee",
+              "amount" => %{"value" => "0.1", "currency" => "USD"}
+            }
           },
           overrides
         )
@@ -93,6 +104,16 @@ defmodule DpExchange.Coinbase.ConvertTest do
       assert conversion.to_asset == "USDC"
       assert Decimal.equal?(conversion.from_amount, Decimal.new("100"))
       assert Decimal.equal?(conversion.to_amount, Decimal.new("99.9"))
+    end
+
+    test "fee reads total_fee.amount.value, not the fees array" do
+      assert {:ok, conversion} =
+               Rest.quote_conversion(@credentials, "USD", "USDC", Decimal.new("1"),
+                 plug: responding(trade()),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(conversion.fee, Decimal.new("0.1"))
     end
 
     test "expires_at is nil, and nil is not open-ended" do

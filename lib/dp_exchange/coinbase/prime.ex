@@ -83,7 +83,9 @@ defmodule DpExchange.Coinbase.Prime do
   @spec stake_portfolio(credentials(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def stake_portfolio(credentials, portfolio_id, asset, amount, opts) do
-    post("/portfolios/#{portfolio_id}/staking/initiate", stake_body(asset, amount, opts),
+    post(
+      "/portfolios/#{portfolio_id}/staking/initiate",
+      portfolio_stake_body(asset, amount, opts),
       credentials: credentials,
       opts: opts
     )
@@ -100,7 +102,9 @@ defmodule DpExchange.Coinbase.Prime do
   @spec unstake_portfolio(credentials(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def unstake_portfolio(credentials, portfolio_id, asset, amount, opts) do
-    post("/portfolios/#{portfolio_id}/staking/unstake", stake_body(asset, amount, opts),
+    post(
+      "/portfolios/#{portfolio_id}/staking/unstake",
+      portfolio_stake_body(asset, amount, opts),
       credentials: credentials,
       opts: opts
     )
@@ -110,31 +114,50 @@ defmodule DpExchange.Coinbase.Prime do
   The validators a staking transaction would touch —
   `POST /portfolios/{pid}/staking/transaction-validators/query`.
 
-  A read, despite the POST: Prime takes the query in a body. `opts[:query]` is the venue's
-  own filter map and is sent as given, because a filter this package reshaped would be a
-  second place to be wrong about a vocabulary only Prime defines.
+  A read, despite the POST: Prime takes the query in a body. `opts[:transaction_ids]` is
+  **required** — `ListTransactionValidatorsRequest.transaction_ids` is a required field
+  (docs/reference/coinbase/openapi/prime-spec.yaml:7350) with no documented "every
+  transaction" meaning for its absence, so a caller who omits it is refused locally rather
+  than sent to the venue with a body that invents an empty list on its behalf.
+  `opts[:extra]` carries the venue's other documented fields (`cursor`, `limit`,
+  `sort_direction`) as given, because reshaping them would be a second place to be wrong
+  about a vocabulary only Prime defines.
   """
   @spec query_transaction_validators(credentials(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def query_transaction_validators(credentials, portfolio_id, opts) do
-    post(
-      "/portfolios/#{portfolio_id}/staking/transaction-validators/query",
-      Config.opt(opts, :query, %{}),
-      credentials: credentials,
-      opts: opts
-    )
+    case Config.opt(opts, :transaction_ids, nil) do
+      ids when is_list(ids) and ids != [] ->
+        body = Map.merge(%{"transaction_ids" => ids}, Config.opt(opts, :extra, %{}))
+
+        post(
+          "/portfolios/#{portfolio_id}/staking/transaction-validators/query",
+          body,
+          credentials: credentials,
+          opts: opts
+        )
+
+      _missing_or_empty ->
+        {:error, :missing_transaction_ids}
+    end
   end
 
   @doc """
   Stakes `amount` of `asset` **on one wallet** —
   `POST /portfolios/{pid}/wallets/{wid}/staking/initiate`.
+
+  `asset` is not sent — `StakingInitiateRequest` at this path carries no currency field
+  (docs/reference/coinbase/openapi/prime-spec.yaml:8850-8869); the wallet already names a
+  single asset on the venue's side. It stays a parameter here because a caller choosing
+  between `stake_wallet/6` and `stake_portfolio/5` needs to say which asset it means, the
+  same way `unstake_wallet/6` and `preview_unstake_wallet/6` do.
   """
   @spec stake_wallet(credentials(), String.t(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def stake_wallet(credentials, portfolio_id, wallet_id, asset, amount, opts) do
+  def stake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
     post(
       "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/initiate",
-      stake_body(asset, amount, opts),
+      wallet_stake_body(amount, opts),
       credentials: credentials,
       opts: opts
     )
@@ -144,7 +167,8 @@ defmodule DpExchange.Coinbase.Prime do
   Redeems `amount` of a staked `asset` **from one wallet** —
   `POST /portfolios/{pid}/wallets/{wid}/staking/unstake`.
 
-  `preview_unstake_wallet/6` answers what this would do without doing it.
+  `preview_unstake_wallet/6` answers what this would do without doing it. `asset` is not
+  sent, for the same reason it is not sent by `stake_wallet/6` — see that function's doc.
   """
   @spec unstake_wallet(
           credentials(),
@@ -155,10 +179,10 @@ defmodule DpExchange.Coinbase.Prime do
           keyword()
         ) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def unstake_wallet(credentials, portfolio_id, wallet_id, asset, amount, opts) do
+  def unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
     post(
       "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake",
-      stake_body(asset, amount, opts),
+      wallet_stake_body(amount, opts),
       credentials: credentials,
       opts: opts
     )
@@ -171,6 +195,14 @@ defmodule DpExchange.Coinbase.Prime do
   **A preview is not a reservation.** Nothing is held, and the unbonding schedule it
   reports is the schedule as of the moment it was asked. It is the only endpoint in this
   module that moves nothing.
+
+  `PreviewUnstakeRequest`'s body is `{amount}` alone — no `currency`, no
+  `idempotency_key` (docs/reference/coinbase/openapi/prime-spec.yaml:9083-9090). This used
+  to send the same body as a real unstake, including a generated idempotency key, on the
+  reasoning that a key on a call that changes nothing was harmless. It was also undocumented:
+  the venue defines no field here for it to occupy, so sending one was a guess at a schema
+  this package does not own, exactly what `query_transaction_validators/3`'s comment above
+  warns against. `asset` is unused for the same reason `stake_wallet/6` does not send it.
   """
   @spec preview_unstake_wallet(
           credentials(),
@@ -180,10 +212,10 @@ defmodule DpExchange.Coinbase.Prime do
           Decimal.t(),
           keyword()
         ) :: {:ok, map()} | {:error, term()} | {:refused, term()}
-  def preview_unstake_wallet(credentials, portfolio_id, wallet_id, asset, amount, opts) do
+  def preview_unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
     post(
       "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake/preview",
-      stake_body(asset, amount, opts),
+      %{"amount" => Decimal.to_string(amount, :normal)},
       credentials: credentials,
       opts: opts
     )
@@ -213,28 +245,33 @@ defmodule DpExchange.Coinbase.Prime do
   **A write, not a report.** It does not say what has accrued; it moves what has. A caller
   wanting the figure reads `staking_status/4`.
 
-  ## Sent once, never retried
+  `StakingClaimRewardsRequest` requires `idempotency_key` and takes an optional
+  `inputs.amount` — omitted, the wallet claims the maximum available
+  (docs/reference/coinbase/openapi/prime-spec.yaml:8744-8770, :15784-15787). This module
+  generates the key when the caller gives none, the same as the staking calls above, and
+  reads `opts[:amount]` into `inputs.amount` when given. A caller who wants to shape the
+  body itself still can, through `opts[:body]` — that override is honoured, but the
+  required key is always merged in rather than let it be missing, and a key the caller's
+  own body already carries is kept over a freshly generated one.
 
-  `Core.HttpClient` retries a timeout or a 5xx three times by default, and a retried write
-  is only safe when the venue can tell the second attempt from the first. The staking calls
-  above can: they send an `idempotency_key`, generated when the caller gives none. This one
-  cannot. Its body is whatever `opts[:body]` holds — opaque to this module — and injecting a
-  field into a caller's own map would be guessing at a schema this package does not own.
+  ## Retried like the other staking writes, not sent once
 
-  So it takes the other remedy, the one `dp_exchange_gemini`'s `post_once/4` and
-  `dp_exchange_schwab`'s order writes already use: one attempt. A caller that wants another
-  makes it deliberately, which is the right way round for a call that moves money. A caller
-  who knows the venue's field for this can pass it in `opts[:body]` and raise
-  `:retry_attempts` themselves.
+  This used to send one attempt only, on the reasoning that its body was opaque — whatever
+  `opts[:body]` held — and that injecting an `idempotency_key` into a caller's own map would
+  be a guess at a schema this package did not own. The schema is no longer unknown: it
+  requires exactly the key this module already generates for `stake_wallet/6` and the rest.
+  With that key present, `Core.HttpClient`'s default of three attempts is safe the same way
+  it is for a stake or an unstake — the venue returns the original response for a retried
+  key rather than claiming a second time — so the `retry_attempts: 1` override is gone.
   """
   @spec claim_rewards(credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def claim_rewards(credentials, portfolio_id, wallet_id, opts) do
     post(
       "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/claim_rewards",
-      Config.opt(opts, :body, %{}),
+      claim_rewards_body(opts),
       credentials: credentials,
-      opts: Keyword.put_new(opts, :retry_attempts, 1)
+      opts: opts
     )
   end
 
@@ -276,21 +313,72 @@ defmodule DpExchange.Coinbase.Prime do
   #
   # Generating rather than refusing to retry is the better of the two remedies and is the one
   # the venue's own API supports: this field was already being sent when a caller supplied
-  # it, so it is the venue's mechanism, not an invention here. `claim_rewards/4` gets the
-  # other remedy — see its own note — because its body is opaque to this module and injecting
-  # a field into a caller's map would be a guess.
+  # it, so it is the venue's mechanism, not an invention here. `claim_rewards/4` now generates
+  # one the identical way — see `claim_rewards_body/1` — now that its schema is known too.
   #
-  # `preview_unstake_wallet/6` shares this body and so gets a key too. Harmless: it changes
-  # nothing on a call that changes nothing, and one code path is worth more than the
-  # distinction.
-  defp stake_body(asset, amount, opts) do
+  # This used to be one `stake_body/3` shared by every staking call, portfolio- and
+  # wallet-scoped alike, sending a flat `{currency, amount, idempotency_key}`. Neither scope's
+  # real schema matches that shape: `StakingInitiateRequest` (portfolio) wants
+  # `currency_symbol`, not `currency`, and `StakingInitiateRequest` (wallet) wants the amount
+  # nested at `inputs.amount`, with no currency field at all — the wallet already names a
+  # single asset on the venue's side. Sending the wrong flat body did not fail; it landed on a
+  # field the venue does not read for that path and, for the wallet scope, omitted `inputs`
+  # entirely, which the docs say defaults to staking the *maximum amount available*
+  # (docs/reference/coinbase/openapi/prime-spec.yaml:15862, :15909) — the caller's amount was
+  # silently discarded. Split into `portfolio_stake_body/3` and `wallet_stake_body/2` below so
+  # each scope's body only ever mirrors that scope's own schema.
+  defp portfolio_stake_body(asset, amount, opts) do
     %{
-      "currency" => String.upcase(asset),
-      "amount" => Decimal.to_string(amount, :normal),
-      "idempotency_key" => Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate()
+      "idempotency_key" => Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate(),
+      "currency_symbol" => String.upcase(asset),
+      "amount" => Decimal.to_string(amount, :normal)
     }
     |> Map.merge(Config.opt(opts, :extra, %{}))
   end
+
+  # `WalletStakeInputs`/`WalletUnstakeInputs` carry `amount` (plus asset-specific fields like
+  # `validator_address`/`end_date`) nested under `inputs`, not at the top level
+  # (docs/reference/coinbase/openapi/prime-spec.yaml:15857-15873, :15904-15920). `opts[:extra]`
+  # merges into `inputs`, because every field that schema documents lives there — a caller
+  # supplying `validator_address` means "an input to this stake", not "a new top-level field
+  # StakingInitiateRequest never declared". `opts[:metadata]`, if given, is sent as the
+  # sibling `metadata` object the schema also allows, since that one is genuinely top-level.
+  defp wallet_stake_body(amount, opts) do
+    inputs =
+      %{"amount" => Decimal.to_string(amount, :normal)}
+      |> Map.merge(Config.opt(opts, :extra, %{}))
+
+    %{"idempotency_key" => Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate()}
+    |> Map.put("inputs", inputs)
+    |> put_present("metadata", Config.opt(opts, :metadata, nil))
+  end
+
+  # `StakingClaimRewardsRequest` requires `idempotency_key`; `inputs.amount` is optional and,
+  # if omitted, the wallet claims the maximum available
+  # (docs/reference/coinbase/openapi/prime-spec.yaml:8744-8770, :15784-15787). A caller's own
+  # `opts[:body]` is honoured as the base — this module still does not know every field this
+  # schema might grow — but the required key is always merged in rather than risk a request
+  # the venue refuses outright for missing it, and a key already present in the caller's body
+  # is kept rather than overwritten by a freshly generated one.
+  defp claim_rewards_body(opts) do
+    opts
+    |> Config.opt(:body, %{})
+    |> Map.put_new(
+      "idempotency_key",
+      Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate()
+    )
+    |> put_claim_amount(Config.opt(opts, :amount, nil))
+  end
+
+  defp put_claim_amount(body, nil), do: body
+
+  defp put_claim_amount(body, amount) do
+    inputs = Map.get(body, "inputs", %{})
+    Map.put(body, "inputs", Map.put(inputs, "amount", Decimal.to_string(amount, :normal)))
+  end
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
 
   defp post(path, body, credentials: credentials, opts: opts) do
     encoded = Jason.encode!(body)

@@ -29,6 +29,18 @@ defmodule DpExchange.CoinbaseTest do
       end
     end
 
+    test "authenticated_streamable is empty — level2's JWT is optional, not required" do
+      # This used to declare `[:order_book]`, on the reasoning that `level2`'s subscribe
+      # needs a credential the way `user`'s genuinely does. `SubscribeLevel2`'s own payload
+      # says otherwise: "Optional here; recommended for connection reliability."
+      # (docs/reference/coinbase/openapi/at-async.json:685-687), unlike `SubscribeUser`'s,
+      # which lists `jwt` as `required` (at-async.json:752-765). `Socket` now sends `level2`
+      # unauthenticated when no credential is given, and `Feed.channel_permitted?/2` no
+      # longer filters it out for a credential-less caller.
+      assert Coinbase.capabilities().authenticated_streamable == []
+      assert Coinbase.capabilities().streamable == [:quotes, :order_book]
+    end
+
     test "nothing claims :proven — nothing has run in production" do
       # `:proven` is earned by production use, not by careful implementation. A package
       # that has never traded declaring it would be the exact dishonesty D15 prevents.
@@ -422,10 +434,11 @@ defmodule DpExchange.CoinbaseTest do
                Fake.preview_order(@fake_credentials, request)
     end
 
-    test "editing price or size is accepted" do
+    test "editing price and size is accepted" do
       assert {:ok, order} =
                Fake.replace_order(@fake_credentials, "fake-order-1", %{
-                 price: Decimal.new("41000")
+                 price: Decimal.new("41000"),
+                 quantity: Decimal.new("0.5")
                })
 
       assert order.id == "fake-order-1"
@@ -514,7 +527,11 @@ defmodule DpExchange.CoinbaseTest do
       }
 
       assert {:ok, _tape} =
-               Coinbase.get_trades("BTC-USD", plug: json_plug(trades), retry_attempts: 0)
+               Coinbase.get_trades("BTC-USD",
+                 limit: 10,
+                 plug: json_plug(trades),
+                 retry_attempts: 0
+               )
 
       products = %{
         "products" => [
@@ -685,7 +702,7 @@ defmodule DpExchange.CoinbaseTest do
 
     test "preview_replace reaches the venue through the facade" do
       assert {:ok, _preview} =
-               Coinbase.preview_replace(@creds, "abc", %{price: "41000"},
+               Coinbase.preview_replace(@creds, "abc", %{price: "41000", quantity: "0.5"},
                  plug: json_plug(%{"errors" => []}),
                  retry_attempts: 0
                )

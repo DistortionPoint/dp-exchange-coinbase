@@ -219,6 +219,43 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       assert {:refused, {:order_rejected, :unspecified}} =
                place(limit_request(), responding(%{"success" => false}))
     end
+
+    test "new_order_failure_reason is read — the current, required field, not just the deprecated one" do
+      # `NewOrderErrorResponse.new_order_failure_reason` is the current field and is
+      # required (docs/reference/coinbase/openapi/at-spec.yaml:7962-7967); `error` above is
+      # "(Deprecated)" (at-spec.yaml:7947-7950). This used to read only the deprecated one.
+      body = %{
+        "success" => false,
+        "error_response" => %{
+          "new_order_failure_reason" => "UNSUPPORTED_ORDER_CONFIGURATION",
+          "error" => "INSUFFICIENT_FUND"
+        }
+      }
+
+      assert {:refused, {:order_rejected, "UNSUPPORTED_ORDER_CONFIGURATION"}} =
+               place(limit_request(), responding(body))
+    end
+
+    test "message and error_details are read when the structured reason is absent" do
+      message_body = %{
+        "success" => false,
+        "error_response" => %{"message" => "The order configuration was invalid"}
+      }
+
+      assert {:refused, {:order_rejected, "The order configuration was invalid"}} =
+               place(limit_request(), responding(message_body))
+
+      details_body = %{
+        "success" => false,
+        "error_response" => %{
+          "error_details" => "Market orders cannot be placed with empty order sizes"
+        }
+      }
+
+      assert {:refused,
+              {:order_rejected, "Market orders cannot be placed with empty order sizes"}} =
+               place(limit_request(), responding(details_body))
+    end
   end
 
   describe "client_order_id" do
@@ -330,10 +367,17 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       {:ok, plug: plug}
     end
 
-    test "post_only is sent when set", %{plug: plug} do
+    test "post_only is sent when set, as a JSON boolean, not the string \"true\"", %{
+      plug: plug
+    } do
+      # `post_only` is documented as a JSON boolean
+      # (docs/reference/coinbase/openapi/at-spec.yaml:7803, :7839). This fixture used to pin
+      # the wrong shape: `put_unless_nil/3`'s catch-all ran every non-Decimal value through
+      # `to_string/1`, so `true` became the string `"true"` on the wire — a shape the venue's
+      # schema does not accept for this field.
       assert {:ok, _order} = place(limit_request(%{post_only: true}), plug)
       assert_receive {:sent, %{"order_configuration" => %{"limit_limit_gtc" => leaf}}}
-      assert leaf["post_only"] == "true"
+      assert leaf["post_only"] == true
     end
 
     test "post_only is absent when unset, not sent as false", %{plug: plug} do
@@ -353,6 +397,143 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
 
       assert_receive {:sent, %{"order_configuration" => %{"limit_limit_gtd" => leaf}}}
       assert leaf["end_time"] == "2026-09-01T00:00:00Z"
+    end
+
+    test "a %DateTime{} end_time is sent RFC3339, with a T, not to_string's space", %{
+      plug: plug
+    } do
+      # `end_time` is documented RFC3339
+      # (docs/reference/coinbase/openapi/at-spec.yaml:7828-7831, :9640-9643).
+      # `to_string(%DateTime{})` goes through `String.Chars` and renders a space where RFC3339
+      # requires `T` — `"2026-09-01 00:00:00Z"`, which is not a timestamp this venue reads.
+      end_time = DateTime.new!(~D[2026-09-01], ~T[00:00:00], "Etc/UTC")
+
+      assert {:ok, _order} =
+               place(limit_request(%{time_in_force: :gtd, end_time: end_time}), plug)
+
+      assert_receive {:sent, %{"order_configuration" => %{"limit_limit_gtd" => leaf}}}
+      assert leaf["end_time"] == "2026-09-01T00:00:00Z"
+      refute leaf["end_time"] =~ " "
+    end
+
+    test "post_only on a leaf whose schema does not carry it is refused locally", _context do
+      # `LimitLimitFok` has no `post_only` field
+      # (docs/reference/coinbase/openapi/at-spec.yaml:7765-7783); neither does either
+      # stop-limit leaf (:9596-9650). This used to add it unconditionally to every limit or
+      # stop-limit leaf, so a caller's `post_only` landed silently in a shape the venue never
+      # documented for FOK or stop-limit orders.
+      exploding = fn _conn -> raise "must not send a field the leaf's schema does not carry" end
+
+      assert {:error, {:unsupported_order_field, :post_only, {:limit, :fok}}} =
+               place(
+                 limit_request(%{time_in_force: :fok, post_only: true}),
+                 exploding
+               )
+
+      assert {:error, {:unsupported_order_field, :post_only, {:stop_limit, :gtc}}} =
+               place(
+                 limit_request(%{
+                   order_type: :stop_limit,
+                   time_in_force: :gtc,
+                   stop_price: Decimal.new("39000"),
+                   post_only: true
+                 }),
+                 exploding
+               )
+    end
+
+    test "end_time on a leaf whose schema does not carry it is refused locally" do
+      exploding = fn _conn -> raise "must not send a field the leaf's schema does not carry" end
+
+      assert {:error, {:unsupported_order_field, :end_time, {:limit, :fok}}} =
+               place(
+                 limit_request(%{time_in_force: :fok, end_time: "2026-09-01T00:00:00Z"}),
+                 exploding
+               )
+
+      assert {:error, {:unsupported_order_field, :end_time, {:limit, :gtc}}} =
+               place(limit_request(%{end_time: "2026-09-01T00:00:00Z"}), exploding)
+
+      assert {:error, {:unsupported_order_field, :end_time, {:stop_limit, :gtc}}} =
+               place(
+                 limit_request(%{
+                   order_type: :stop_limit,
+                   time_in_force: :gtc,
+                   stop_price: Decimal.new("39000"),
+                   end_time: "2026-09-01T00:00:00Z"
+                 }),
+                 exploding
+               )
+    end
+  end
+
+  describe "stop_direction — never inferred from side" do
+    defp stop_request(overrides \\ %{}) do
+      limit_request(
+        Map.merge(
+          %{
+            order_type: :stop_limit,
+            time_in_force: :gtc,
+            stop_price: Decimal.new("39000")
+          },
+          overrides
+        )
+      )
+    end
+
+    test "absent when the caller does not give one" do
+      me = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(accepted()))
+      end
+
+      assert {:ok, _order} = place(stop_request(), plug)
+      assert_receive {:sent, %{"order_configuration" => %{"stop_limit_stop_limit_gtc" => leaf}}}
+      refute Map.has_key?(leaf, "stop_direction")
+    end
+
+    test ":up and :down map to the venue's enum strings" do
+      me = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(accepted()))
+      end
+
+      assert {:ok, _order} = place(stop_request(%{stop_direction: :up}), plug)
+      assert_receive {:sent, %{"order_configuration" => %{"stop_limit_stop_limit_gtc" => leaf}}}
+      assert leaf["stop_direction"] == "STOP_DIRECTION_STOP_UP"
+
+      assert {:ok, _order} = place(stop_request(%{stop_direction: :down}), plug)
+      assert_receive {:sent, %{"order_configuration" => %{"stop_limit_stop_limit_gtc" => leaf}}}
+      assert leaf["stop_direction"] == "STOP_DIRECTION_STOP_DOWN"
+    end
+
+    test "is not inferred from side — a sell with no stop_direction sends none" do
+      me = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(accepted()))
+      end
+
+      assert {:ok, _order} = place(stop_request(%{side: :sell}), plug)
+      assert_receive {:sent, %{"order_configuration" => %{"stop_limit_stop_limit_gtc" => leaf}}}
+      refute Map.has_key?(leaf, "stop_direction")
     end
   end
 
@@ -464,7 +645,10 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       end
 
       assert {:ok, order} =
-               Rest.replace_order(@credentials, "abc-123", %{price: Decimal.new("41000")},
+               Rest.replace_order(
+                 @credentials,
+                 "abc-123",
+                 %{price: Decimal.new("41000"), quantity: Decimal.new("0.5")},
                  plug: plug,
                  retry_attempts: 0
                )
@@ -484,7 +668,30 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       }
 
       assert {:refused, {:edit_rejected, "INVALID_PRICE_PRECISION"}} =
-               Rest.replace_order(@credentials, "abc-123", %{price: Decimal.new("41000")},
+               Rest.replace_order(
+                 @credentials,
+                 "abc-123",
+                 %{price: Decimal.new("41000"), quantity: Decimal.new("0.5")},
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "preview_failure_reason is read when edit_failure_reason is absent" do
+      # `EditOrderError` carries both fields
+      # (docs/reference/coinbase/openapi/at-spec.yaml:6726-6734). This used to read only
+      # `edit_failure_reason` and report `:unspecified` even when the entry named the
+      # reason under the other field.
+      body = %{
+        "success" => false,
+        "errors" => [%{"preview_failure_reason" => "PREVIEW_INSUFFICIENT_FUND"}]
+      }
+
+      assert {:refused, {:edit_rejected, "PREVIEW_INSUFFICIENT_FUND"}} =
+               Rest.replace_order(
+                 @credentials,
+                 "abc-123",
+                 %{price: Decimal.new("41000"), quantity: Decimal.new("0.5")},
                  plug: responding(body),
                  retry_attempts: 0
                )
@@ -510,6 +717,64 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                  plug: exploding,
                  retry_attempts: 0
                )
+    end
+
+    test "price alone, or size alone, is refused locally rather than sent half-built" do
+      # `EditOrderRequest` requires order_id, price AND size, all three
+      # (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852). This used to send whichever
+      # one the caller supplied and drop the other with `put_unless_nil/3` — a body shape the
+      # venue does not document and this package never measured the venue's handling of.
+      exploding = fn _conn -> raise "must not send a half-built edit" end
+
+      assert {:error, :missing_required_edit_field} =
+               Rest.replace_order(@credentials, "abc-123", %{price: Decimal.new("41000")},
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+
+      assert {:error, :missing_required_edit_field} =
+               Rest.replace_order(@credentials, "abc-123", %{quantity: Decimal.new("0.5")},
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "the edit body carries both price and size, as strings" do
+      me = self()
+
+      plug = fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:body, conn.request_path, raw})
+
+        if conn.request_path =~ "edit" do
+          Plug.Conn.resp(conn, 200, Jason.encode!(%{"success" => true}))
+        else
+          Plug.Conn.resp(
+            conn,
+            200,
+            Jason.encode!(%{"order" => %{"order_id" => "abc-123", "status" => "OPEN"}})
+          )
+        end
+        |> Plug.Conn.put_resp_content_type("application/json")
+      end
+
+      assert {:ok, _order} =
+               Rest.replace_order(
+                 @credentials,
+                 "abc-123",
+                 %{price: Decimal.new("41000"), quantity: Decimal.new("0.5")},
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:body, path, raw}
+      assert path =~ "edit"
+
+      assert Jason.decode!(raw) == %{
+               "order_id" => "abc-123",
+               "price" => "41000",
+               "size" => "0.5"
+             }
     end
   end
 

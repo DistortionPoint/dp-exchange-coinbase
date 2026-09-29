@@ -437,7 +437,7 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       }
 
       assert {:ok, trades} =
-               Rest.get_trades("BTC-USD", plug: responding(body), retry_attempts: 0)
+               Rest.get_trades("BTC-USD", limit: 10, plug: responding(body), retry_attempts: 0)
 
       assert length(trades) == 2
       # Oldest first, by the print's own time: `t-2` is five seconds older, although the
@@ -459,15 +459,52 @@ defmodule DpExchange.Coinbase.OrderBookTest do
         ]
       }
 
-      assert {:ok, [t]} = Rest.get_trades("BTC-USD", plug: responding(body), retry_attempts: 0)
+      assert {:ok, [t]} =
+               Rest.get_trades("BTC-USD", limit: 10, plug: responding(body), retry_attempts: 0)
+
       assert t.side == nil
+    end
+
+    test "side is inverted from the venue's maker side to the taker Core.Types.Trade wants" do
+      # `HistoricalMarketTrade.side` — what this endpoint returns
+      # (docs/reference/coinbase/openapi/at-spec.yaml:486-527, :7581-7587) — is "The maker
+      # side of the trade." (at-spec.yaml:7752). `Core.Types.Trade.side` wants the taker's —
+      # "who removed liquidity". A resting BUY the venue reports was lifted by a SELL, and a
+      # resting SELL was lifted by a BUY; the two are always opposite for the same print.
+      # This fixture used to pin the uninverted (wrong) reading, asserting a venue "BUY" came
+      # back as `:buy` when it must come back as `:sell`.
+      body = %{
+        "trades" => [
+          %{
+            "trade_id" => "t-1",
+            "price" => "1",
+            "size" => "1",
+            "time" => "2026-08-28T14:53:45.649112Z",
+            "side" => "BUY"
+          },
+          %{
+            "trade_id" => "t-2",
+            "price" => "1",
+            "size" => "1",
+            "time" => "2026-08-28T14:53:44.649112Z",
+            "side" => "SELL"
+          }
+        ]
+      }
+
+      assert {:ok, trades} =
+               Rest.get_trades("BTC-USD", limit: 10, plug: responding(body), retry_attempts: 0)
+
+      by_id = Map.new(trades, &{&1.id, &1.side})
+      assert by_id["t-1"] == :sell
+      assert by_id["t-2"] == :buy
     end
 
     test "an undated print is refused" do
       body = %{"trades" => [%{"trade_id" => "t-1", "price" => "1", "size" => "1"}]}
 
       assert {:error, :missing_venue_timestamp} =
-               Rest.get_trades("BTC-USD", plug: responding(body), retry_attempts: 0)
+               Rest.get_trades("BTC-USD", limit: 10, plug: responding(body), retry_attempts: 0)
     end
 
     test "an unidentified print is refused, like an undated or unpriced one" do
@@ -493,7 +530,7 @@ defmodule DpExchange.Coinbase.OrderBookTest do
         }
 
         assert {:error, {:missing_required_field, :id}} =
-                 Rest.get_trades("BTC-USD", plug: responding(body), retry_attempts: 0),
+                 Rest.get_trades("BTC-USD", limit: 10, plug: responding(body), retry_attempts: 0),
                "trade_id #{inspect(id)} must be refused"
       end
     end
@@ -511,7 +548,9 @@ defmodule DpExchange.Coinbase.OrderBookTest do
         ]
       }
 
-      assert {:ok, [t]} = Rest.get_trades("BTC-USD", plug: responding(body), retry_attempts: 0)
+      assert {:ok, [t]} =
+               Rest.get_trades("BTC-USD", limit: 10, plug: responding(body), retry_attempts: 0)
+
       refute t.broken
     end
 
@@ -526,14 +565,41 @@ defmodule DpExchange.Coinbase.OrderBookTest do
         |> Plug.Conn.resp(200, Jason.encode!(%{"trades" => []}))
       end
 
-      assert {:ok, []} = Rest.get_trades("BTC-USD", plug: plug, retry_attempts: 0)
+      assert {:ok, []} = Rest.get_trades("BTC-USD", limit: 10, plug: plug, retry_attempts: 0)
       assert_receive {:path, path}
       assert path =~ "/market/products/BTC-USD/ticker"
     end
 
     test "a body with no trades key is unreadable" do
       assert {:error, :unexpected_response_shape} =
-               Rest.get_trades("BTC-USD", plug: responding(%{}), retry_attempts: 0)
+               Rest.get_trades("BTC-USD", limit: 10, plug: responding(%{}), retry_attempts: 0)
+    end
+
+    test "limit is required — the venue's own param is required: true, with no default" do
+      # `limit` is `required: true` on this endpoint
+      # (docs/reference/coinbase/openapi/at-spec.yaml:523-528, :2636-2641) and the venue
+      # documents no default. This used to send no `limit` at all when the caller gave
+      # none, relying on whatever the venue does with an undocumented absence.
+      exploding = fn _conn -> raise "must not call the venue with no limit" end
+
+      assert {:error, :missing_limit} =
+               Rest.get_trades("BTC-USD", plug: exploding, retry_attempts: 0)
+    end
+
+    test "the caller's limit is sent on the wire" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"trades" => []}))
+      end
+
+      assert {:ok, []} = Rest.get_trades("BTC-USD", limit: 25, plug: plug, retry_attempts: 0)
+      assert_receive {:query, query}
+      assert query =~ "limit=25"
     end
   end
 
@@ -541,7 +607,11 @@ defmodule DpExchange.Coinbase.OrderBookTest do
     @product %{
       "product_id" => "BTC-USD",
       "base_increment" => "0.00000001",
+      # Deliberately different from price_increment below: this is the field the fix reads
+      # :price_increment from, and a fixture where the two agree would not catch a
+      # regression back to reading quote_increment.
       "quote_increment" => "0.01",
+      "price_increment" => "0.5",
       "base_min_size" => "0.000016",
       "quote_min_size" => "1",
       "base_max_size" => "3500",
@@ -549,15 +619,21 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       "status" => "online"
     }
 
-    test "the PRICE increment is quote_increment, not base_increment" do
-      # A caller rounding a price to the base increment produces an order the venue rejects
-      # on a field it did not name.
+    test "the PRICE increment is Product.price_increment, not quote_increment or base_increment" do
+      # `price_increment` — "Minimum amount price can be increased or decreased at once"
+      # (docs/reference/coinbase/openapi/at-spec.yaml:9345-9348) — is the tick size for
+      # rounding a limit price. `quote_increment` is a different thing: "Minimum amount
+      # quote value can be increased or decreased at once" (at-spec.yaml:9193-9197), the
+      # granularity of a quote-sized order's notional. This package used to read
+      # `quote_increment` here; on many products the two happen to share a value, which is
+      # why the fixture above deliberately gives them different ones.
       assert {:ok, q} =
                Rest.quantization("BTC-USD", plug: responding(@product), retry_attempts: 0)
 
-      assert Decimal.equal?(q.price_increment, Decimal.new("0.01"))
+      assert Decimal.equal?(q.price_increment, Decimal.new("0.5"))
       assert Decimal.equal?(q.quantity_increment, Decimal.new("0.00000001"))
       refute Decimal.equal?(q.price_increment, q.quantity_increment)
+      refute Decimal.equal?(q.price_increment, Decimal.new("0.01"))
     end
 
     test "both minima are carried, because they bound different things" do

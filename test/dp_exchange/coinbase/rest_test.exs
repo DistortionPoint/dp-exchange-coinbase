@@ -64,6 +64,23 @@ defmodule DpExchange.Coinbase.RestTest do
       assert quote_struct.provider == :coinbase
     end
 
+    test "sends limit=1 — the venue's own ticker param is required: true, with no default" do
+      # `limit` is `required: true` on this endpoint
+      # (docs/reference/coinbase/openapi/at-spec.yaml:523-528, :2636-2641) and this used to
+      # send none at all. `to_quote/2` reads only the newest trade, so `1` is the smallest
+      # value that still serves this call.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+        Req.Test.json(conn, @ticker)
+      end
+
+      assert {:ok, _quote} = Rest.get_price("BTC-USD", plug: plug, retry_attempts: 0)
+      assert_receive {:query, query}
+      assert query =~ "limit=1"
+    end
+
     test "an empty side is nil, not zero" do
       # Zero is a price. A venue quoting nothing on a side has not quoted a price of
       # nothing — one side of a book can genuinely be empty.
@@ -372,6 +389,80 @@ defmodule DpExchange.Coinbase.RestTest do
     test "an unexpected shape is an error" do
       assert {:error, :unexpected_response_shape} =
                Rest.get_symbols(plug: responding(%{"nope" => 1}), retry_attempts: 0)
+    end
+
+    test "product_type=SPOT is sent explicitly, not left to the venue's own default" do
+      # `ListProducts` returns only SPOT when `product_type` is omitted
+      # (docs/reference/coinbase/openapi/at-spec.yaml:239-241) — this package used to rely
+      # on that default rather than say so.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"products" => []}))
+      end
+
+      assert {:ok, []} = Rest.get_symbols(plug: plug, retry_attempts: 0)
+      assert_receive {:query, query}
+      assert query =~ "product_type=SPOT"
+    end
+
+    test "the catalogue is paginated — a second page is followed, not dropped" do
+      # `Products.pagination` carries `next_cursor`/`has_next`
+      # (docs/reference/coinbase/openapi/at-spec.yaml:9460-9475, `PaginationMetadata` at
+      # :8824-8830). This used to read only the first page and never followed `cursor`
+      # (at-spec.yaml:2450-2453), so a catalogue spanning more than one page silently lost
+      # every product past the first.
+      me = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(me, {:request, conn.query_string, body})
+
+        response =
+          if conn.query_string =~ "cursor=page-2" do
+            %{
+              "products" => [%{"product_id" => "ETH-USD"}],
+              "pagination" => %{"has_next" => false}
+            }
+          else
+            %{
+              "products" => [%{"product_id" => "BTC-USD"}],
+              "pagination" => %{"has_next" => true, "next_cursor" => "page-2"}
+            }
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(response))
+      end
+
+      assert {:ok, symbols} = Rest.get_symbols(plug: plug, retry_attempts: 0)
+      assert Enum.sort(symbols) == ~w(BTC-USD ETH-USD)
+
+      assert_receive {:request, first_query, _}
+      refute first_query =~ "cursor="
+      assert_receive {:request, second_query, _}
+      assert second_query =~ "cursor=page-2"
+    end
+
+    test "a server that never stops saying has_next is bounded, not an infinite loop" do
+      plug = fn conn ->
+        response = %{
+          "products" => [%{"product_id" => "BTC-USD"}],
+          "pagination" => %{"has_next" => true, "next_cursor" => "always-more"}
+        }
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(response))
+      end
+
+      assert {:error, :too_many_product_pages} =
+               Rest.get_symbols(plug: plug, retry_attempts: 0)
     end
   end
 

@@ -85,6 +85,11 @@ defmodule DpExchange.Coinbase.Rest do
 
   Returns `{:refused, reason}` when the venue does not carry the symbol — a permanent
   answer, distinct from a transient `{:error, _}`.
+
+  Sends the ticker's `limit=1` — `limit` is `required: true` on this endpoint
+  (docs/reference/coinbase/openapi/at-spec.yaml:523-528, :2636-2641), and this used to send
+  none at all. `to_quote/2` reads only the newest of the returned trades, so `1` is the
+  smallest value that still serves this call rather than an arbitrary one.
   """
   @spec get_price(String.t(), keyword()) ::
           {:ok, Types.Quote.t()} | {:error, term()} | {:refused, term()}
@@ -97,7 +102,7 @@ defmodule DpExchange.Coinbase.Rest do
         do: "/products/#{native}/ticker",
         else: "/market/products/#{native}/ticker"
 
-    case request(:get, path, credentials, opts) do
+    case request(:get, path, credentials, opts, %{"limit" => 1}) do
       {:ok, %{body: body}} -> to_quote(body, symbol)
       {:error, reason} -> classify(reason)
     end
@@ -132,7 +137,14 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  @doc "Every product Coinbase lists, as canonical symbols."
+  @doc """
+  Every **SPOT** product Coinbase lists, as canonical symbols.
+
+  Not every product: Advanced Trade also lists FUTURE, EQUITY, OPTION_GROUP and
+  FUTURE_GROUP products, none of which `fetch_products/1` requests — see that function's
+  comment for why SPOT is the honest scope for this package to claim rather than a wider
+  list it cannot correctly trade.
+  """
   @spec get_symbols(keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def get_symbols(opts) do
     with {:ok, products} <- fetch_products(opts) do
@@ -141,11 +153,12 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   @doc """
-  A bulk snapshot across every product Coinbase lists: price, 24h change, 24h volume, 24h
-  high/low and status, one entry per canonical symbol.
+  A bulk snapshot across every **SPOT** product Coinbase lists: price, 24h change, 24h
+  volume, 24h high/low and status, one entry per canonical symbol.
 
   Reads the same bulk endpoint `get_symbols/1` does — the venue's per-product row already
-  carries all of this, so there is no second request behind it.
+  carries all of this, so there is no second request behind it. Same SPOT-only scope as
+  `get_symbols/1`; see `fetch_products/1`'s comment.
   """
   @spec get_market_overview(keyword()) :: {:ok, map()} | {:error, term()}
   def get_market_overview(opts) do
@@ -155,10 +168,11 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   @doc """
-  Every product Coinbase lists, with the fields `get_symbols/1` discards: base, quote,
-  instrument type and trading status.
+  Every **SPOT** product Coinbase lists, with the fields `get_symbols/1` discards: base,
+  quote, instrument type and trading status.
 
-  Reads the same bulk endpoint `get_symbols/1` does.
+  Reads the same bulk endpoint `get_symbols/1` does, and shares its SPOT-only scope — see
+  `fetch_products/1`'s comment for why.
   """
   @spec list_instruments(keyword()) :: {:ok, [Instrument.t()]} | {:error, term()}
   def list_instruments(opts) do
@@ -226,13 +240,55 @@ defmodule DpExchange.Coinbase.Rest do
   # caller holding a credential should see the authenticated view. Shared by
   # get_symbols/1, get_market_overview/1 and list_instruments/1 — one venue response,
   # three views of it, rather than one call per view of the same row.
+  #
+  # **SPOT only, explicitly, not by omission.** `ListProducts`/`GetPublicProducts` answer
+  # only SPOT when `product_type` is left out
+  # (docs/reference/coinbase/openapi/at-spec.yaml:239-241, :2384-2386) — this package used
+  # to rely on that omitted-default rather than say so, which is the same shape of claim
+  # this family keeps finding wrong: `get_symbols/1`'s own moduledoc said "every product
+  # Coinbase lists" while silently meaning "every SPOT one". `product_type: SPOT` is sent
+  # explicitly here so the behaviour does not depend on a default the venue could change,
+  # and the three callers' docs are corrected to say SPOT rather than claim more than this
+  # reads. `get_all_products: true` would reach FUTURE/EQUITY/OPTION_GROUP/FUTURE_GROUP
+  # too, but `place_order/3` only builds the order-configuration leaves this venue
+  # documents for spot-shaped orders — equities alone need `equity_order_metadata`
+  # (at-spec.yaml:545-556) this package never constructs — so returning those symbols here
+  # would list instruments this package cannot correctly trade. SPOT, honestly claimed, is
+  # the fail-closed answer over a wider list this package would then mishandle.
+  #
+  # **Paginated, not just the first page.** The response carries `pagination.next_cursor` /
+  # `pagination.has_next` (at-spec.yaml:9460-9475, `PaginationMetadata` at :8824-8830) —
+  # this used to read only the first page and never followed `cursor`
+  # (at-spec.yaml:2450-2453), so a catalogue larger than one page silently lost every
+  # product past it, from every one of `get_symbols/1`, `get_market_overview/1`,
+  # `list_instruments/1` and `get_alias_map/1`. Walked here the same bounded way
+  # `all_accounts/5` above walks `/accounts`.
   defp fetch_products(opts) do
     credentials = Keyword.get(opts, :credentials)
     path = if credentials, do: "/products", else: "/market/products"
+    all_products(credentials, path, opts, nil, [], 0)
+  end
 
-    case request(:get, path, credentials, opts) do
-      {:ok, %{body: %{"products" => products}}} when is_list(products) ->
-        {:ok, Enum.filter(products, &named_product?/1)}
+  @max_product_pages 50
+
+  defp all_products(_credentials, _path, _opts, _cursor, _acc, page)
+       when page >= @max_product_pages,
+       do: {:error, :too_many_product_pages}
+
+  defp all_products(credentials, path, opts, cursor, acc, page) do
+    params = put_unless_nil(%{"product_type" => "SPOT"}, "cursor", cursor)
+
+    case request(:get, path, credentials, opts, params) do
+      {:ok, %{body: %{"products" => products} = body}} when is_list(products) ->
+        collected = [Enum.filter(products, &named_product?/1) | acc]
+        pagination = body["pagination"] || %{}
+        next_cursor = pagination["next_cursor"]
+
+        if pagination["has_next"] == true and is_binary(next_cursor) and next_cursor != "" do
+          all_products(credentials, path, opts, next_cursor, collected, page + 1)
+        else
+          {:ok, collected |> Enum.reverse() |> Enum.concat()}
+        end
 
       {:ok, _unexpected} ->
         {:error, :unexpected_response_shape}
@@ -913,7 +969,12 @@ defmodule DpExchange.Coinbase.Rest do
       from_amount: amount_value(trade["user_entered_amount"]),
       to_amount: amount_value(trade["total"]),
       rate: nil,
-      fee: amount_value(trade["fees"]),
+      # `fees` is an array of `Fee` (docs/reference/coinbase/openapi/at-spec.yaml:9968), so
+      # reading it directly here handed `decimal/1` a list and produced `nil` silently rather
+      # than a total. `total_fee` is the venue's own rollup — a single `Fee` whose
+      # `amount.value` is the total across every fee line (at-spec.yaml:9973, :10830-10840) —
+      # and is what this field is documented to report.
+      fee: amount_value(get_in(trade, ["total_fee", "amount"])),
       # Advanced Trade states no expiry on a convert quote. `nil` here is "not stated", and
       # a caller must not read it as open-ended — see `Types.Conversion`.
       expires_at: nil,
@@ -1473,9 +1534,17 @@ defmodule DpExchange.Coinbase.Rest do
     with {:ok, product} <- get_product(symbol, opts) do
       {:ok,
        %{
-         # The price's increment. NOT base_increment — rounding a price to that produces an
-         # order the venue rejects on a field it did not name.
-         price_increment: decimal(product["quote_increment"]),
+         # The price's increment is `Product.price_increment` — "Minimum amount price can be
+         # increased or decreased at once"
+         # (docs/reference/coinbase/openapi/at-spec.yaml:9345-9348). NOT `base_increment`,
+         # which bounds the quantity, and — this package's own prior mistake — NOT
+         # `quote_increment` either: that one is "Minimum amount quote value can be
+         # increased or decreased at once" (at-spec.yaml:9193-9197), the granularity of a
+         # quote-sized order's notional, not the price's tick size. The two increments
+         # happen to share a value on many products, which is exactly why sending
+         # `quote_increment` here read as correct in testing against real venue data while
+         # rounding to the wrong field's rule on any product where they diverge.
+         price_increment: decimal(product["price_increment"]),
          quantity_increment: decimal(product["base_increment"]),
          min_quantity: decimal(product["base_min_size"]),
          # A separate minimum on a different thing: cash, not units.
@@ -1709,14 +1778,28 @@ defmodule DpExchange.Coinbase.Rest do
   Not `get_trade_history/2`, which is the credential's own fills. The tape is everyone's
   executions and has no order of yours behind it.
 
-  `opts[:limit]` is the venue's own, passed through. **Coinbase publishes no bust flag on
-  the ticker**, so `broken` is `false` on every print — a venue with nothing busted reports
-  nothing busted, which is the same answer, and `opts[:include_broken]` therefore changes
-  nothing here.
+  **`opts[:limit]` is required.** `limit` is `required: true` on this endpoint
+  (docs/reference/coinbase/openapi/at-spec.yaml:523-528, :2636-2641) and the venue documents
+  no default for it — unlike `get_price/2`, which always wants exactly the newest print,
+  this call's whole purpose is "how many", so there is no single honest number to invent on
+  a caller's behalf. Omitting it used to mean sending no `limit` at all, relying on whatever
+  the venue does with an undocumented absence; this refuses locally instead. `Core.Venue`
+  documents no default itself, so a caller must say how many prints it wants.
+
+  **Coinbase publishes no bust flag on the ticker**, so `broken` is `false` on every print —
+  a venue with nothing busted reports nothing busted, which is the same answer, and
+  `opts[:include_broken]` therefore changes nothing here.
   """
   @spec get_trades(String.t(), keyword()) ::
           {:ok, [Types.Trade.t()]} | {:error, term()} | {:refused, term()}
   def get_trades(symbol, opts) do
+    case Keyword.get(opts, :limit) do
+      nil -> {:error, :missing_limit}
+      limit -> do_get_trades(symbol, limit, opts)
+    end
+  end
+
+  defp do_get_trades(symbol, limit, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
     credentials = Keyword.get(opts, :credentials)
 
@@ -1725,9 +1808,7 @@ defmodule DpExchange.Coinbase.Rest do
         do: "/products/#{native}/ticker",
         else: "/market/products/#{native}/ticker"
 
-    params = put_unless_nil(%{}, "limit", Keyword.get(opts, :limit))
-
-    case request(:get, path, credentials, opts, params) do
+    case request(:get, path, credentials, opts, %{"limit" => limit}) do
       {:ok, %{body: %{"trades" => trades}}} when is_list(trades) ->
         decode_trades(trades, symbol)
 
@@ -1775,9 +1856,17 @@ defmodule DpExchange.Coinbase.Rest do
        %Types.Trade{
          id: id,
          symbol: symbol,
-         # The venue's `side` on a ticker trade is the taker's. `nil` for anything else
-         # rather than the nearer of the two.
-         side: side_atom(trade["side"]),
+         # `HistoricalMarketTrade.side` — what this endpoint actually returns, per
+         # `GetMarketTradesResponse` (docs/reference/coinbase/openapi/at-spec.yaml:486-527,
+         # :7581-7587) — is documented as "The maker side of the trade."
+         # (at-spec.yaml:7752), not the taker's. This used to read it straight through as
+         # the taker's side, which inverted the aggressor on every print: a resting BUY the
+         # venue reports was in fact lifted by a SELL, and vice versa. `Core.Types.Trade`
+         # states its own `:side` as "who removed liquidity" — the taker
+         # (deps/dp_exchange_core/lib/dp_exchange/core/types/trade.ex) — so the venue's maker
+         # side is flipped here to answer the contract's question. `nil` stays `nil` rather
+         # than being flipped to a guess.
+         side: trade["side"] |> side_atom() |> maker_side_to_taker(),
          price: price,
          quantity: quantity,
          timestamp: at,
@@ -2274,20 +2363,35 @@ defmodule DpExchange.Coinbase.Rest do
     tif = Map.get(request, :time_in_force, :gtc)
 
     case Map.fetch(@configurations, {type, tif}) do
-      {:ok, key} -> build_configuration(key, type, request)
+      {:ok, key} -> build_configuration(key, type, tif, request)
       :error -> {:error, {:unsupported_order_combination, type, tif}}
     end
   end
 
-  defp build_configuration(key, type, request) do
-    with {:ok, leaf} <- configuration_leaf(type, request) do
+  defp build_configuration(key, type, tif, request) do
+    with {:ok, leaf} <- configuration_leaf(type, tif, request) do
       {:ok, %{key => leaf}}
     end
   end
 
   # A market order sizes in base or quote; a limit order needs a price. Missing either is an
   # error rather than a default, because a default here is a different order.
-  defp configuration_leaf(:market, request) do
+  #
+  # Coinbase's per-leaf schemas do not all carry the same optional fields. `post_only` exists
+  # on `LimitLimitGtc` and `LimitLimitGtd` but not `LimitLimitFok` or either stop-limit leaf;
+  # `end_time` exists on `LimitLimitGtd` and `StopLimitStopLimitGtd` only; `stop_direction`
+  # exists on both stop-limit leaves and nowhere else
+  # (docs/reference/coinbase/openapi/at-spec.yaml:7765-7783 for the three limit leaves,
+  # :9596-9650 for the two stop-limit leaves). This used to add `post_only` and `end_time` to
+  # every limit or stop-limit leaf regardless of time-in-force, through one
+  # `configuration_leaf(:limit, request)` clause and one `configuration_leaf(:stop_limit,
+  # request)` clause shared across every `tif`. A caller's `post_only` on an FOK order, or an
+  # `end_time` on a GTC one, was sent inside a leaf whose own schema does not declare that
+  # field — not refused, not visibly dropped, just present in a shape the venue never
+  # documented. Splitting per `{type, tif}` means each leaf only ever carries the fields its
+  # own schema names, and a caller asking for a field a leaf cannot carry is refused locally
+  # rather than silently ignored.
+  defp configuration_leaf(:market, _tif, request) do
     case {Map.get(request, :quantity), Map.get(request, :quote_size)} do
       {nil, nil} -> {:error, :missing_order_size}
       {nil, quote_size} -> {:ok, %{"quote_size" => wire_number(quote_size)}}
@@ -2295,42 +2399,125 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  defp configuration_leaf(:limit, request) do
-    with {:ok, price} <- required_field(request, :price, :missing_limit_price) do
-      leaf = %{
-        "base_size" => wire_number(Map.fetch!(request, :quantity)),
-        "limit_price" => wire_number(price)
-      }
-
-      {:ok, maybe_put_configuration(leaf, request)}
-    end
-  end
-
-  defp configuration_leaf(:stop_limit, request) do
+  defp configuration_leaf(:limit, :fok, request) do
     with {:ok, price} <- required_field(request, :price, :missing_limit_price),
-         {:ok, stop} <- required_field(request, :stop_price, :missing_stop_price) do
-      leaf = %{
-        "base_size" => wire_number(Map.fetch!(request, :quantity)),
-        "limit_price" => wire_number(price),
-        "stop_price" => wire_number(stop)
-      }
-
-      {:ok, maybe_put_configuration(leaf, request)}
+         :ok <- refuse_unsupported_field(request, :post_only, :limit, :fok),
+         :ok <- refuse_unsupported_field(request, :end_time, :limit, :fok) do
+      {:ok, limit_leaf(request, price)}
     end
   end
 
-  defp maybe_put_configuration(leaf, request) do
-    leaf
-    |> put_unless_nil("post_only", Map.get(request, :post_only))
-    |> put_unless_nil("end_time", Map.get(request, :end_time))
+  defp configuration_leaf(:limit, :gtc, request) do
+    with {:ok, price} <- required_field(request, :price, :missing_limit_price),
+         :ok <- refuse_unsupported_field(request, :end_time, :limit, :gtc) do
+      leaf = put_unless_nil(limit_leaf(request, price), "post_only", Map.get(request, :post_only))
+      {:ok, leaf}
+    end
   end
+
+  defp configuration_leaf(:limit, :gtd, request) do
+    with {:ok, price} <- required_field(request, :price, :missing_limit_price) do
+      leaf =
+        request
+        |> limit_leaf(price)
+        |> put_unless_nil("post_only", Map.get(request, :post_only))
+        |> put_end_time(Map.get(request, :end_time))
+
+      {:ok, leaf}
+    end
+  end
+
+  defp configuration_leaf(:stop_limit, :gtc, request) do
+    with {:ok, price} <- required_field(request, :price, :missing_limit_price),
+         {:ok, stop} <- required_field(request, :stop_price, :missing_stop_price),
+         {:ok, direction} <- stop_direction(Map.get(request, :stop_direction)),
+         :ok <- refuse_unsupported_field(request, :post_only, :stop_limit, :gtc),
+         :ok <- refuse_unsupported_field(request, :end_time, :stop_limit, :gtc) do
+      leaf = put_unless_nil(stop_limit_leaf(request, price, stop), "stop_direction", direction)
+      {:ok, leaf}
+    end
+  end
+
+  defp configuration_leaf(:stop_limit, :gtd, request) do
+    with {:ok, price} <- required_field(request, :price, :missing_limit_price),
+         {:ok, stop} <- required_field(request, :stop_price, :missing_stop_price),
+         {:ok, direction} <- stop_direction(Map.get(request, :stop_direction)),
+         :ok <- refuse_unsupported_field(request, :post_only, :stop_limit, :gtd) do
+      leaf =
+        request
+        |> stop_limit_leaf(price, stop)
+        |> put_unless_nil("stop_direction", direction)
+        |> put_end_time(Map.get(request, :end_time))
+
+      {:ok, leaf}
+    end
+  end
+
+  defp limit_leaf(request, price) do
+    %{
+      "base_size" => wire_number(Map.fetch!(request, :quantity)),
+      "limit_price" => wire_number(price)
+    }
+  end
+
+  defp stop_limit_leaf(request, price, stop) do
+    %{
+      "base_size" => wire_number(Map.fetch!(request, :quantity)),
+      "limit_price" => wire_number(price),
+      "stop_price" => wire_number(stop)
+    }
+  end
+
+  # A caller who explicitly asked for a field a leaf's own schema does not carry is refused
+  # locally rather than sent — see the note above `configuration_leaf/3` for why silently
+  # dropping it, the old behaviour on the leaves that DO carry it, is not the right answer
+  # for the leaves that never could.
+  defp refuse_unsupported_field(request, field, type, tif) do
+    case Map.get(request, field) do
+      nil -> :ok
+      _value -> {:error, {:unsupported_order_field, field, {type, tif}}}
+    end
+  end
+
+  # `StopPriceDirection`'s enum is `STOP_DIRECTION_STOP_UP` / `STOP_DIRECTION_STOP_DOWN`
+  # (docs/reference/coinbase/openapi/at-spec.yaml:9654-9660). `:up`/`:down` is the convenient
+  # shorthand; a caller who already has the venue's own string can pass that through
+  # unchanged. **Never inferred from `side`** — a stop's trigger direction is a trading
+  # decision the caller makes, not a fact this package can derive from which side of the
+  # book the order is on, and guessing it would be exactly the substitution this family
+  # refuses on a call that places a live order.
+  defp stop_direction(nil), do: {:ok, nil}
+  defp stop_direction(:up), do: {:ok, "STOP_DIRECTION_STOP_UP"}
+  defp stop_direction(:down), do: {:ok, "STOP_DIRECTION_STOP_DOWN"}
+  defp stop_direction(value) when is_binary(value), do: {:ok, value}
+  defp stop_direction(other), do: {:error, {:invalid_stop_direction, other}}
 
   defp put_unless_nil(map, _key, nil), do: map
 
   defp put_unless_nil(map, key, %Decimal{} = value),
     do: Map.put(map, key, wire_number(value))
 
+  # `post_only` is documented as a JSON boolean
+  # (docs/reference/coinbase/openapi/at-spec.yaml:7803, :7839) — `true`/`false`, not the
+  # string `"true"`. The catch-all clause below stringified everything through `to_string/1`,
+  # which is right for an enum atom or a plain string but turns a boolean into a string the
+  # venue's schema does not accept for this field. Matched ahead of the catch-all so a
+  # boolean is put through unchanged and Jason encodes it as JSON `true`/`false`.
+  defp put_unless_nil(map, key, value) when is_boolean(value), do: Map.put(map, key, value)
+
   defp put_unless_nil(map, key, value), do: Map.put(map, key, to_string(value))
+
+  # `end_time` is documented as an RFC3339 timestamp
+  # (docs/reference/coinbase/openapi/at-spec.yaml:7828-7831, :9640-9643). `to_string/1` on a
+  # `%DateTime{}` goes through `String.Chars`, which renders `"2021-05-31 09:59:59Z"` — a
+  # space where RFC3339 requires `T` — and is not a timestamp this venue reads.
+  # `DateTime.to_iso8601/1` is the one that produces the `T` separator the format requires.
+  defp put_end_time(leaf, nil), do: leaf
+
+  defp put_end_time(leaf, %DateTime{} = value),
+    do: Map.put(leaf, "end_time", DateTime.to_iso8601(value))
+
+  defp put_end_time(leaf, value) when is_binary(value), do: Map.put(leaf, "end_time", value)
 
   # **`Decimal.to_string/1` defaults to SCIENTIFIC notation, and `to_string/1` on a
   # `%Decimal{}` goes through `String.Chars` to the same default.** So a price or size that
@@ -2383,8 +2570,34 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp to_placed_order(_other, _request), do: {:error, :unexpected_response_shape}
 
+  # `NewOrderErrorResponse` (place_order's and close_position's shared error shape — both
+  # `NewOrderResponse.error_response` and `ClosePositionResponse.error_response` are the
+  # same schema) declares `new_order_failure_reason` **required**
+  # (docs/reference/coinbase/openapi/at-spec.yaml:7962-7967) — the current, coded reason.
+  # `error` is the same information under the field it replaced, marked "(Deprecated)"
+  # (at-spec.yaml:7947-7950) but still the venue's own field, so it stays as a fallback
+  # rather than being dropped. `message` and `error_details` are prose, not a code, and sit
+  # between the two: read when the structured reason is somehow absent despite being
+  # required, ahead of the deprecated field.
+  #
+  # The clause this replaced matched a top-level `"failure_reason"` key. That field is real,
+  # but it belongs to `CancelOrderResponse` (at-spec.yaml:6389-6394) — a schema neither of
+  # this function's two callers is ever handed; `cancel_order/3` reads it inline at its own
+  # call site instead. Kept here, it matched nothing either schema sends and would have
+  # quietly done so forever without a fixture ever exercising it.
+  defp failure_reason(%{"error_response" => %{"new_order_failure_reason" => reason}})
+       when is_binary(reason),
+       do: reason
+
+  defp failure_reason(%{"error_response" => %{"message" => message}})
+       when is_binary(message),
+       do: message
+
+  defp failure_reason(%{"error_response" => %{"error_details" => details}})
+       when is_binary(details),
+       do: details
+
   defp failure_reason(%{"error_response" => %{"error" => error}}) when is_binary(error), do: error
-  defp failure_reason(%{"failure_reason" => reason}) when is_binary(reason), do: reason
   defp failure_reason(_response), do: :unspecified
 
   # A POST carrying a JSON body. Separate from `request/5` rather than an extra parameter on
@@ -2591,21 +2804,34 @@ defmodule DpExchange.Coinbase.Rest do
   defp venue_symbol(nil), do: nil
   defp venue_symbol(symbol), do: SymbolFormat.to_exchange_symbol(symbol)
 
-  # The venue's status vocabulary, mapped to the contract's.
+  # The venue's status vocabulary, mapped to the contract's. `OrderExecutionStatus`'s full
+  # enum (docs/reference/coinbase/openapi/at-spec.yaml:8577-8589): PENDING, OPEN, FILLED,
+  # CANCELLED, EXPIRED, FAILED, UNKNOWN_ORDER_STATUS, QUEUED, CANCEL_QUEUED, EDIT_QUEUED —
+  # this map used to be missing the last two.
   #
-  # `QUEUED` and `CANCEL_QUEUED` are the venue's own intermediate states — accepted, not yet
-  # working, and accepted-for-cancellation-but-still-live. Both map to `:open`: the order
-  # exists and may still fill, which is what a caller needs to know. Mapping CANCEL_QUEUED
-  # to `:cancelled` would tell a caller an order is gone while it can still trade.
+  # `QUEUED`, `CANCEL_QUEUED` and `EDIT_QUEUED` are the venue's own intermediate states —
+  # accepted-not-yet-working, accepted-for-cancellation-but-still-live, and
+  # accepted-for-edit-but-still-live. All three map to `:open`: the order exists and may
+  # still fill, which is what a caller needs to know. Mapping CANCEL_QUEUED to `:cancelled`,
+  # or EDIT_QUEUED to whatever the edit changes it to, would tell a caller something about
+  # the order that has not happened yet.
+  #
+  # `UNKNOWN_ORDER_STATUS` is the venue's own explicit "unspecified" value — not a status
+  # this package fails to recognise, but one Coinbase itself declines to name. It is listed
+  # here mapping to `nil` rather than left absent, so the mapping states that outcome on
+  # purpose instead of producing it by omission the same way an unrecognised future status
+  # would.
   @statuses %{
     "PENDING" => :pending,
     "QUEUED" => :open,
     "OPEN" => :open,
     "CANCEL_QUEUED" => :open,
+    "EDIT_QUEUED" => :open,
     "FILLED" => :filled,
     "CANCELLED" => :cancelled,
     "EXPIRED" => :expired,
-    "FAILED" => :rejected
+    "FAILED" => :rejected,
+    "UNKNOWN_ORDER_STATUS" => nil
   }
 
   defp to_order(order) do
@@ -2623,7 +2849,15 @@ defmodule DpExchange.Coinbase.Rest do
       filled_quantity: decimal(order["filled_size"]),
       average_price: decimal(order["average_filled_price"]),
       fee: decimal(order["total_fees"]),
-      fee_currency: order["fee_currency"],
+      # `Order` has no `fee_currency` field
+      # (docs/reference/coinbase/openapi/at-spec.yaml:8223-8330) — this used to read one
+      # anyway, which is silent under `Map.get/2`'s default `nil` and looked identical to a
+      # field the venue simply left blank. The quote currency in `product_id` is where a
+      # correct value would live, but the venue never states that total_fees is charged in
+      # the quote currency rather than a rewards token or something else, so inferring it
+      # from the symbol would be a guess wearing the shape of a fact. `nil` stays `nil`
+      # because there is truly nothing documented to read here.
+      fee_currency: nil,
       # An unmapped status is `nil`, never a guess. A caller branching on :open would
       # otherwise act on a state the venue named and this package did not recognise.
       status: Map.get(@statuses, order["status"]),
@@ -2654,6 +2888,13 @@ defmodule DpExchange.Coinbase.Rest do
   defp side_atom("BUY"), do: :buy
   defp side_atom("SELL"), do: :sell
   defp side_atom(_other), do: nil
+
+  # See `to_trade/2`'s comment: the venue's tape reports the maker's side, and
+  # `Core.Types.Trade.side` wants the taker's — the two are always opposite one another for
+  # the same print. Only used there; `side_atom/1` alone is right for an order's own side.
+  defp maker_side_to_taker(:buy), do: :sell
+  defp maker_side_to_taker(:sell), do: :buy
+  defp maker_side_to_taker(nil), do: nil
 
   defp type_atom("MARKET"), do: :market
   defp type_atom("LIMIT"), do: :limit
@@ -2739,9 +2980,9 @@ defmodule DpExchange.Coinbase.Rest do
   already filled. Asking what a fresh order of the new size would cost is a different
   question with a different answer.
 
-  Accepts the same changes `replace_order/4` does — `:price` and `:quantity`, at least one
-  of them — and refuses anything else here rather than sending it and reading the venue's
-  business error.
+  Accepts the same changes `replace_order/4` does — `:price` and `:quantity`, **both
+  required** — and refuses anything else here rather than sending it and reading the venue's
+  business error. See `replace_order/4`'s doc for why both, even to change only one.
 
   **The response's `errors` array is the refusal.** As with `/orders/preview`, an HTTP 200
   carrying errors is the venue saying no; this returns `{:refused, …}` rather than an `:ok`
@@ -2751,10 +2992,11 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_replace(credentials, order_id, changes, opts) do
     with :ok <- editable_changes(changes) do
-      body =
-        %{"order_id" => order_id}
-        |> put_unless_nil("price", Map.get(changes, :price))
-        |> put_unless_nil("size", Map.get(changes, :quantity))
+      body = %{
+        "order_id" => order_id,
+        "price" => wire_number(Map.fetch!(changes, :price)),
+        "size" => wire_number(Map.fetch!(changes, :quantity))
+      }
 
       case post_json("/orders/edit_preview", body, credentials, opts) do
         {:ok, %{body: response}} -> edit_preview_result(response)
@@ -2882,16 +3124,30 @@ defmodule DpExchange.Coinbase.Rest do
   different order, and silently editing only the price would leave it holding one it did not
   ask for.
 
+  **Both `price` and `size` must be given, even to change only one.**
+  `EditOrderRequest` declares `order_id`, `price` *and* `size` all required
+  (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852) — there is no documented meaning
+  for the venue reusing the order's current value when one is absent, so this package does
+  not assume one. It used to send whichever of the two the caller supplied and omit the
+  other with `put_unless_nil/3`, which produced a request the schema does not describe; what
+  the venue actually does with a `size`-less edit was never measured and is not this
+  package's to guess. The alternative — reading the order first via `get_order/3` to fill in
+  the unchanged field — was rejected: the read and the edit are two round trips, and an order
+  that partially fills or is cancelled in between makes the "unchanged" value stale by the
+  time it is replayed as part of a request that claims to be unchanged. Refusing locally is
+  the fail-closed answer; `preview_replace/4` refuses the identical way.
+
   A `200` carrying `success: false` is a refusal, as everywhere else on this venue.
   """
   @spec replace_order(map(), String.t(), map(), keyword()) ::
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
   def replace_order(credentials, order_id, changes, opts) do
     with :ok <- editable_changes(changes) do
-      body =
-        %{"order_id" => order_id}
-        |> put_unless_nil("price", Map.get(changes, :price))
-        |> put_unless_nil("size", Map.get(changes, :quantity))
+      body = %{
+        "order_id" => order_id,
+        "price" => wire_number(Map.fetch!(changes, :price)),
+        "size" => wire_number(Map.fetch!(changes, :quantity))
+      }
 
       case post_once("/orders/edit", body, credentials, opts) do
         {:ok, %{body: response}} -> edit_result(response, order_id, credentials, opts)
@@ -2909,11 +3165,20 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  # `EditOrderRequest` requires both `price` and `size` on every edit
+  # (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852). This used to accept either one
+  # alone and omit the other from the body — a shape the schema does not describe and this
+  # package never measured the venue's handling of. Refusing locally when only one is given is
+  # the fail-closed choice over guessing at the omitted field's meaning or reading the other
+  # value back from `get_order/3`, which would still be racing the order's live state.
   defp editable_present(changes) do
-    if Enum.any?(@editable, &Map.has_key?(changes, &1)) do
-      :ok
-    else
-      {:error, :no_order_changes}
+    has_price = Map.has_key?(changes, :price)
+    has_quantity = Map.has_key?(changes, :quantity)
+
+    cond do
+      has_price and has_quantity -> :ok
+      has_price or has_quantity -> {:error, :missing_required_edit_field}
+      true -> {:error, :no_order_changes}
     end
   end
 
@@ -2934,7 +3199,16 @@ defmodule DpExchange.Coinbase.Rest do
   defp edit_result(_other, _order_id, _credentials, _opts),
     do: {:error, :unexpected_response_shape}
 
+  # `EditOrderError` (one entry of `EditOrderResponse.errors`) carries `edit_failure_reason`
+  # and, as a second field, `preview_failure_reason`
+  # (docs/reference/coinbase/openapi/at-spec.yaml:6726-6734). This used to read only the
+  # first and treat the whole call as `:unspecified` when it was absent, even when the
+  # entry's `preview_failure_reason` named the reason instead.
   defp edit_failure(%{"errors" => [%{"edit_failure_reason" => reason} | _rest]})
+       when is_binary(reason),
+       do: reason
+
+  defp edit_failure(%{"errors" => [%{"preview_failure_reason" => reason} | _rest]})
        when is_binary(reason),
        do: reason
 

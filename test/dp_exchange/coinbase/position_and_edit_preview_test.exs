@@ -146,6 +146,25 @@ defmodule DpExchange.Coinbase.PositionAndEditPreviewTest do
                )
     end
 
+    test "close_position reads new_order_failure_reason too — it shares NewOrderErrorResponse" do
+      # `ClosePositionResponse.error_response` is the identical `NewOrderErrorResponse`
+      # schema `place_order/3` gets (docs/reference/coinbase/openapi/at-spec.yaml:6485-6500,
+      # :7944-7967), so the same field precedence applies here.
+      body = %{
+        "success" => false,
+        "error_response" => %{
+          "new_order_failure_reason" => "UNSUPPORTED_ORDER_CONFIGURATION",
+          "error" => "NO_OPEN_POSITION"
+        }
+      }
+
+      assert {:refused, {:close_rejected, "UNSUPPORTED_ORDER_CONFIGURATION"}} =
+               Rest.close_position(@credentials, "BTC-USD",
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+    end
+
     test "an unreadable body is an error rather than a silent success" do
       assert {:error, :unexpected_response_shape} =
                Rest.close_position(@credentials, "BTC-USD",
@@ -193,7 +212,11 @@ defmodule DpExchange.Coinbase.PositionAndEditPreviewTest do
   end
 
   describe "preview_replace/4 — pricing an amendment, not a fresh order" do
-    test "it sends the edit body to the edit_preview path" do
+    test "it sends both price and size to the edit_preview path" do
+      # `EditOrderRequest` requires order_id, price AND size
+      # (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852). This used to send only
+      # whichever of the two the caller supplied, via `put_unless_nil/3` — a body the schema
+      # does not describe, and whose handling by the venue was never measured.
       me = self()
 
       plug = fn conn ->
@@ -206,14 +229,17 @@ defmodule DpExchange.Coinbase.PositionAndEditPreviewTest do
       end
 
       assert {:ok, _preview} =
-               Rest.preview_replace(@credentials, "abc-123", %{price: "41000"},
+               Rest.preview_replace(
+                 @credentials,
+                 "abc-123",
+                 %{price: "41000", quantity: "0.5"},
                  plug: plug,
                  retry_attempts: 0
                )
 
       assert_receive {:sent, path, sent}
       assert path =~ "edit_preview"
-      assert sent == %{"order_id" => "abc-123", "price" => "41000"}
+      assert sent == %{"order_id" => "abc-123", "price" => "41000", "size" => "0.5"}
     end
 
     test "the venue's numbers come back, including the ones only an edit has" do
@@ -230,7 +256,10 @@ defmodule DpExchange.Coinbase.PositionAndEditPreviewTest do
       }
 
       assert {:ok, preview} =
-               Rest.preview_replace(@credentials, "abc-123", %{price: "41000"},
+               Rest.preview_replace(
+                 @credentials,
+                 "abc-123",
+                 %{price: "41000", quantity: "0.5"},
                  plug: responding(body),
                  retry_attempts: 0
                )
@@ -246,7 +275,10 @@ defmodule DpExchange.Coinbase.PositionAndEditPreviewTest do
       body = %{"errors" => [%{"edit_failure_reason" => "ORDER_ALREADY_FILLED"}]}
 
       assert {:refused, {:edit_preview_rejected, [%{"edit_failure_reason" => _reason}]}} =
-               Rest.preview_replace(@credentials, "abc-123", %{price: "41000"},
+               Rest.preview_replace(
+                 @credentials,
+                 "abc-123",
+                 %{price: "41000", quantity: "0.5"},
                  plug: responding(body),
                  retry_attempts: 0
                )
@@ -272,11 +304,36 @@ defmodule DpExchange.Coinbase.PositionAndEditPreviewTest do
                )
     end
 
+    test "only price, or only size, is refused locally rather than sent half-built" do
+      # EditOrderRequest requires both. Sending one and letting `put_unless_nil/3` drop the
+      # other used to produce a request the schema does not describe; what the venue does
+      # with it was never measured, so this refuses before the request leaves rather than
+      # guess. `get_order/3` could fill in the unchanged field, but that reads stale the
+      # moment the order fills or is cancelled between the read and the edit — see
+      # `replace_order/4`'s doc for the full reasoning, which this function shares.
+      exploding = fn _conn -> raise "must not price a half-built edit" end
+
+      assert {:error, :missing_required_edit_field} =
+               Rest.preview_replace(@credentials, "abc-123", %{price: "41000"},
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+
+      assert {:error, :missing_required_edit_field} =
+               Rest.preview_replace(@credentials, "abc-123", %{quantity: "0.5"},
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
     test "an unreadable body is an error" do
       plug = fn conn -> Plug.Conn.resp(conn, 200, "not json") end
 
       assert {:error, _reason} =
-               Rest.preview_replace(@credentials, "abc-123", %{price: "1"},
+               Rest.preview_replace(
+                 @credentials,
+                 "abc-123",
+                 %{price: "1", quantity: "0.1"},
                  plug: plug,
                  retry_attempts: 0
                )

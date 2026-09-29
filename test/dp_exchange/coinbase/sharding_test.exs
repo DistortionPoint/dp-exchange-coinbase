@@ -1,4 +1,7 @@
 defmodule DpExchange.Coinbase.ShardingTest do
+  # Every `assert_receive` below waits up to five seconds. It returns the moment the message
+  # lands, so the bound costs nothing on a quiet machine; 500ms and 2s windows failed the full
+  # suite under concurrent load (2026-09-29). `refute_receive` windows are unchanged.
   @moduledoc """
   Sharding: how symbols are grouped onto sockets, and what happens between the ticks.
 
@@ -211,7 +214,14 @@ defmodule DpExchange.Coinbase.ShardingTest do
       assert Process.alive?(feed)
     end
 
-    test "without credentials, no level2 shard is ever opened" do
+    test "without credentials, level2 is still attempted — its JWT is optional, not required" do
+      # This used to be "no level2 shard is ever opened" — `channel_permitted?/2` filtered
+      # `level2` out of a credential-less caller's channels entirely, on the reasoning that
+      # the venue would refuse the subscribe anyway. That reasoning no longer holds:
+      # `SubscribeLevel2`'s `jwt` is "Optional here; recommended for connection
+      # reliability." (docs/reference/coinbase/openapi/at-async.json:685-687), not required
+      # the way `SubscribeUser`'s is, and `Socket.subscription_message/3` now sends the
+      # `level2` subscribe unauthenticated rather than refusing to build it.
       symbols = for n <- 1..10, do: "SYM#{n}-USD"
 
       feed =
@@ -222,11 +232,13 @@ defmodule DpExchange.Coinbase.ShardingTest do
            alias_map_source: fn -> {:ok, %{}} end}
         )
 
+      :ok = Feed.subscribe_notices(feed, to: self())
+
       assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
 
-      refute Enum.any?(:sys.get_state(feed).shards, fn {{channel, _index}, _shard} ->
-               channel == "level2"
-             end)
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :coverage_change, details: %{channel: "level2"}}},
+                     2_000
     end
   end
 
@@ -868,11 +880,15 @@ defmodule DpExchange.Coinbase.ShardingTest do
       Feed.subscribe_notices(feed, to: self())
       socket = fake_socket()
 
-      # `level2` is authenticated and no credentials were supplied — see
-      # `Socket.subscription_message/3`. This can NEVER succeed on retry.
+      # `user` is the one channel `SubscribeUser`'s payload genuinely requires a JWT for
+      # (docs/reference/coinbase/openapi/at-async.json:752-765) and no credentials were
+      # supplied — see `Socket.subscription_message/3`. This can NEVER succeed on retry.
+      # `level2` used to be this test's channel too, before its own JWT became optional
+      # (see `SubscribeLevel2` — at-async.json:685-687) — it no longer produces this error
+      # at all, so it can no longer stand in for "a channel credentials are required for".
       log =
         capture_log(fn ->
-          send(feed, {:channel_subscribe, socket, "level2", ["BTC-USD"], nil})
+          send(feed, {:channel_subscribe, socket, "user", ["BTC-USD"], nil})
 
           # The notice is the completion signal — waiting on it, rather than on a clock,
           # guarantees the log has been written before it is asserted against.
@@ -880,7 +896,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
                          2_000
 
           assert notice.severity == :warning
-          assert notice.details.channel == "level2"
+          assert notice.details.channel == "user"
           assert notice.details.reason =~ "credentials_required"
         end)
 
@@ -891,9 +907,9 @@ defmodule DpExchange.Coinbase.ShardingTest do
       # `refute`, which is a test passing (or failing) for a reason that has nothing to do
       # with it. The channel and the symbol count make each line this test's own.
       assert log =~
-               ~r/level2 subscribe for 1 symbol\(s\) failed permanently \(.*\) — not retrying/
+               ~r/user subscribe for 1 symbol\(s\) failed permanently \(.*\) — not retrying/
 
-      refute log =~ ~r/level2 subscribe for 1 symbol\(s\) failed \(.*\), attempt/
+      refute log =~ ~r/user subscribe for 1 symbol\(s\) failed \(.*\), attempt/
       assert Process.alive?(feed)
     end
 
@@ -974,8 +990,8 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       :sys.get_state(feed)
 
-      assert_receive {:frame, type1, ids1}, 500
-      assert_receive {:frame, type2, ids2}, 500
+      assert_receive {:frame, type1, ids1}, 5_000
+      assert_receive {:frame, type2, ids2}, 5_000
 
       assert {type1, ids1} == {"unsubscribe", ["OLD-USD"]}
       assert {type2, ids2} == {"subscribe", ["NEW-USD"]}
@@ -989,7 +1005,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
       send(feed, {:channel_reconcile, {"ticker", 0}, socket, "ticker", [], ["NEW-USD"], nil})
       :sys.get_state(feed)
 
-      assert_receive {:frame, "subscribe", ["NEW-USD"]}, 500
+      assert_receive {:frame, "subscribe", ["NEW-USD"]}, 5_000
       refute_receive {:frame, "unsubscribe", _ids}, 100
       assert Process.alive?(feed)
     end
@@ -1001,7 +1017,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
       send(feed, {:channel_reconcile, {"ticker", 0}, socket, "ticker", ["OLD-USD"], [], nil})
       :sys.get_state(feed)
 
-      assert_receive {:frame, "unsubscribe", ["OLD-USD"]}, 500
+      assert_receive {:frame, "unsubscribe", ["OLD-USD"]}, 5_000
       refute_receive {:frame, "subscribe", _ids}, 100
       assert Process.alive?(feed)
     end
@@ -1055,9 +1071,9 @@ defmodule DpExchange.Coinbase.ShardingTest do
       # poll interval. It flaked about one run in six under `--cover`. Waiting for an
       # intermediate value of a counter that is still climbing is a race by construction,
       # however patient the timeout is; 2000 ms of waiting cannot widen a 5 ms window.
-      assert_receive {:socket_did, :unsub_failed}, 2_000
-      assert_receive {:socket_did, :unsub_ok}, 2_000
-      assert_receive {:socket_did, :sub}, 2_000
+      assert_receive {:socket_did, :unsub_failed}, 5_000
+      assert_receive {:socket_did, :unsub_ok}, 5_000
+      assert_receive {:socket_did, :sub}, 5_000
 
       # The counters still back it up on totals, where polling a FINAL value is safe.
       wait_until(fn -> :counters.get(unsub_counter, 1) == 2 end)
@@ -1180,8 +1196,8 @@ defmodule DpExchange.Coinbase.ShardingTest do
       before = System.monotonic_time(:millisecond)
       assert :ok = Feed.update_symbols(feed, new_symbols)
 
-      assert_receive {:frame_at, :shard0, _t0}, 500
-      assert_receive {:frame_at, :shard1, t1}, 2_000
+      assert_receive {:frame_at, :shard0, _t0}, 5_000
+      assert_receive {:frame_at, :shard1, t1}, 5_000
 
       # `shard_spacing_ms` is `@test_shard_spacing_ms_precise` here (200ms). Checked
       # against `before` — a fixed point captured before either shard's subscribe was
@@ -1281,7 +1297,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       assert :ok = Feed.update_symbols(feed, Enum.take(wanted_list, 30))
 
-      assert_receive {:DOWN, ^ref, :process, ^second, :shutdown}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^second, :shutdown}, 5_000
 
       wait_until(fn -> not Map.has_key?(:sys.get_state(feed).shards, {"level2", 1}) end)
       assert Process.alive?(feed)
@@ -1351,8 +1367,8 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       assert :ok = Feed.subscribe(feed, [], to: self())
 
-      assert_receive {:frame, type1, ids1}, 500
-      assert_receive {:frame, type2, ids2}, 500
+      assert_receive {:frame, type1, ids1}, 5_000
+      assert_receive {:frame, type2, ids2}, 5_000
 
       assert type1 == "unsubscribe"
       assert Enum.sort(ids1) == ~w(EXTRA1-USD EXTRA2-USD)
@@ -1381,8 +1397,8 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       :sys.get_state(feed)
 
-      assert_receive {:frame, type1, ids1}, 500
-      assert_receive {:frame, type2, ids2}, 500
+      assert_receive {:frame, type1, ids1}, 5_000
+      assert_receive {:frame, type2, ids2}, 5_000
 
       assert type1 == "unsubscribe"
       assert Enum.sort(ids1) == ~w(EXTRA1-USD EXTRA2-USD)
@@ -1429,8 +1445,8 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       assert :ok = Feed.subscribe(feed, [], to: self())
 
-      assert_receive {:live_count, count_after_unsubscribe}, 500
-      assert_receive {:live_count, count_after_subscribe}, 500
+      assert_receive {:live_count, count_after_unsubscribe}, 5_000
+      assert_receive {:live_count, count_after_subscribe}, 5_000
 
       assert count_after_unsubscribe <= cap
       assert count_after_subscribe <= cap
@@ -1472,8 +1488,8 @@ defmodule DpExchange.Coinbase.ShardingTest do
       # blocking-on-the-socket) frame sends and is answered only once both have gone out.
       :sys.get_state(feed)
 
-      assert_receive {:frame, type1, ids1}, 500
-      assert_receive {:frame, type2, ids2}, 500
+      assert_receive {:frame, type1, ids1}, 5_000
+      assert_receive {:frame, type2, ids2}, 5_000
 
       # Order is load-bearing here too, for the identical reason it is everywhere else in
       # this file: the stranded release has to reach the venue before the shard's own
@@ -1577,7 +1593,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       assert :ok = Feed.unsubscribe(feed, ["A-USD"])
 
-      assert_receive {:frame, "unsubscribe", ids}, 500
+      assert_receive {:frame, "unsubscribe", ids}, 5_000
       assert Enum.sort(ids) == ~w(A-USD STALE-USD)
 
       assert :sys.get_state(feed).shards == %{}

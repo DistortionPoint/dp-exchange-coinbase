@@ -81,7 +81,15 @@ defmodule DpExchange.Coinbase.WriteOnceTest do
   end
 
   test "an order edit is sent once" do
-    Rest.replace_order(@credentials, "order-1", %{price: Decimal.new("10")}, opts([]))
+    # `EditOrderRequest` requires both price and size — a lone `price` is refused locally,
+    # before any request is made, so this needs both to reach `post_once/4` at all.
+    Rest.replace_order(
+      @credentials,
+      "order-1",
+      %{price: Decimal.new("10"), quantity: Decimal.new("1")},
+      opts([])
+    )
+
     assert [_one] = requests()
   end
 

@@ -108,7 +108,7 @@ defmodule DpExchange.Coinbase.ResponseShapeTest do
             {"get_historical_prices",
              fn b -> Rest.get_historical_prices("BTC-USD", "1h", [], opts(b)) end,
              %{"candles" => [true]}},
-            {"get_trades", fn b -> Rest.get_trades("BTC-USD", opts(b)) end,
+            {"get_trades", fn b -> Rest.get_trades("BTC-USD", [limit: 10] ++ opts(b)) end,
              %{"trades" => [true]}},
             {"get_price", fn b -> Rest.get_price("BTC-USD", opts(b)) end, %{"trades" => [true]}},
             {"get_orders", fn b -> Rest.get_orders(@credentials, opts(b)) end,

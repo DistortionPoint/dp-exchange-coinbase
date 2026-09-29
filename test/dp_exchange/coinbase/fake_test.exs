@@ -131,7 +131,12 @@ defmodule DpExchange.Coinbase.FakeTest do
     end
 
     test "preview_replace prices price and size changes" do
-      assert {:ok, preview} = Fake.preview_replace(%{}, "abc", %{price: Decimal.new("41000")})
+      assert {:ok, preview} =
+               Fake.preview_replace(%{}, "abc", %{
+                 price: Decimal.new("41000"),
+                 quantity: Decimal.new("0.5")
+               })
+
       assert Decimal.equal?(preview.order_total, Decimal.new("20000.00"))
       assert preview.order_id == "abc"
     end
@@ -139,6 +144,11 @@ defmodule DpExchange.Coinbase.FakeTest do
     test "preview_replace refuses an edit the venue refuses" do
       assert {:error, {:unsupported_order_edit, [:side]}} =
                Fake.preview_replace(%{}, "abc", %{side: :sell})
+    end
+
+    test "preview_replace refuses price alone — EditOrderRequest requires size too" do
+      assert {:error, :missing_required_edit_field} =
+               Fake.preview_replace(%{}, "abc", %{price: Decimal.new("41000")})
     end
   end
 
@@ -205,19 +215,26 @@ defmodule DpExchange.Coinbase.FakeTest do
     test "more than one print comes back" do
       # The whole point of the tape is that get_price/2 keeps only the newest and this does
       # not. A fake with one print would never show the difference.
-      assert {:ok, trades} = Fake.get_trades("BTC-USD")
+      assert {:ok, trades} = Fake.get_trades("BTC-USD", limit: 10)
 
       assert length(trades) == 2
       assert Enum.map(trades, & &1.side) == [:buy, :sell]
     end
 
     test "an unlisted symbol is refused, not an empty tape" do
-      assert {:refused, :not_listed} = Fake.get_trades("NOPE-USD")
+      assert {:refused, :not_listed} = Fake.get_trades("NOPE-USD", limit: 10)
     end
 
     test "no print is marked broken — this venue publishes no bust flag" do
-      assert {:ok, trades} = Fake.get_trades("BTC-USD")
+      assert {:ok, trades} = Fake.get_trades("BTC-USD", limit: 10)
       refute Enum.any?(trades, & &1.broken)
+    end
+
+    test "limit is required, matching the real venue's endpoint" do
+      # `limit` is `required: true` on the ticker endpoint
+      # (docs/reference/coinbase/openapi/at-spec.yaml:523-528). A fake that answered
+      # without one would let a consumer's suite go green on a call the real venue refuses.
+      assert {:error, :missing_limit} = Fake.get_trades("BTC-USD")
     end
   end
 

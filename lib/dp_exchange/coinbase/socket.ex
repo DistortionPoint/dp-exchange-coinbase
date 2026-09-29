@@ -89,7 +89,7 @@ defmodule DpExchange.Coinbase.Socket do
   `:link_down` notice bracket where that gap may fall; `:sequence` on both
   `DpExchange.Core.Types.OrderBook` and `DpExchange.Core.Types.OrderBookDelta` is the
   other tool where a venue publishes one (Coinbase's `l2_data` channel does not, so
-  this socket always sends `nil` there — see `decode_book_event/3`). Neither tool
+  this socket always sends `nil` there — see `decode_book_event/2`). Neither tool
   reconstructs a missing delta; nothing does. The correct response to `:link_up` is to
   re-pull `get_order_book/2` (unaffected by any of this) or accept the venue's own
   fresh `snapshot` on resubscribe, not to keep applying deltas across a gap and hope
@@ -208,9 +208,18 @@ defmodule DpExchange.Coinbase.Socket do
 
   @endpoint "wss://advanced-trade-ws.coinbase.com"
 
-  # `ticker` is public. `level2` and `user` require a token; nothing else does, and
-  # attaching one where it is not required is the incident above.
-  @authenticated_channels ~w(level2 user)
+  # `ticker` is public and takes no token — attaching one where it is not required is the
+  # incident above. `user`'s `SubscribeUser` payload lists `jwt` in its own `required` array
+  # (docs/reference/coinbase/openapi/at-async.json:752-765): no credential, no subscribe.
+  #
+  # `level2` is different, and this package used to treat it the same as `user`.
+  # `SubscribeLevel2`'s `jwt` is described as "Optional here; recommended for connection
+  # reliability." (at-async.json:685-687) — present when available, not required. Refusing a
+  # credential-less `level2` subscribe outright was a stricter contract than the venue
+  # documents; see `subscription_message/3` and `Feed`'s `channel_permitted?/2` for where
+  # that used to happen.
+  @authenticated_channels ~w(user)
+  @optionally_authenticated_channels ~w(level2)
 
   # See the moduledoc: chosen against `Feed`'s 15_000 ms `@call_timeout`, not inherited
   # from WebSockex's own defaults (6_000 ms connect + 5_000 ms recv).
@@ -537,16 +546,25 @@ defmodule DpExchange.Coinbase.Socket do
     base = %{type: "subscribe", product_ids: products, channel: channel}
 
     cond do
-      channel not in @authenticated_channels ->
-        {:ok, base}
-
-      is_nil(credentials) ->
+      channel in @authenticated_channels and is_nil(credentials) ->
         {:error, {:credentials_required, channel}}
 
+      channel in @authenticated_channels ->
+        attach_jwt(base, credentials)
+
+      # `level2`: send the JWT when credentials are available — "recommended for connection
+      # reliability" — never refuse for lacking them, since the venue does not require one.
+      channel in @optionally_authenticated_channels and not is_nil(credentials) ->
+        attach_jwt(base, credentials)
+
       true ->
-        with {:ok, token} <- Auth.jwt(credentials) do
-          {:ok, Map.put(base, :jwt, token)}
-        end
+        {:ok, base}
+    end
+  end
+
+  defp attach_jwt(base, credentials) do
+    with {:ok, token} <- Auth.jwt(credentials) do
+      {:ok, Map.put(base, :jwt, token)}
     end
   end
 
@@ -560,14 +578,23 @@ defmodule DpExchange.Coinbase.Socket do
   # every book update — and a venue delivering nothing on one channel while another works
   # reads as a quiet market.
   #
-  # **The timestamp lives on the envelope, not the row.** Every v3 channel message
-  # carries its own top-level `timestamp` (server time the message was sent); neither a
-  # `tickers` row nor a `level2` `updates` row repeats it. An earlier version of this
-  # module read a `ticker["time"]` field that does not exist in the venue's own
-  # documented schema — every single `ticker` decode failed against the real venue as a
-  # result, silently, because the fake and hand-written tests both encoded the same wrong
-  # assumption and agreed with each other. Confirmed against Coinbase's own CDP API
-  # reference for both channels before fixing, not assumed a second time.
+  # **The `ticker` timestamp lives on the envelope, not the row.** Every v3 channel message
+  # carries its own top-level `timestamp` (server time the message was sent); a `Ticker`
+  # row has no time field of its own to repeat it (at-async.json's `Ticker` schema has none)
+  # — an earlier version of this module read a `ticker["time"]` field that does not exist in
+  # the venue's own documented schema, and every single `ticker` decode failed against the
+  # real venue as a result, silently, because the fake and hand-written tests both encoded
+  # the same wrong assumption and agreed with each other. Confirmed against Coinbase's own
+  # CDP API reference before fixing, not assumed a second time.
+  #
+  # **`l2_data` is different: `L2Update` names its own `event_time`**, "Time of the event as
+  # recorded by the trading engine" (docs/reference/coinbase/openapi/at-async.json:1367-1370)
+  # — distinct from the envelope `timestamp` used for `ticker` above, which is when the
+  # gateway forwarded the message, not when the trading engine recorded the change this row
+  # describes. This module used to stamp every snapshot and delta with the envelope time,
+  # on the same "the timestamp lives on the envelope" reasoning that is correct for `ticker`
+  # and was wrong here — see `latest_event_time/1`, which the l2 path now uses instead of
+  # the envelope `timestamp` `dispatch/2` reads for `ticker`.
   defp dispatch(%{"channel" => "ticker", "events" => events} = payload, state)
        when is_list(events) do
     timestamp = Map.get(payload, "timestamp")
@@ -575,10 +602,9 @@ defmodule DpExchange.Coinbase.Socket do
     Enum.reduce(events, state, &decode_ticker_event(&1, &2, timestamp))
   end
 
-  defp dispatch(%{"channel" => "l2_data", "events" => events} = payload, state)
+  defp dispatch(%{"channel" => "l2_data", "events" => events}, state)
        when is_list(events) do
-    timestamp = Map.get(payload, "timestamp")
-    Enum.reduce(events, state, &decode_book_event(&1, &2, timestamp))
+    Enum.reduce(events, state, &decode_book_event(&1, &2))
   end
 
   defp dispatch(%{"channel" => "subscriptions"}, state) do
@@ -628,7 +654,7 @@ defmodule DpExchange.Coinbase.Socket do
       else: :credentials_rejected
   end
 
-  # `is_binary/1` on `product_id` here and in `decode_book_event/3`: `SymbolFormat` raises
+  # `is_binary/1` on `product_id` here and in `decode_book_event/2`: `SymbolFormat` raises
   # on anything else, and a raise in a frame handler takes this whole connection down.
   # Found by mutating real frames (2026-09-26): `"product_id": {}` or `0` crashed the socket.
   # A non-string id now falls to the catch-all, exactly as an absent one already did.
@@ -684,27 +710,25 @@ defmodule DpExchange.Coinbase.Socket do
   # the moduledoc.
   defp decode_book_event(
          %{"type" => "snapshot", "product_id" => product, "updates" => rows},
-         state,
-         timestamp
+         state
        )
        when is_binary(product) and is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(product)
-    deliver_snapshot(state, symbol, rows, timestamp)
+    deliver_snapshot(state, symbol, rows)
   end
 
   defp decode_book_event(
          %{"type" => "update", "product_id" => product, "updates" => rows},
-         state,
-         timestamp
+         state
        )
        when is_binary(product) and is_list(rows) do
     symbol = SymbolFormat.to_canonical_symbol(product)
-    deliver_delta(state, symbol, rows, timestamp)
+    deliver_delta(state, symbol, rows)
   end
 
-  defp decode_book_event(_other, state, _timestamp), do: state
+  defp decode_book_event(_other, state), do: state
 
-  # The ticker twin of `decode_book_event/3` above, and total in the same way.
+  # The ticker twin of `decode_book_event/2` above, and total in the same way.
   #
   # This was `Enum.reduce(Map.get(event, "tickers", []), ...)` inline, which is not total.
   # `Map.get/3`'s default covers an ABSENT `"tickers"` and not a present `null`, so
@@ -723,17 +747,20 @@ defmodule DpExchange.Coinbase.Socket do
   # or re-sorted against anything held across frames, which is the work this module no
   # longer does. See the moduledoc.
   #
-  # FAILS CLOSED on the timestamp, same as `build_quote/3` — the venue's own `timestamp`
-  # is real and available on every `l2_data` message; a book whose freshness cannot be
-  # stated is refused rather than stamped with whenever this process happened to
-  # process the frame. Row decoding runs first regardless, so a malformed row is
-  # reported even when the frame's timestamp is also bad — two independent problems,
-  # both worth a signal.
-  defp deliver_snapshot(state, symbol, rows, timestamp) do
+  # FAILS CLOSED on the timestamp, same as `build_quote/3` — `venue_time` is now the MAX
+  # `event_time` across this snapshot's own rows (see `latest_event_time/1`), not the
+  # envelope `timestamp` this used to read; a book whose freshness cannot be stated this
+  # way is refused rather than stamped with whenever this process happened to process the
+  # frame. Row decoding runs first regardless, so a malformed row is reported even when
+  # every row's `event_time` is also bad — two independent problems, both worth a signal.
+  # `observed_at` stays `DateTime.utc_now()` — Core's own contract for that field is "when
+  # this package read it", never a venue-stated time, so there is nothing here for it to
+  # read from the frame.
+  defp deliver_snapshot(state, symbol, rows) do
     {levels, state} = decode_rows(rows, state)
     {bids, asks} = split_sides(levels)
 
-    case parse_time(timestamp) do
+    case latest_event_time(rows) do
       {:ok, at} ->
         order_book = %Types.OrderBook{
           symbol: symbol,
@@ -761,10 +788,15 @@ defmodule DpExchange.Coinbase.Socket do
   # `:sequence` is left at its default `nil`: Coinbase's `l2_data` channel does not
   # publish a book sequence number, so there is nothing here to carry — see the
   # moduledoc's reconnect section.
-  defp deliver_delta(state, symbol, rows, timestamp) do
+  #
+  # `timestamp` is the MAX `event_time` across this delta's own rows — see
+  # `latest_event_time/1` — not the envelope time this used to read. `OrderBookDelta` has
+  # no `observed_at` slot the way `OrderBook` does, so there is nothing here to hold the
+  # envelope time in even if it were still wanted.
+  defp deliver_delta(state, symbol, rows) do
     {levels, state} = decode_rows(rows, state)
 
-    case parse_time(timestamp) do
+    case latest_event_time(rows) do
       {:ok, at} ->
         delta = %Types.OrderBookDelta{
           symbol: symbol,
@@ -778,6 +810,35 @@ defmodule DpExchange.Coinbase.Socket do
 
       {:error, _reason} ->
         report_quality(state, symbol)
+    end
+  end
+
+  # `L2Update.event_time` — "Time of the event as recorded by the trading engine"
+  # (docs/reference/coinbase/openapi/at-async.json:1367-1370) — lives on each row, not the
+  # envelope. `OrderBook.venue_time`/`OrderBookDelta.timestamp` are one field per frame, not
+  # one per level, so this takes the MAX across the frame's own rows: the newest event this
+  # particular snapshot or delta actually reflects. A row with no `event_time`, or one that
+  # does not parse, is skipped here — `decode_rows/2` already reports a row-level problem
+  # through `:data_quality` for the fields it decodes, and a bad `event_time` on an
+  # otherwise-good row must not sink the whole frame by itself when another row's time is
+  # readable. Only an empty result — no rows, or none with a readable `event_time` — fails
+  # the whole frame closed, exactly as a missing envelope timestamp did before.
+  defp latest_event_time(rows) do
+    rows
+    |> Enum.flat_map(fn
+      %{"event_time" => value} ->
+        case parse_time(value) do
+          {:ok, at} -> [at]
+          {:error, _reason} -> []
+        end
+
+      _other ->
+        []
+    end)
+    |> Enum.max(DateTime, fn -> nil end)
+    |> case do
+      nil -> {:error, :missing_venue_timestamp}
+      at -> {:ok, at}
     end
   end
 

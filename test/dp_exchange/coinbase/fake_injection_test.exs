@@ -208,8 +208,8 @@ defmodule DpExchange.Coinbase.FakeInjectionTest do
     test "get_trades/2 only fails for the targeted symbol" do
       FakeInjection.fail_always(:coinbase, "BTC-USD", {:error, :injected})
 
-      assert Fake.get_trades("BTC-USD") == {:error, :injected}
-      assert {:ok, [_first | _rest]} = Fake.get_trades("ETH-USD")
+      assert Fake.get_trades("BTC-USD", limit: 10) == {:error, :injected}
+      assert {:ok, [_first | _rest]} = Fake.get_trades("ETH-USD", limit: 10)
     end
 
     test "quantization/1 only fails for the targeted symbol" do

@@ -232,40 +232,58 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_trades(symbol, _opts \\ []) do
+  def get_trades(symbol, opts \\ []) do
     with_injection(symbol, fn ->
-      case Map.fetch(@price, symbol) do
-        {:ok, price} ->
-          # More than one print, because the whole point of the tape is that get_price/2
-          # keeps only the newest and this does not.
-          {:ok,
-           [
-             %Types.Trade{
-               id: "t-1",
-               symbol: symbol,
-               side: :buy,
-               price: Decimal.new(price),
-               quantity: Decimal.new("0.25"),
-               timestamp: @at,
-               broken: false,
-               provider: :coinbase
-             },
-             %Types.Trade{
-               id: "t-2",
-               symbol: symbol,
-               side: :sell,
-               price: Decimal.sub(Decimal.new(price), Decimal.new("1.50")),
-               quantity: Decimal.new("0.10"),
-               timestamp: DateTime.add(@at, -5, :second),
-               broken: false,
-               provider: :coinbase
-             }
-           ]}
-
-        :error ->
-          {:refused, :not_listed}
+      # The real package refuses locally when `opts[:limit]` is absent — the venue's
+      # `limit` query param is `required: true`
+      # (docs/reference/coinbase/openapi/at-spec.yaml:523-528) and documents no default. A
+      # fake that answered anyway would let a consumer's suite go green on a call the real
+      # venue refuses.
+      with :ok <- required_trades_limit(opts) do
+        get_trades_result(symbol)
       end
     end)
+  end
+
+  defp required_trades_limit(opts) do
+    case Keyword.get(opts, :limit) do
+      nil -> {:error, :missing_limit}
+      _limit -> :ok
+    end
+  end
+
+  defp get_trades_result(symbol) do
+    case Map.fetch(@price, symbol) do
+      {:ok, price} ->
+        # More than one print, because the whole point of the tape is that get_price/2
+        # keeps only the newest and this does not.
+        {:ok,
+         [
+           %Types.Trade{
+             id: "t-1",
+             symbol: symbol,
+             side: :buy,
+             price: Decimal.new(price),
+             quantity: Decimal.new("0.25"),
+             timestamp: @at,
+             broken: false,
+             provider: :coinbase
+           },
+           %Types.Trade{
+             id: "t-2",
+             symbol: symbol,
+             side: :sell,
+             price: Decimal.sub(Decimal.new(price), Decimal.new("1.50")),
+             quantity: Decimal.new("0.10"),
+             timestamp: DateTime.add(@at, -5, :second),
+             broken: false,
+             provider: :coinbase
+           }
+         ]}
+
+      :error ->
+        {:refused, :not_listed}
+    end
   end
 
   defp book_side(mid, limit, direction) do
@@ -1023,16 +1041,14 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def replace_order(_credentials, order_id, changes, _opts \\ []) do
     with_injection(fn ->
-      # The fake enforces the venue's edit surface: price and size only. A fake that accepted
-      # a side change would let a consumer's test pass on an edit the venue refuses.
-      case Map.keys(changes) -- [:price, :quantity] do
-        [] ->
-          # Read back, as the real package does: the venue's edit response carries no order.
-          {:ok,
-           %{fake_order() | id: order_id, price: Map.get(changes, :price) || fake_order().price}}
-
-        unsupported ->
-          {:error, {:unsupported_order_edit, unsupported}}
+      # The fake enforces the venue's edit surface: price and size only, both required. A fake
+      # that accepted a side change, or only one of the two, would let a consumer's test pass
+      # on an edit the real venue refuses — `EditOrderRequest` declares order_id, price AND
+      # size all required (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852), the same
+      # requirement `Rest.replace_order/4` enforces.
+      with :ok <- fake_editable(changes) do
+        # Read back, as the real package does: the venue's edit response carries no order.
+        {:ok, %{fake_order() | id: order_id, price: Map.get(changes, :price)}}
       end
     end)
   end
@@ -1040,29 +1056,46 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def preview_replace(_credentials, order_id, changes, _opts \\ []) do
     with_injection(fn ->
-      # The same edit surface replace_order/4 enforces — price and size only. Anything else is
-      # an edit the venue refuses, and a fake that priced it would let a consumer's suite go
-      # green on a call that cannot be made.
-      case Map.keys(changes) -- [:price, :quantity] do
-        [] ->
-          {:ok,
-           %{
-             order_total: Decimal.new("20000.00"),
-             commission_total: Decimal.new("10.00"),
-             base_size: Map.get(changes, :quantity),
-             quote_size: nil,
-             best_bid: Decimal.new("39990"),
-             best_ask: Decimal.new("40010"),
-             average_filled_price: Decimal.new("40000"),
-             order_margin_total: nil,
-             slippage: Decimal.new("0.001"),
-             order_id: order_id
-           }}
-
-        unsupported ->
-          {:error, {:unsupported_order_edit, unsupported}}
+      # The same edit surface replace_order/4 enforces — price and size, both required.
+      # Anything less is an edit the venue refuses, and a fake that priced it would let a
+      # consumer's suite go green on a call that cannot be made.
+      with :ok <- fake_editable(changes) do
+        {:ok,
+         %{
+           order_total: Decimal.new("20000.00"),
+           commission_total: Decimal.new("10.00"),
+           base_size: Map.get(changes, :quantity),
+           quote_size: nil,
+           best_bid: Decimal.new("39990"),
+           best_ask: Decimal.new("40010"),
+           average_filled_price: Decimal.new("40000"),
+           order_margin_total: nil,
+           slippage: Decimal.new("0.001"),
+           order_id: order_id
+         }}
       end
     end)
+  end
+
+  # Mirrors `Rest`'s `editable_changes/1` + `editable_present/1`: an unsupported field is
+  # refused by name, an empty change set is `:no_order_changes`, and exactly one of
+  # price/quantity — without the other — is `:missing_required_edit_field`, because
+  # `EditOrderRequest` requires both.
+  defp fake_editable(changes) do
+    case Map.keys(changes) -- [:price, :quantity] do
+      [] ->
+        has_price = Map.has_key?(changes, :price)
+        has_quantity = Map.has_key?(changes, :quantity)
+
+        cond do
+          has_price and has_quantity -> :ok
+          has_price or has_quantity -> {:error, :missing_required_edit_field}
+          true -> {:error, :no_order_changes}
+        end
+
+      unsupported ->
+        {:error, {:unsupported_order_edit, unsupported}}
+    end
   end
 
   @impl true

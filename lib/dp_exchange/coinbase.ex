@@ -288,17 +288,17 @@ defmodule DpExchange.Coinbase do
       # `docs/reference/coinbase/level2-session-limit.md`.
       streamable: [:quotes, :order_book],
 
-      # **`:order_book` needs a credential here and `:quotes` does not**, which is exactly
-      # the distinction this field exists to carry. `Socket`'s `@authenticated_channels`
-      # names `level2`, and `Feed.active_channels/1` subscribes `["ticker"]` without
-      # credentials and `["ticker", "level2"]` with them — so an anonymous consumer gets
-      # quotes and no book.
-      #
-      # This was left at its `[]` default, which reads as "nothing here needs a
-      # credential". A host deciding whether it must obtain one before it can stream book
-      # data was told no, and the true answer is yes — it would have found out from a book
-      # stream that simply never arrived, which is the silent shape this family refuses.
-      authenticated_streamable: [:order_book],
+      # **Nothing streamable here genuinely requires a credential.** This used to declare
+      # `[:order_book]`, on the reasoning that `level2`'s subscribe needs a JWT the way
+      # `user`'s does. It does not: `SubscribeLevel2`'s own payload lists `jwt` as
+      # "Optional here; recommended for connection reliability."
+      # (docs/reference/coinbase/openapi/at-async.json:685-687), not `required` the way
+      # `SubscribeUser`'s is (at-async.json:752-765). `Socket.subscription_message/3` sends
+      # `level2` unauthenticated when no credential is given, and `Feed.channel_permitted?/2`
+      # no longer filters it out for a credential-less caller — see both for the mechanism.
+      # A credential still buys `level2` something (the venue's own "connection
+      # reliability"), which is why `credential_benefit` below is not `:no_difference`.
+      authenticated_streamable: [],
       historical_timeframes: Rest.granularities(),
       max_candles_per_request: Rest.max_candles(),
       reports_trade_volume: true,

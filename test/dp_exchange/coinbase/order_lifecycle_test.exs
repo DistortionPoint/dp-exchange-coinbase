@@ -62,7 +62,10 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
         "filled_size" => "0.25",
         "average_filled_price" => "40100.5",
         "total_fees" => "1.20",
-        "fee_currency" => "USD",
+        # `Order` has no `fee_currency` field
+        # (docs/reference/coinbase/openapi/at-spec.yaml:8223-8330). This fixture used to
+        # pin one anyway — a shape the venue never actually sends — and the old code read
+        # it right back out, so the fixture and the bug matched and nothing caught it.
         "created_time" => "2026-08-31T12:00:00Z"
       },
       overrides
@@ -122,6 +125,21 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
   end
 
   describe "get_order/3" do
+    test "fee_currency is nil even if the venue's payload carries one" do
+      # `Order` documents no `fee_currency` field
+      # (docs/reference/coinbase/openapi/at-spec.yaml:8223-8330). This used to read
+      # `order["fee_currency"]` straight through, so a payload that happened to carry the
+      # key — undocumented, and never something this package should rely on continuing to
+      # appear — was echoed back as though it were a real field. It is not, so it is not
+      # read, regardless of what shows up in the map.
+      body = %{"order" => order_json(%{"fee_currency" => "USD"})}
+
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc-123", plug: responding(body), retry_attempts: 0)
+
+      assert order.fee_currency == nil
+    end
+
     test "returns an Order with the venue's own fields" do
       body = %{"order" => order_json()}
 
@@ -137,7 +155,9 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
       assert Decimal.equal?(order.quantity, Decimal.new("1.0"))
       assert Decimal.equal?(order.filled_quantity, Decimal.new("0.25"))
       assert Decimal.equal?(order.average_price, Decimal.new("40100.5"))
-      assert order.fee_currency == "USD"
+      # Not documented anywhere on Order — see order_json/1's comment. Even if the venue
+      # sent a "fee_currency" field, this package must not read it back.
+      assert order.fee_currency == nil
       assert order.provider == :coinbase
     end
 
@@ -192,12 +212,14 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
           {"QUEUED", :open},
           {"OPEN", :open},
           {"CANCEL_QUEUED", :open},
+          {"EDIT_QUEUED", :open},
           {"FILLED", :filled},
           {"CANCELLED", :cancelled},
           {"EXPIRED", :expired},
-          {"FAILED", :rejected}
+          {"FAILED", :rejected},
+          {"UNKNOWN_ORDER_STATUS", nil}
         ] do
-      test "#{venue} maps to #{expected}" do
+      test "#{venue} maps to #{inspect(expected)}" do
         body = %{"order" => order_json(%{"status" => unquote(venue)})}
 
         assert {:ok, order} =
@@ -221,6 +243,19 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
 
       assert order.status == :open
       refute order.status == :cancelled
+    end
+
+    test "EDIT_QUEUED is open too — the same shape of gap CANCEL_QUEUED already closed" do
+      # `OrderExecutionStatus` names both (docs/reference/coinbase/openapi/at-spec.yaml:
+      # 8577-8589). This one was simply absent from the map, so it fell through to `nil` —
+      # a status this package failed to recognise rather than the intermediate, still-live
+      # state the venue actually reported.
+      body = %{"order" => order_json(%{"status" => "EDIT_QUEUED"})}
+
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc-123", plug: responding(body), retry_attempts: 0)
+
+      assert order.status == :open
     end
 
     test "a status the venue invents later is nil, never a guess" do

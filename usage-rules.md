@@ -15,15 +15,14 @@ when the venue can tell the second attempt from the first. This package makes th
 of two ways, and which one it is depends on what the endpoint gives it:
 
 - **Orders and Prime staking send an idempotency key**, generated when you do not supply
-  one — `client_order_id` on Advanced Trade, `idempotency_key` on Prime. Re-sending returns
-  the original result instead of performing the action again, so the retries are kept.
-  Supply your own (`request.client_order_id`, `opts[:idempotency_key]`) if you want to
-  correlate or to make your OWN re-issued call idempotent — a generated key covers the
-  retries this package makes, not a second call you make yourself.
-- **`Prime.claim_rewards/4` is sent once.** Its body is yours and opaque here, so there is no
-  key this package can add without guessing at a schema it does not own. If you know the
-  venue's field for it, put it in `opts[:body]` and pass `retry_attempts:` to take the
-  retries back.
+  one — `client_order_id` on Advanced Trade, `idempotency_key` on Prime, including
+  `Prime.claim_rewards/4` — `StakingClaimRewardsRequest` requires one, so it is generated
+  the same way the staking calls' bodies already are and retries the same way they do.
+  Re-sending returns the original result instead of performing the action again, so the
+  retries are kept. Supply your own (`request.client_order_id`, `opts[:idempotency_key]`,
+  or your own key inside `opts[:body]` for `claim_rewards/4`) if you want to correlate or
+  to make your OWN re-issued call idempotent — a generated key covers the retries this
+  package makes, not a second call you make yourself.
 - **Portfolio moves, futures sweeps, conversion commits, order edits and portfolio
   creates are sent once**: `transfer_internal/4`, `schedule_futures_sweep/2`,
   `commit_conversion/3`, `replace_order/4` and `create_portfolio/2`. None has a key the
@@ -268,16 +267,18 @@ bogus token with an authentication failure, which is how a book channel once pro
 nothing while the public ticker worked fine — a venue half-delivering looks like a quiet
 market rather than a broken credential.
 
-### `:order_book` needs a credential; `:quotes` does not
+### Neither `:order_book` nor `:quotes` requires a credential to stream
 
-`capabilities/0` now says so: `streamable` is `[:quotes, :order_book]` and
-`authenticated_streamable` is `[:order_book]`. Without credentials this package subscribes
-`ticker` alone, so you get quotes and **no book**.
+`capabilities/0` says so: `streamable` is `[:quotes, :order_book]` and
+`authenticated_streamable` is `[]`. Without credentials this package still subscribes both
+`ticker` and `level2` — `SubscribeLevel2`'s own JWT is documented "Optional here;
+recommended for connection reliability.", not required, unlike `SubscribeUser`'s.
 
-That second field was left empty until now, which reads as "nothing here needs a
-credential". A host deciding whether it had to obtain one before it could stream book data
-was told no, and would have discovered otherwise from a book stream that simply never
-arrived — ask `capabilities/0` rather than waiting to find out from `coverage/1`.
+This used to declare `authenticated_streamable: [:order_book]` and skip `level2` entirely
+for a credential-less caller, on the reasoning that the venue would refuse an unauthenticated
+book subscribe outright. It does not. A credential still buys `level2` something —
+`credential_benefit: :higher_ceiling` and the venue's own "connection reliability" note both
+apply — so pass one when you have it even if you only want the book.
 
 ### Frames are tagged with the symbol you subscribed, not whatever the venue renamed it to
 
@@ -320,14 +321,19 @@ quotes measured **1,577,001 `OrderBookDelta` frames decoded and delivered in one
 discarded. Ignoring them on receipt saves nothing — the sockets are open and the frames are
 parsed before they reach you.
 
-Two things the option deliberately does not do:
+One thing the option deliberately does not do:
 
-- **It never widens past your credentials.** `level2` is authenticated here, so a
-  credential-less feed carries `ticker` alone whatever you ask for. Requesting the book
-  without a credential does not produce a doomed subscribe.
 - **It refuses an empty list**, loudly, at `init/1`. A feed subscribing to nothing reports
   permanent zero coverage, which is indistinguishable from a venue outage. If you want no
   stream, do not start a feed.
+
+**`level2` no longer requires a credential to be attempted.** `SubscribeLevel2`'s JWT is
+documented "Optional here; recommended for connection reliability."
+(`docs/reference/coinbase/openapi/at-async.json`) — a credential-less feed still opens
+`level2` shards and subscribes unauthenticated; it is `user` (order fills) that genuinely
+needs one. A credential still buys you something on `level2`: the venue's own words say it
+helps "connection reliability", so pass one when you have it even if you only want the
+book.
 
 A kind this venue does not stream (`:candles`, say) also fails at `init/1` rather than being
 silently dropped.
@@ -649,12 +655,26 @@ string. `DpExchange.Coinbase.Prime.credentials()` is that triple's type.
 answer a `Core.Venue` callback, and they **pick a scope only from what you said**: a
 `:wallet_id` means the wallet, its absence means the portfolio, and `:portfolio_id` is
 always required. A portfolio-scoped unstake redeems across *every* wallet in the
-portfolio. The other five are Coinbase-specific — no generic callback fits them, so they
+portfolio.
+
+**The two scopes send different bodies, because the venue documents different schemas for
+them.** Portfolio-scoped calls send a flat `{idempotency_key, currency_symbol, amount}`;
+`opts[:extra]` merges into that same top level. Wallet-scoped calls send `{idempotency_key,
+inputs: {amount, ...}}` — no `currency` field at all, because a wallet already names one
+asset on the venue's side — and `opts[:extra]` merges into `inputs`, not the top level.
+`opts[:metadata]`, where the venue defines that field, is sent as its own sibling key
+either way.
+
+The other five are Coinbase-specific — no generic callback fits them, so they
 are plain functions on `DpExchange.Coinbase` instead:
 
 - `query_transaction_validators/3` — the validators a portfolio-scoped staking
   transaction would touch. A read, despite being a POST: Prime takes the query in the
-  body.
+  body. **`opts[:transaction_ids]` is required** — the venue's own field is required and
+  documents no "every transaction" meaning for its absence, so a caller who omits it is
+  refused locally (`{:error, :missing_transaction_ids}`) rather than sent with an invented
+  empty list. `opts[:cursor]`, `opts[:limit]`, `opts[:sort_direction]` go through
+  `opts[:extra]`.
 - `staking_status/4` — one wallet's staking state. **Not** what `get_staking_balances/1`
   would answer even if this venue served it: that is every staked position, one per
   asset; this is one wallet's own state.

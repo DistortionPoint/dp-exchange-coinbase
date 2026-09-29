@@ -20,6 +20,38 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Checked against the vendor's Advanced Trade and Prime specs, fetched 2026-09-29 and now
+committed under `docs/reference/coinbase/openapi/`.
+
+- **Prime wallet staking dropped the caller's amount.** `stake_wallet/6` and
+  `unstake_wallet/6` sent a flat body; the endpoint reads the amount from `inputs.amount` and,
+  without it, stakes or unstakes the maximum available. The body is now the documented
+  `{idempotency_key, inputs}`.
+- Prime portfolio staking sends `currency_symbol`, the required field; it sent `currency`.
+  `preview_unstake_wallet/6` sends only `{amount}`. `claim_rewards/4` sends the required
+  `idempotency_key` and `inputs.amount`, and now retries because the key makes that safe.
+  `query_transaction_validators/3` requires `:transaction_ids`.
+- Conversions read their fee from `total_fee`; it was always `nil`.
+- `replace_order/4` and `preview_replace/4` require both price and size, as the endpoint does
+  (`{:error, :missing_required_edit_field}`).
+- `post_only` is a JSON boolean, `end_time` is RFC 3339, and neither is sent on an order
+  leaf whose schema does not define it. Stop-limit orders accept and send `stop_direction`.
+- **The trade tape's side was inverted.** `get_trades/2` reported the venue's maker side as
+  the taker's. It now reports the taker side, as `Types.Trade` defines it.
+- `get_trades/2` requires `:limit`, which the endpoint requires; `get_price/2` sends
+  `limit=1`.
+- `EDIT_QUEUED` is `:open`. Order `fee_currency` is `nil`; the schema has no such field.
+  `price_increment` comes from the product's `price_increment`, not `quote_increment`.
+- The product catalogue asks for SPOT explicitly and follows its cursor, bounded. The docs now
+  say SPOT rather than "every product".
+- Order rejections read `new_order_failure_reason`, `message` and `error_details`, and edits
+  `preview_failure_reason`, before the deprecated `error`.
+- Level-2 books and deltas are dated by each update's `event_time`, the engine time, rather
+  than the envelope's send time.
+- `level2` streams without credentials; the vendor documents its token as optional.
+
 ## [0.3.78] - 2026-09-29
 
 ### Fixed

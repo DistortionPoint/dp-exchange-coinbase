@@ -1,0 +1,1839 @@
+{
+  "asyncapi": "3.0.0",
+  "info": {
+    "title": "Coinbase Advanced Trade WebSocket",
+    "version": "1.0.0",
+    "description": "Subscribe to channels for real-time market data and (with a JWT) a user's\norders, positions, and futures balances.\n\nMost channels close within 60-90 seconds if no updates are sent. Subscribe to\nthe `heartbeats` channel alongside others to keep all subscriptions open.\n\nOnly the `user` channel accepts `-USDC` product IDs. Other channels return the\nsame data as the matching `-USD` product. `USDT-USDC` and `EURC-USDC` are\navailable on every channel.\n"
+  },
+  "servers": {
+    "production": {
+      "host": "advanced-trade-ws.coinbase.com",
+      "protocol": "wss",
+      "description": "Advanced Trade WebSocket API"
+    }
+  },
+  "defaultContentType": "application/json",
+  "channels": {
+    "heartbeats": {
+      "address": "heartbeats",
+      "title": "Heartbeats",
+      "description": "Real-time server pings (every second) to keep all connections open. Each\nmessage carries a heartbeat_counter so clients can detect missed messages.\nNo products or authentication required.\n",
+      "messages": {
+        "subscribe_request": {
+          "$ref": "#/components/messages/SubscribeHeartbeats"
+        },
+        "heartbeat": {
+          "name": "heartbeat",
+          "title": "Heartbeat message",
+          "payload": {
+            "$ref": "#/components/schemas/HeartbeatEnvelope"
+          }
+        }
+      }
+    },
+    "candles": {
+      "address": "candles",
+      "title": "Candles",
+      "description": "Real-time updates on product candles, grouped into five-minute buckets,\nwith updates every second.\n",
+      "messages": {
+        "subscribe_request": {
+          "$ref": "#/components/messages/SubscribeCandles"
+        },
+        "candles": {
+          "name": "candles",
+          "title": "Candles message",
+          "payload": {
+            "$ref": "#/components/schemas/CandlesEnvelope"
+          }
+        }
+      }
+    },
+    "status": {
+      "address": "status",
+      "title": "Product status",
+      "description": "Sends all products and currencies on a preset interval. Provide the\nproduct_ids you want status for.\n",
+      "messages": {
+        "subscribe_request": {
+          "$ref": "#/components/messages/SubscribeStatus"
+        },
+        "status": {
+          "name": "status",
+          "title": "Status message",
+          "payload": {
+            "$ref": "#/components/schemas/StatusEnvelope"
+          }
+        }
+      }
+    },
+    "ticker": {
+      "address": "ticker",
+      "title": "Ticker",
+      "description": "Real-time price updates every time a match happens. Batches updates during\ncascading matches to reduce bandwidth.\n",
+      "messages": {
+        "subscribe_request": {
+          "$ref": "#/components/messages/SubscribeTicker"
+        },
+        "ticker": {
+          "name": "ticker",
+          "title": "Ticker message",
+          "payload": {
+            "$ref": "#/components/schemas/TickerEnvelope"
+          }
+        }
+      }
+    },
+    "ticker_batch": {
+      "address": "ticker_batch",
+      "title": "Ticker (batched)",
+      "description": "Latest price updates every 5000 milliseconds (5 seconds) when there is a\nchange. Same schema as the ticker channel except the envelope channel is\nticker_batch and best bid / best ask fields are not provided.\n",
+      "messages": {
+        "subscribe_request": {
+          "$ref": "#/components/messages/SubscribeTickerBatch"
+        },
+        "ticker_batch": {
+          "name": "ticker_batch",
+          "title": "Ticker batch message",
+          "payload": {
+            "$ref": "#/components/schemas/TickerBatchEnvelope"
+          }
+        }
+      }
+    },
+    "level2": {
+      "address": "level2",
+      "title": "Level 2 order book",
+      "description": "Guarantees delivery of all updates and is the easiest way to keep an order\nbook snapshot in sync. Subscribe with channel level2; received messages\ncarry channel l2_data. new_quantity is the updated size at a price level\n(not a delta); a value of \"0\" means the level can be removed.\n",
+      "messages": {
+        "subscribe_request": {
+          "$ref": "#/components/messages/SubscribeLevel2"
+        },
+        "l2_data": {
+          "name": "l2_data",
+          "title": "Level 2 message",
+          "payload": {
+            "$ref": "#/components/schemas/L2Envelope"
+          }
+        }
+      }
+    },
+    "market_trades": {
+      "address": "market_trades",
+      "title": "Market trades",
+      "description": "Real-time trades for the subscribed products. Updates are collected over\nthe last 250 ms and sent together, so an update may contain one or many\ntrades.\n",
+      "messages": {
+        "subscribe_request": {
+          "$ref": "#/components/messages/SubscribeMarketTrades"
+        },
+        "market_trades": {
+          "name": "market_trades",
+          "title": "Market trades message",
+          "payload": {
+            "$ref": "#/components/schemas/MarketTradesEnvelope"
+          }
+        }
+      }
+    },
+    "user": {
+      "address": "user",
+      "title": "User orders and positions",
+      "description": "Authenticated. Sends updates on a user's open orders and current\npositions, including all subsequent updates. This is the only channel that\naccepts `-USDC` product IDs.\n\nOne connection per user. `product_ids` is optional; omit it for all products.\nTo add products, unsubscribe and open a new connection with the expanded list.\n\nOpen orders arrive in the snapshot batched by 50. The first message with fewer\nthan 50 orders is the last of that snapshot.\n",
+      "messages": {
+        "subscribe_request": {
+          "$ref": "#/components/messages/SubscribeUser"
+        },
+        "user": {
+          "name": "user",
+          "title": "User message",
+          "payload": {
+            "$ref": "#/components/schemas/UserEnvelope"
+          }
+        }
+      }
+    },
+    "futures_balance_summary": {
+      "address": "futures_balance_summary",
+      "title": "Futures balance summary",
+      "description": "Authenticated. Sends updates on all of a user's US futures balances,\nincluding subsequent updates. No products required.\n",
+      "messages": {
+        "subscribe_request": {
+          "$ref": "#/components/messages/SubscribeFuturesBalanceSummary"
+        },
+        "futures_balance_summary": {
+          "name": "futures_balance_summary",
+          "title": "Futures balance summary message",
+          "payload": {
+            "$ref": "#/components/schemas/FCMEnvelope"
+          }
+        }
+      }
+    }
+  },
+  "operations": {
+    "heartbeatsSubscribe": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/heartbeats"
+      },
+      "title": "Subscribe to heartbeats",
+      "summary": "Client sends a subscribe or unsubscribe request for the heartbeats channel.",
+      "messages": [
+        {
+          "$ref": "#/channels/heartbeats/messages/subscribe_request"
+        }
+      ]
+    },
+    "heartbeatsStream": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/heartbeats"
+      },
+      "title": "Heartbeat stream",
+      "summary": "Server streams heartbeat messages to subscribed clients.",
+      "messages": [
+        {
+          "$ref": "#/channels/heartbeats/messages/heartbeat"
+        }
+      ]
+    },
+    "candlesSubscribe": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/candles"
+      },
+      "title": "Subscribe to candles",
+      "summary": "Client sends a subscribe or unsubscribe request for the candles channel.",
+      "messages": [
+        {
+          "$ref": "#/channels/candles/messages/subscribe_request"
+        }
+      ]
+    },
+    "candlesStream": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/candles"
+      },
+      "title": "Candles stream",
+      "summary": "Server streams candle updates to subscribed clients.",
+      "messages": [
+        {
+          "$ref": "#/channels/candles/messages/candles"
+        }
+      ]
+    },
+    "statusSubscribe": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/status"
+      },
+      "title": "Subscribe to status",
+      "summary": "Client sends a subscribe or unsubscribe request for the status channel.",
+      "messages": [
+        {
+          "$ref": "#/channels/status/messages/subscribe_request"
+        }
+      ]
+    },
+    "statusStream": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/status"
+      },
+      "title": "Status stream",
+      "summary": "Server streams product status updates to subscribed clients.",
+      "messages": [
+        {
+          "$ref": "#/channels/status/messages/status"
+        }
+      ]
+    },
+    "tickerSubscribe": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/ticker"
+      },
+      "title": "Subscribe to ticker",
+      "summary": "Client sends a subscribe or unsubscribe request for the ticker channel.",
+      "messages": [
+        {
+          "$ref": "#/channels/ticker/messages/subscribe_request"
+        }
+      ]
+    },
+    "tickerStream": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/ticker"
+      },
+      "title": "Ticker stream",
+      "summary": "Server streams ticker updates to subscribed clients.",
+      "messages": [
+        {
+          "$ref": "#/channels/ticker/messages/ticker"
+        }
+      ]
+    },
+    "tickerBatchSubscribe": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/ticker_batch"
+      },
+      "title": "Subscribe to batched ticker",
+      "summary": "Client sends a subscribe or unsubscribe request for the ticker_batch channel.",
+      "messages": [
+        {
+          "$ref": "#/channels/ticker_batch/messages/subscribe_request"
+        }
+      ]
+    },
+    "tickerBatchStream": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/ticker_batch"
+      },
+      "title": "Batched ticker stream",
+      "summary": "Server streams batched ticker updates to subscribed clients.",
+      "messages": [
+        {
+          "$ref": "#/channels/ticker_batch/messages/ticker_batch"
+        }
+      ]
+    },
+    "level2Subscribe": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/level2"
+      },
+      "title": "Subscribe to level2",
+      "summary": "Client sends a subscribe or unsubscribe request for the level2 channel.",
+      "messages": [
+        {
+          "$ref": "#/channels/level2/messages/subscribe_request"
+        }
+      ]
+    },
+    "level2Stream": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/level2"
+      },
+      "title": "Level 2 stream",
+      "summary": "Server streams order book updates (channel l2_data) to subscribed clients.",
+      "messages": [
+        {
+          "$ref": "#/channels/level2/messages/l2_data"
+        }
+      ]
+    },
+    "marketTradesSubscribe": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/market_trades"
+      },
+      "title": "Subscribe to market trades",
+      "summary": "Client sends a subscribe or unsubscribe request for the market_trades channel.",
+      "messages": [
+        {
+          "$ref": "#/channels/market_trades/messages/subscribe_request"
+        }
+      ]
+    },
+    "marketTradesStream": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/market_trades"
+      },
+      "title": "Market trades stream",
+      "summary": "Server streams market trades to subscribed clients.",
+      "messages": [
+        {
+          "$ref": "#/channels/market_trades/messages/market_trades"
+        }
+      ]
+    },
+    "userSubscribe": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/user"
+      },
+      "title": "Subscribe to user updates",
+      "summary": "Client sends an authenticated subscribe or unsubscribe request for the user channel. A JWT is required.",
+      "messages": [
+        {
+          "$ref": "#/channels/user/messages/subscribe_request"
+        }
+      ]
+    },
+    "userStream": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/user"
+      },
+      "title": "User stream",
+      "summary": "Server streams the user's order and position updates to the subscribed client.",
+      "messages": [
+        {
+          "$ref": "#/channels/user/messages/user"
+        }
+      ]
+    },
+    "futuresBalanceSummarySubscribe": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/futures_balance_summary"
+      },
+      "title": "Subscribe to futures balance summary",
+      "summary": "Client sends an authenticated subscribe or unsubscribe request for the futures_balance_summary channel. A JWT is required.",
+      "messages": [
+        {
+          "$ref": "#/channels/futures_balance_summary/messages/subscribe_request"
+        }
+      ]
+    },
+    "futuresBalanceSummaryStream": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/futures_balance_summary"
+      },
+      "title": "Futures balance summary stream",
+      "summary": "Server streams the user's US futures balance updates to the subscribed client.",
+      "messages": [
+        {
+          "$ref": "#/channels/futures_balance_summary/messages/futures_balance_summary"
+        }
+      ]
+    }
+  },
+  "components": {
+    "messages": {
+      "SubscribeHeartbeats": {
+        "name": "subscribe_request",
+        "title": "Subscription request",
+        "summary": "Subscribe or unsubscribe to the heartbeats channel.",
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "channel"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "subscribe",
+                "unsubscribe"
+              ],
+              "default": "subscribe"
+            },
+            "channel": {
+              "type": "string",
+              "default": "heartbeats"
+            },
+            "jwt": {
+              "type": "string",
+              "description": "CDP JWT. Optional; recommended for connection reliability."
+            }
+          }
+        },
+        "examples": [
+          {
+            "name": "example",
+            "payload": {
+              "type": "subscribe",
+              "channel": "heartbeats"
+            }
+          }
+        ]
+      },
+      "SubscribeCandles": {
+        "name": "subscribe_request",
+        "title": "Subscription request",
+        "summary": "Subscribe or unsubscribe to the candles channel.",
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "channel",
+            "product_ids"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "subscribe",
+                "unsubscribe"
+              ],
+              "default": "subscribe"
+            },
+            "channel": {
+              "type": "string",
+              "default": "candles"
+            },
+            "product_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Products to subscribe to, for example BTC-USD."
+            },
+            "jwt": {
+              "type": "string",
+              "description": "CDP JWT. Optional here; recommended for connection reliability."
+            }
+          }
+        },
+        "examples": [
+          {
+            "name": "example",
+            "payload": {
+              "type": "subscribe",
+              "channel": "candles",
+              "product_ids": [
+                "BTC-USD"
+              ]
+            }
+          }
+        ]
+      },
+      "SubscribeStatus": {
+        "name": "subscribe_request",
+        "title": "Subscription request",
+        "summary": "Subscribe or unsubscribe to the status channel.",
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "channel",
+            "product_ids"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "subscribe",
+                "unsubscribe"
+              ],
+              "default": "subscribe"
+            },
+            "channel": {
+              "type": "string",
+              "default": "status"
+            },
+            "product_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Products to subscribe to, for example BTC-USD."
+            },
+            "jwt": {
+              "type": "string",
+              "description": "CDP JWT. Optional here; recommended for connection reliability."
+            }
+          }
+        },
+        "examples": [
+          {
+            "name": "example",
+            "payload": {
+              "type": "subscribe",
+              "channel": "status",
+              "product_ids": [
+                "BTC-USD"
+              ]
+            }
+          }
+        ]
+      },
+      "SubscribeTicker": {
+        "name": "subscribe_request",
+        "title": "Subscription request",
+        "summary": "Subscribe or unsubscribe to the ticker channel.",
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "channel",
+            "product_ids"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "subscribe",
+                "unsubscribe"
+              ],
+              "default": "subscribe"
+            },
+            "channel": {
+              "type": "string",
+              "default": "ticker"
+            },
+            "product_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Products to subscribe to, for example BTC-USD."
+            },
+            "jwt": {
+              "type": "string",
+              "description": "CDP JWT. Optional here; recommended for connection reliability."
+            }
+          }
+        },
+        "examples": [
+          {
+            "name": "example",
+            "payload": {
+              "type": "subscribe",
+              "channel": "ticker",
+              "product_ids": [
+                "BTC-USD"
+              ]
+            }
+          }
+        ]
+      },
+      "SubscribeTickerBatch": {
+        "name": "subscribe_request",
+        "title": "Subscription request",
+        "summary": "Subscribe or unsubscribe to the ticker_batch channel.",
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "channel",
+            "product_ids"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "subscribe",
+                "unsubscribe"
+              ],
+              "default": "subscribe"
+            },
+            "channel": {
+              "type": "string",
+              "default": "ticker_batch"
+            },
+            "product_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Products to subscribe to, for example BTC-USD."
+            },
+            "jwt": {
+              "type": "string",
+              "description": "CDP JWT. Optional here; recommended for connection reliability."
+            }
+          }
+        },
+        "examples": [
+          {
+            "name": "example",
+            "payload": {
+              "type": "subscribe",
+              "channel": "ticker_batch",
+              "product_ids": [
+                "BTC-USD"
+              ]
+            }
+          }
+        ]
+      },
+      "SubscribeLevel2": {
+        "name": "subscribe_request",
+        "title": "Subscription request",
+        "summary": "Subscribe or unsubscribe to the level2 channel.",
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "channel",
+            "product_ids"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "subscribe",
+                "unsubscribe"
+              ],
+              "default": "subscribe"
+            },
+            "channel": {
+              "type": "string",
+              "default": "level2"
+            },
+            "product_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Products to subscribe to, for example BTC-USD."
+            },
+            "jwt": {
+              "type": "string",
+              "description": "CDP JWT. Optional here; recommended for connection reliability."
+            }
+          }
+        },
+        "examples": [
+          {
+            "name": "example",
+            "payload": {
+              "type": "subscribe",
+              "channel": "level2",
+              "product_ids": [
+                "BTC-USD"
+              ]
+            }
+          }
+        ]
+      },
+      "SubscribeMarketTrades": {
+        "name": "subscribe_request",
+        "title": "Subscription request",
+        "summary": "Subscribe or unsubscribe to the market_trades channel.",
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "channel",
+            "product_ids"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "subscribe",
+                "unsubscribe"
+              ],
+              "default": "subscribe"
+            },
+            "channel": {
+              "type": "string",
+              "default": "market_trades"
+            },
+            "product_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Products to subscribe to, for example BTC-USD."
+            },
+            "jwt": {
+              "type": "string",
+              "description": "CDP JWT. Optional here; recommended for connection reliability."
+            }
+          }
+        },
+        "examples": [
+          {
+            "name": "example",
+            "payload": {
+              "type": "subscribe",
+              "channel": "market_trades",
+              "product_ids": [
+                "BTC-USD"
+              ]
+            }
+          }
+        ]
+      },
+      "SubscribeUser": {
+        "name": "subscribe_request",
+        "title": "Subscription request",
+        "summary": "Subscribe to the user channel. A JWT is required to receive data.",
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "channel",
+            "jwt"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "subscribe",
+                "unsubscribe"
+              ],
+              "default": "subscribe"
+            },
+            "channel": {
+              "type": "string",
+              "default": "user"
+            },
+            "product_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Products to include. Omit to receive all products. To add products later, unsubscribe and open a new connection with the expanded list."
+            },
+            "jwt": {
+              "type": "string",
+              "description": "CDP JWT. Required to receive data on this channel."
+            }
+          }
+        },
+        "examples": [
+          {
+            "name": "example",
+            "payload": {
+              "type": "subscribe",
+              "channel": "user",
+              "product_ids": [
+                "BTC-USD"
+              ],
+              "jwt": "<JWT>"
+            }
+          }
+        ]
+      },
+      "SubscribeFuturesBalanceSummary": {
+        "name": "subscribe_request",
+        "title": "Subscription request",
+        "summary": "Subscribe to the futures_balance_summary channel. A JWT is required to receive data.",
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "channel",
+            "jwt"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "subscribe",
+                "unsubscribe"
+              ],
+              "default": "subscribe"
+            },
+            "channel": {
+              "type": "string",
+              "default": "futures_balance_summary"
+            },
+            "jwt": {
+              "type": "string",
+              "description": "CDP JWT. Required to receive data on this channel."
+            }
+          }
+        },
+        "examples": [
+          {
+            "name": "example",
+            "payload": {
+              "type": "subscribe",
+              "channel": "futures_balance_summary",
+              "jwt": "<JWT>"
+            }
+          }
+        ]
+      }
+    },
+    "schemas": {
+      "HeartbeatEnvelope": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "The channel that produced this message.",
+            "const": "heartbeats"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server time the message was sent (RFC 3339)."
+          },
+          "sequence_num": {
+            "type": "integer",
+            "description": "Per-connection message sequence number; use it to detect dropped or out-of-order messages."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "current_time": {
+                  "type": "string"
+                },
+                "heartbeat_counter": {
+                  "type": "integer",
+                  "description": "Increments each heartbeat; verifies no messages were missed."
+                }
+              }
+            }
+          }
+        }
+      },
+      "CandlesEnvelope": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "The channel that produced this message.",
+            "const": "candles"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server time the message was sent (RFC 3339)."
+          },
+          "sequence_num": {
+            "type": "integer",
+            "description": "Per-connection message sequence number; use it to detect dropped or out-of-order messages."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "snapshot",
+                    "update"
+                  ]
+                },
+                "candles": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Candle"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "StatusEnvelope": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "The channel that produced this message.",
+            "const": "status"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server time the message was sent (RFC 3339)."
+          },
+          "sequence_num": {
+            "type": "integer",
+            "description": "Per-connection message sequence number; use it to detect dropped or out-of-order messages."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "snapshot",
+                    "update"
+                  ]
+                },
+                "products": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProductStatus"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "TickerEnvelope": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "The channel that produced this message.",
+            "const": "ticker"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server time the message was sent (RFC 3339)."
+          },
+          "sequence_num": {
+            "type": "integer",
+            "description": "Per-connection message sequence number; use it to detect dropped or out-of-order messages."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "snapshot",
+                    "update"
+                  ]
+                },
+                "tickers": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Ticker"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "TickerBatchEnvelope": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "The channel that produced this message.",
+            "const": "ticker_batch"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server time the message was sent (RFC 3339)."
+          },
+          "sequence_num": {
+            "type": "integer",
+            "description": "Per-connection message sequence number; use it to detect dropped or out-of-order messages."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "snapshot",
+                    "update"
+                  ]
+                },
+                "tickers": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TickerBatch"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "L2Envelope": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "The channel that produced this message.",
+            "const": "l2_data"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server time the message was sent (RFC 3339)."
+          },
+          "sequence_num": {
+            "type": "integer",
+            "description": "Per-connection message sequence number; use it to detect dropped or out-of-order messages."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "snapshot",
+                    "update"
+                  ]
+                },
+                "product_id": {
+                  "type": "string"
+                },
+                "updates": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/L2Update"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "MarketTradesEnvelope": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "The channel that produced this message.",
+            "const": "market_trades"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server time the message was sent (RFC 3339)."
+          },
+          "sequence_num": {
+            "type": "integer",
+            "description": "Per-connection message sequence number; use it to detect dropped or out-of-order messages."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "snapshot",
+                    "update"
+                  ]
+                },
+                "trades": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MarketTrade"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "UserEnvelope": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "The channel that produced this message.",
+            "const": "user"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server time the message was sent (RFC 3339)."
+          },
+          "sequence_num": {
+            "type": "integer",
+            "description": "Per-connection message sequence number; use it to detect dropped or out-of-order messages."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "snapshot",
+                    "update"
+                  ]
+                },
+                "orders": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Order"
+                  }
+                },
+                "positions": {
+                  "$ref": "#/components/schemas/Positions"
+                }
+              }
+            }
+          }
+        }
+      },
+      "FCMEnvelope": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "The channel that produced this message.",
+            "const": "futures_balance_summary"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server time the message was sent (RFC 3339)."
+          },
+          "sequence_num": {
+            "type": "integer",
+            "description": "Per-connection message sequence number; use it to detect dropped or out-of-order messages."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "snapshot",
+                    "update"
+                  ]
+                },
+                "fcm_balance_summary": {
+                  "$ref": "#/components/schemas/FCMBalanceSummary"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Ticker": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "product_id": {
+            "type": "string"
+          },
+          "price": {
+            "type": "string",
+            "description": "Current price of the product."
+          },
+          "volume_24_h": {
+            "type": "string",
+            "description": "24-hour traded volume in base units."
+          },
+          "low_24_h": {
+            "type": "string"
+          },
+          "high_24_h": {
+            "type": "string"
+          },
+          "low_52_w": {
+            "type": "string"
+          },
+          "high_52_w": {
+            "type": "string"
+          },
+          "price_percent_chg_24_h": {
+            "type": "string"
+          },
+          "best_bid": {
+            "type": "string"
+          },
+          "best_ask": {
+            "type": "string"
+          },
+          "best_bid_quantity": {
+            "type": "string"
+          },
+          "best_ask_quantity": {
+            "type": "string"
+          }
+        }
+      },
+      "TickerBatch": {
+        "type": "object",
+        "description": "Same as Ticker but without best bid/ask fields.",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "product_id": {
+            "type": "string"
+          },
+          "price": {
+            "type": "string"
+          },
+          "volume_24_h": {
+            "type": "string"
+          },
+          "low_24_h": {
+            "type": "string"
+          },
+          "high_24_h": {
+            "type": "string"
+          },
+          "low_52_w": {
+            "type": "string"
+          },
+          "high_52_w": {
+            "type": "string"
+          },
+          "price_percent_chg_24_h": {
+            "type": "string"
+          }
+        }
+      },
+      "Candle": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "string",
+            "description": "String representation of the UNIX timestamp of the candle."
+          },
+          "high": {
+            "type": "string",
+            "description": "Highest price during the bucket interval."
+          },
+          "low": {
+            "type": "string",
+            "description": "Lowest price during the bucket interval."
+          },
+          "open": {
+            "type": "string",
+            "description": "Price of the first trade in the bucket."
+          },
+          "close": {
+            "type": "string",
+            "description": "Price of the last trade in the bucket."
+          },
+          "volume": {
+            "type": "string",
+            "description": "Base amount traded during this interval."
+          },
+          "product_id": {
+            "type": "string",
+            "description": "Product identifier for this candle."
+          }
+        }
+      },
+      "ProductStatus": {
+        "type": "object",
+        "properties": {
+          "product_type": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "base_currency": {
+            "type": "string"
+          },
+          "quote_currency": {
+            "type": "string"
+          },
+          "base_increment": {
+            "type": "string"
+          },
+          "quote_increment": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "Trading status, e.g. online."
+          },
+          "status_message": {
+            "type": "string"
+          },
+          "min_market_funds": {
+            "type": "string"
+          }
+        }
+      },
+      "L2Update": {
+        "type": "object",
+        "properties": {
+          "side": {
+            "type": "string",
+            "enum": [
+              "bid",
+              "offer"
+            ],
+            "description": "Order book side."
+          },
+          "event_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Time of the event as recorded by the trading engine."
+          },
+          "price_level": {
+            "type": "string",
+            "description": "Price level being updated."
+          },
+          "new_quantity": {
+            "type": "string",
+            "description": "Updated size at this price level (not a delta). A value of \"0\" means the level can be removed."
+          }
+        }
+      },
+      "MarketTrade": {
+        "type": "object",
+        "properties": {
+          "trade_id": {
+            "type": "string",
+            "description": "Unique identifier of the trade."
+          },
+          "product_id": {
+            "type": "string",
+            "description": "Product the trade occurred on."
+          },
+          "price": {
+            "type": "string",
+            "description": "Price the trade executed at."
+          },
+          "size": {
+            "type": "string",
+            "description": "Base size of the trade."
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL"
+            ],
+            "description": "The maker's side of the trade."
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Time the trade occurred (RFC 3339)."
+          }
+        }
+      },
+      "Order": {
+        "type": "object",
+        "properties": {
+          "avg_price": {
+            "type": "string",
+            "description": "Average filled price of the order so far."
+          },
+          "cancel_reason": {
+            "type": "string",
+            "description": "Reason for order cancellation."
+          },
+          "client_order_id": {
+            "type": "string",
+            "description": "Unique identifier of the order specified by the client."
+          },
+          "completion_percentage": {
+            "type": "string",
+            "description": "Percentage of order completion."
+          },
+          "contract_expiry_type": {
+            "type": "string",
+            "enum": [
+              "UNKNOWN_CONTRACT_EXPIRY",
+              "EXPIRING",
+              "PERPETUAL"
+            ],
+            "description": "Contract expiry type for the order."
+          },
+          "cumulative_quantity": {
+            "type": "string",
+            "description": "Amount the order is filled, in base currency."
+          },
+          "filled_value": {
+            "type": "string",
+            "description": "Value of the filled order."
+          },
+          "leaves_quantity": {
+            "type": "string",
+            "description": "Amount remaining, in the same currency the order was placed in (quote or base)."
+          },
+          "limit_price": {
+            "type": "string",
+            "description": "Limit price when the order is a Limit or Stop Limit type; \"0\" otherwise."
+          },
+          "number_of_fills": {
+            "type": "string",
+            "description": "Number of fills for the order."
+          },
+          "order_id": {
+            "type": "string",
+            "description": "Unique identifier of the order."
+          },
+          "order_side": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL"
+            ],
+            "description": "Side of the order."
+          },
+          "order_type": {
+            "type": "string",
+            "enum": [
+              "LIMIT",
+              "MARKET",
+              "STOP_LIMIT"
+            ],
+            "description": "Type of the order."
+          },
+          "outstanding_hold_amount": {
+            "type": "string",
+            "description": "Outstanding hold amount for the order."
+          },
+          "post_only": {
+            "type": "string",
+            "enum": [
+              "true",
+              "false"
+            ],
+            "description": "Whether the order is post-only."
+          },
+          "product_id": {
+            "type": "string",
+            "description": "The product this order was placed on."
+          },
+          "product_type": {
+            "type": "string",
+            "enum": [
+              "UNKNOWN_PRODUCT_TYPE",
+              "SPOT",
+              "FUTURE"
+            ],
+            "description": "Product type of the order."
+          },
+          "reject_reason": {
+            "type": "string",
+            "description": "Reason for order rejection."
+          },
+          "retail_portfolio_id": {
+            "type": "string",
+            "description": "The ID of the portfolio this order is associated with."
+          },
+          "risk_managed_by": {
+            "type": "string",
+            "enum": [
+              "UNKNOWN_RISK_MANAGEMENT_TYPE",
+              "MANAGED_BY_FCM",
+              "MANAGED_BY_VENUE"
+            ],
+            "description": "Who manages the risk for this order."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "OPEN",
+              "FILLED",
+              "CANCEL_QUEUED",
+              "CANCELLED",
+              "EXPIRED",
+              "FAILED"
+            ],
+            "description": "Current order state. PENDING is not yet open; OPEN is waiting to fill; FILLED is 100% filled; CANCEL_QUEUED is queued for cancellation by the user or the system; CANCELLED has been cancelled; EXPIRED means a TWAP was not filled by its expiry; FAILED means the order could not be placed."
+          },
+          "stop_price": {
+            "type": "string",
+            "description": "Stop price when the order is a Stop Limit type; \"0\" otherwise."
+          },
+          "time_in_force": {
+            "type": "string",
+            "enum": [
+              "UNKNOWN_TIME_IN_FORCE",
+              "GOOD_UNTIL_DATE_TIME",
+              "GOOD_UNTIL_CANCELLED",
+              "IMMEDIATE_OR_CANCEL",
+              "FILL_OR_KILL"
+            ],
+            "description": "Time in force of the order."
+          },
+          "total_fees": {
+            "type": "string",
+            "description": "Commission paid for the order."
+          },
+          "total_value_after_fees": {
+            "type": "string",
+            "description": "Total value of the order after fees."
+          },
+          "trigger_status": {
+            "type": "string",
+            "enum": [
+              "UNKNOWN_TRIGGER_STATUS",
+              "INVALID_ORDER_TYPE",
+              "STOP_PENDING",
+              "STOP_TRIGGERED"
+            ],
+            "description": "Trigger status for stop orders."
+          },
+          "creation_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the order was placed."
+          },
+          "end_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Order end time, or 0001-01-01T00:00:00Z when not applicable."
+          },
+          "start_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Order start time, or 0001-01-01T00:00:00Z when not applicable."
+          }
+        }
+      },
+      "Positions": {
+        "type": "object",
+        "description": "Futures and prediction-market positions for the user. Numeric values are in USDC. This object is beta and empty by default; enable it through CDP Discord (https://discord.com/invite/cdp).",
+        "properties": {
+          "perpetual_futures_positions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PerpetualFuturesPosition"
+            }
+          },
+          "expiring_futures_positions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpiringFuturesPosition"
+            }
+          },
+          "prediction_market_positions": {
+            "type": "array",
+            "description": "Prediction-market positions. Beta; currently returned as an empty array.",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "PerpetualFuturesPosition": {
+        "type": "object",
+        "properties": {
+          "product_id": {
+            "type": "string",
+            "description": "Instrument the position is in, e.g. BTC-PERP-INTX."
+          },
+          "portfolio_uuid": {
+            "type": "string",
+            "description": "The uuid of the portfolio this position is associated with."
+          },
+          "vwap": {
+            "type": "string",
+            "description": "Price of the position based on the last settlement period."
+          },
+          "entry_vwap": {
+            "type": "string",
+            "description": "Volume-weighted entry price of the position (not reset to the last funding price)."
+          },
+          "position_side": {
+            "type": "string",
+            "enum": [
+              "Long",
+              "Short"
+            ],
+            "description": "Side of the position."
+          },
+          "margin_type": {
+            "type": "string",
+            "enum": [
+              "Cross",
+              "Isolated"
+            ],
+            "description": "Margin type of the position."
+          },
+          "net_size": {
+            "type": "string",
+            "description": "Size of the position; positive is long, negative is short."
+          },
+          "buy_order_size": {
+            "type": "string",
+            "description": "Cumulative size of all open buy orders."
+          },
+          "sell_order_size": {
+            "type": "string",
+            "description": "Cumulative size of all open sell orders."
+          },
+          "leverage": {
+            "type": "string",
+            "description": "Leverage of the position."
+          },
+          "mark_price": {
+            "type": "string",
+            "description": "Current mark price for the instrument, used in risk and margin calculations."
+          },
+          "liquidation_price": {
+            "type": "string",
+            "description": "Price at which the position will be liquidated."
+          },
+          "im_notional": {
+            "type": "string",
+            "description": "Amount this position contributes to the initial margin."
+          },
+          "mm_notional": {
+            "type": "string",
+            "description": "Amount this position contributes to the maintenance margin."
+          },
+          "position_notional": {
+            "type": "string",
+            "description": "Notional value of the position."
+          },
+          "unrealized_pnl": {
+            "type": "string",
+            "description": "Profit or loss of this position (resets to 0 after settlement)."
+          },
+          "aggregated_pnl": {
+            "type": "string",
+            "description": "Total profit or loss of this position since it was opened."
+          }
+        }
+      },
+      "ExpiringFuturesPosition": {
+        "type": "object",
+        "properties": {
+          "product_id": {
+            "type": "string",
+            "description": "Instrument the position is in, e.g. BTC-12Jun24-CDE."
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "Long",
+              "Short"
+            ],
+            "description": "Side of the position."
+          },
+          "number_of_contracts": {
+            "type": "string",
+            "description": "Size of the position in contracts."
+          },
+          "realized_pnl": {
+            "type": "string",
+            "description": "Realized PnL for the position."
+          },
+          "unrealized_pnl": {
+            "type": "string",
+            "description": "Current unrealized PnL for the position."
+          },
+          "entry_price": {
+            "type": "string",
+            "description": "Average entry price of the position."
+          }
+        }
+      },
+      "FCMBalanceSummary": {
+        "type": "object",
+        "properties": {
+          "futures_buying_power": {
+            "type": "string",
+            "description": "Cash balance available to trade US futures."
+          },
+          "total_usd_balance": {
+            "type": "string",
+            "description": "Aggregate USD across your CFTC-regulated futures account and your Coinbase Inc. spot account."
+          },
+          "cbi_usd_balance": {
+            "type": "string",
+            "description": "USD maintained in your Coinbase Inc. spot account."
+          },
+          "cfm_usd_balance": {
+            "type": "string",
+            "description": "USD in your CFTC-regulated futures account; not available to trade spot."
+          },
+          "total_open_orders_hold_amount": {
+            "type": "string",
+            "description": "Total balance on hold for spot and futures open orders."
+          },
+          "unrealized_pnl": {
+            "type": "string",
+            "description": "Current unrealized PnL across all open positions."
+          },
+          "daily_realized_pnl": {
+            "type": "string",
+            "description": "Realized PnL from the current trade date, including profit or loss from positions closed today."
+          },
+          "initial_margin": {
+            "type": "string",
+            "description": "Margin required to initiate futures positions. Once futures orders are placed, these funds cannot be used to trade spot; the amount needed to support executed orders is moved to the futures account."
+          },
+          "available_margin": {
+            "type": "string",
+            "description": "Funds available to meet the anticipated margin requirement: Coinbase Inc. spot USD, US futures USD, and futures PnL, less holds for open spot or futures orders."
+          },
+          "liquidation_threshold": {
+            "type": "string",
+            "description": "When available collateral drops to this threshold, some or all futures positions are liquidated."
+          },
+          "liquidation_buffer_amount": {
+            "type": "string",
+            "description": "Funds available in excess of the liquidation threshold (available margin minus liquidation threshold). At 0, futures positions and/or open orders are liquidated as necessary."
+          },
+          "liquidation_buffer_percentage": {
+            "type": "string",
+            "description": "Funds available in excess of the liquidation threshold, as a percentage. At 0%, futures positions and/or open orders are liquidated as necessary."
+          },
+          "intraday_margin_window_measure": {
+            "$ref": "#/components/schemas/MarginWindowMeasure",
+            "description": "Margin requirements for positions held intraday before settling overnight."
+          },
+          "overnight_margin_window_measure": {
+            "$ref": "#/components/schemas/MarginWindowMeasure",
+            "description": "Increased margin requirements for positions held unsettled overnight."
+          }
+        }
+      },
+      "MarginWindowMeasure": {
+        "type": "object",
+        "properties": {
+          "margin_window_type": {
+            "type": "string",
+            "enum": [
+              "FCM_MARGIN_WINDOW_TYPE_UNSPECIFIED",
+              "FCM_MARGIN_WINDOW_TYPE_OVERNIGHT",
+              "FCM_MARGIN_WINDOW_TYPE_WEEKEND",
+              "FCM_MARGIN_WINDOW_TYPE_INTRADAY",
+              "FCM_MARGIN_WINDOW_TYPE_TRANSITION"
+            ],
+            "description": "The margin window this measure applies to."
+          },
+          "margin_level": {
+            "type": "string",
+            "enum": [
+              "MARGIN_LEVEL_TYPE_UNSPECIFIED",
+              "MARGIN_LEVEL_TYPE_BASE",
+              "MARGIN_LEVEL_TYPE_WARNING",
+              "MARGIN_LEVEL_TYPE_DANGER",
+              "MARGIN_LEVEL_TYPE_LIQUIDATION"
+            ],
+            "description": "Margin level for this window."
+          },
+          "initial_margin": {
+            "type": "string",
+            "description": "Initial margin for this window."
+          },
+          "maintenance_margin": {
+            "type": "string",
+            "description": "Maintenance margin for this window."
+          },
+          "liquidation_buffer_percentage": {
+            "type": "string",
+            "description": "Liquidation buffer percentage for this window."
+          },
+          "total_hold": {
+            "type": "string",
+            "description": "Total hold for this window."
+          },
+          "futures_buying_power": {
+            "type": "string",
+            "description": "Futures buying power for this window."
+          }
+        }
+      }
+    }
+  }
+}

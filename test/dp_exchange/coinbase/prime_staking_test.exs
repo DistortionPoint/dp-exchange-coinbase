@@ -152,13 +152,12 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
                Prime.query_transaction_validators(
                  @credentials,
                  "pf-1",
-                 opts(me, query: %{"currency" => "ETH"})
+                 opts(me, transaction_ids: ["tx-1", "tx-2"])
                )
 
       assert_receive {:request, "POST", path, raw, _headers}
       assert path == "/v1/portfolios/pf-1/staking/transaction-validators/query"
-      # The filter is the venue's own vocabulary and is sent as given.
-      assert Jason.decode!(raw) == %{"currency" => "ETH"}
+      assert Jason.decode!(raw) == %{"transaction_ids" => ["tx-1", "tx-2"]}
     end
   end
 
@@ -178,7 +177,7 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       assert_receive {:request, "POST", _path, raw, _headers}
       body = Jason.decode!(raw)
       assert body["amount"] == "0.00000001"
-      assert body["currency"] == "ETH"
+      assert body["currency_symbol"] == "ETH"
     end
 
     test "an idempotency key is ALWAYS sent, generated when the caller gives none" do
@@ -234,54 +233,14 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       assert Jason.decode!(raw)["idempotency_key"] == "given-by-caller"
     end
 
-    test "claim_rewards/4 is sent ONCE, while a staking write still retries" do
-      # `Core.HttpClient` retries a timeout or a 5xx three times by default, and a retried
-      # write is only safe when the venue can tell the second attempt from the first. The
-      # staking calls send an `idempotency_key` for exactly that. `claim_rewards/4` cannot:
-      # its body is whatever `opts[:body]` holds, opaque to this module, and injecting a
-      # field into a caller's map would be guessing at a schema this package does not own.
-      # So it takes the other remedy — one attempt.
-      #
-      # The staking half of this test is the control, and it is the half that makes the
-      # assertion mean anything: without it, "one request" could equally be a harness that
-      # never retries. Note that `opts/2` above pins `retry_attempts: 0` for every other test
-      # in this file, which is why the package's real default was invisible here until now.
-      counting = fn counter ->
-        fn conn ->
-          :counters.add(counter, 1, 1)
-          Plug.Conn.resp(conn, 500, "upstream is having a bad day")
-        end
-      end
-
-      claims = :counters.new(1, [])
-
-      assert {:error, _reason} =
-               Prime.claim_rewards(@credentials, "pf-1", "w-1",
-                 plug: counting.(claims),
-                 retry_delay: 1
-               )
-
-      assert :counters.get(claims, 1) == 1,
-             "a call that moves money and carries no key the venue can dedupe on must be " <>
-               "sent once, not three times"
-
-      stakes = :counters.new(1, [])
-
-      assert {:error, _reason} =
-               Prime.stake_portfolio(@credentials, "pf-1", "ETH", Decimal.new("1"),
-                 plug: counting.(stakes),
-                 retry_delay: 1
-               )
-
-      assert :counters.get(stakes, 1) > 1,
-             "the control must actually retry, or the assertion above proves nothing about " <>
-               "claim_rewards/4 and only something about the harness"
-    end
-
-    test "a caller can still ask claim_rewards/4 to retry, having supplied its own body" do
-      # `put_new`, not `put`: a caller who knows the venue's field for this can send it in
-      # `opts[:body]` and take the retries back. Refusing to let them would be this module
-      # overruling a caller who knows more about the endpoint than it does.
+    test "claim_rewards/4 now retries like the other staking writes, key or no key" do
+      # This used to send one attempt only, reasoning that its body was opaque and an
+      # `idempotency_key` could not safely be injected into a caller's own map. The schema is
+      # no longer unknown — `StakingClaimRewardsRequest` requires exactly the key this module
+      # already generates for `stake_wallet/6` and the rest — so `claim_rewards_body/1` always
+      # puts one in, and `Core.HttpClient`'s default retry count is no longer overridden away.
+      # Note that `opts/2` above pins `retry_attempts: 0` for every other test in this file,
+      # which is why the package's real default is exercised explicitly here instead.
       counter = :counters.new(1, [])
 
       plug = fn conn ->
@@ -290,14 +249,11 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       end
 
       assert {:error, _reason} =
-               Prime.claim_rewards(@credentials, "pf-1", "w-1",
-                 plug: plug,
-                 retry_delay: 1,
-                 retry_attempts: 3,
-                 body: %{"idempotency_key" => "caller-knows-the-field"}
-               )
+               Prime.claim_rewards(@credentials, "pf-1", "w-1", plug: plug, retry_delay: 1)
 
-      assert :counters.get(counter, 1) > 1
+      assert :counters.get(counter, 1) > 1,
+             "claim_rewards/4 carries a generated idempotency_key now, so a retried attempt " <>
+               "is safe the same way a stake's retry is"
     end
 
     test "unstaking carries a key too, not only staking" do
@@ -520,7 +476,11 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       me = self()
 
       assert {:ok, _result} =
-               DpExchange.Coinbase.query_transaction_validators(@credentials, "pf-1", opts(me))
+               DpExchange.Coinbase.query_transaction_validators(
+                 @credentials,
+                 "pf-1",
+                 opts(me, transaction_ids: ["tx-1"])
+               )
 
       assert_receive {:request, "POST", path, _raw, _headers}
       assert path == "/v1/portfolios/pf-1/staking/transaction-validators/query"
@@ -597,10 +557,12 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
   end
 
   describe "what a caller can add, and what it cannot" do
-    test "extra body fields the venue documents are merged in" do
-      # Prime's staking bodies carry venue-specific fields this package does not model. They
-      # are the caller's to supply; inventing names for them here would be guessing at a
-      # vocabulary only Prime defines.
+    test "extra body fields the venue documents are merged into a wallet stake's inputs" do
+      # `WalletStakeInputs` carries `amount` plus asset-specific fields like
+      # `validator_address` and `end_date`, all nested under `inputs`
+      # (docs/reference/coinbase/openapi/prime-spec.yaml:15857-15873). They are the caller's
+      # to supply; inventing names for them here would be guessing at a vocabulary only Prime
+      # defines, but they belong under `inputs`, not at the top level the old flat body used.
       me = self()
 
       assert {:ok, _result} =
@@ -615,30 +577,110 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
 
       assert_receive {:request, "POST", _path, raw, _headers}
       body = Jason.decode!(raw)
-      assert body["validator_address"] == "0xabc"
-      assert body["currency"] == "ETH"
+      assert body["inputs"]["validator_address"] == "0xabc"
+      assert body["inputs"]["amount"] == "1"
+      refute Map.has_key?(body, "currency")
+      refute Map.has_key?(body, "validator_address")
     end
 
-    test "claim_rewards sends an empty body by default and the caller's when given" do
+    test "a wallet stake sends no currency field at all — the wallet already names one asset" do
+      me = self()
+
+      assert {:ok, _result} =
+               Prime.stake_wallet(@credentials, "pf-1", "w-9", "ETH", Decimal.new("1"), opts(me))
+
+      assert_receive {:request, "POST", _path, raw, _headers}
+      body = Jason.decode!(raw)
+      refute Map.has_key?(body, "currency")
+      refute Map.has_key?(body, "currency_symbol")
+      assert body["inputs"]["amount"] == "1"
+    end
+
+    test "opts[:metadata] is sent as the sibling of inputs, not merged into it" do
+      me = self()
+
+      assert {:ok, _result} =
+               Prime.unstake_wallet(
+                 @credentials,
+                 "pf-1",
+                 "w-9",
+                 "ETH",
+                 Decimal.new("1"),
+                 opts(me, metadata: %{"external_id" => "ext-1"})
+               )
+
+      assert_receive {:request, "POST", _path, raw, _headers}
+      body = Jason.decode!(raw)
+      assert body["metadata"] == %{"external_id" => "ext-1"}
+      refute Map.has_key?(body["inputs"], "external_id")
+    end
+
+    test "a preview sends only {amount} — no currency, no idempotency_key" do
+      # PreviewUnstakeRequest's body is `{amount}` alone
+      # (docs/reference/coinbase/openapi/prime-spec.yaml:9083-9090). This used to send the
+      # same generated-idempotency-key body as a real unstake, on a call the venue documents
+      # as moving nothing.
+      me = self()
+
+      assert {:ok, _result} =
+               Prime.preview_unstake_wallet(
+                 @credentials,
+                 "pf-1",
+                 "w-9",
+                 "ETH",
+                 Decimal.new("1"),
+                 opts(me)
+               )
+
+      assert_receive {:request, "POST", _path, raw, _headers}
+      assert Jason.decode!(raw) == %{"amount" => "1"}
+    end
+
+    test "claim_rewards generates an idempotency_key by default and merges into a caller body" do
       me = self()
 
       assert {:ok, _result} = Prime.claim_rewards(@credentials, "pf-1", "w-9", opts(me))
       assert_receive {:request, "POST", _path, raw, _headers}
-      assert Jason.decode!(raw) == %{}
+      generated = Jason.decode!(raw)
+      assert is_binary(generated["idempotency_key"]) and generated["idempotency_key"] != ""
+      refute Map.has_key?(generated, "inputs")
 
       assert {:ok, _result} =
-               Prime.claim_rewards(@credentials, "pf-1", "w-9", opts(me, body: %{"c" => "ETH"}))
+               Prime.claim_rewards(
+                 @credentials,
+                 "pf-1",
+                 "w-9",
+                 opts(me, body: %{"idempotency_key" => "caller-key"})
+               )
 
       assert_receive {:request, "POST", _path, raw2, _headers}
-      assert Jason.decode!(raw2) == %{"c" => "ETH"}
+      # A key already present in the caller's own body is kept, not overwritten.
+      assert Jason.decode!(raw2) == %{"idempotency_key" => "caller-key"}
     end
 
-    test "the validator query defaults to an empty filter rather than omitting the body" do
+    test "claim_rewards reads opts[:amount] into inputs.amount" do
       me = self()
 
-      assert {:ok, _result} = Prime.query_transaction_validators(@credentials, "pf-1", opts(me))
+      assert {:ok, _result} =
+               Prime.claim_rewards(
+                 @credentials,
+                 "pf-1",
+                 "w-9",
+                 opts(me, amount: Decimal.new("2"))
+               )
+
       assert_receive {:request, "POST", _path, raw, _headers}
-      assert Jason.decode!(raw) == %{}
+      body = Jason.decode!(raw)
+      assert body["inputs"]["amount"] == "2"
+      assert is_binary(body["idempotency_key"])
+    end
+
+    test "the validator query is refused locally when transaction_ids is missing" do
+      assert {:error, :missing_transaction_ids} =
+               Prime.query_transaction_validators(@credentials, "pf-1", [])
+
+      assert {:error, :missing_transaction_ids} =
+               Prime.query_transaction_validators(@credentials, "pf-1", transaction_ids: [])
     end
 
     test "a transport failure stays an error, not a refusal" do

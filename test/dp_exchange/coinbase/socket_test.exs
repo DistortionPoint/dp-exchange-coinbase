@@ -446,16 +446,36 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert message.product_ids == ~w(BTC-USD)
     end
 
-    test "an authenticated channel carries a real jwt" do
+    test "user, the genuinely required channel, carries a real jwt" do
+      assert {:ok, message} = subscription("user", ~w(BTC-USD), @credentials)
+
+      assert is_binary(message.jwt)
+      assert length(String.split(message.jwt, ".")) == 3
+    end
+
+    test "user without credentials is refused, not sent unsigned" do
+      # `SubscribeUser`'s payload lists `jwt` in its own `required` array
+      # (docs/reference/coinbase/openapi/at-async.json:752-765).
+      assert {:error, {:credentials_required, "user"}} =
+               subscription("user", ~w(BTC-USD), nil)
+    end
+
+    test "level2 carries a real jwt when credentials are available" do
       assert {:ok, message} = subscription("level2", ~w(BTC-USD), @credentials)
 
       assert is_binary(message.jwt)
       assert length(String.split(message.jwt, ".")) == 3
     end
 
-    test "an authenticated channel without credentials is refused, not sent unsigned" do
-      assert {:error, {:credentials_required, "level2"}} =
-               subscription("level2", ~w(BTC-USD), nil)
+    test "level2 without credentials is sent anyway, with no jwt — the venue calls it optional" do
+      # `SubscribeLevel2`'s `jwt` is "Optional here; recommended for connection
+      # reliability." (docs/reference/coinbase/openapi/at-async.json:685-687), not required
+      # the way `user`'s is. This used to refuse a credential-less `level2` subscribe the
+      # identical way it refused a credential-less `user` one.
+      assert {:ok, message} = subscription("level2", ~w(BTC-USD), nil)
+
+      refute Map.has_key?(message, :jwt)
+      assert message.channel == "level2"
     end
 
     test "symbols are converted to the venue's native form" do
@@ -480,11 +500,17 @@ defmodule DpExchange.Coinbase.SocketTest do
       products = Enum.map(symbols, &DpExchange.Coinbase.SymbolFormat.to_exchange_symbol/1)
       base = %{type: "subscribe", product_ids: products, channel: channel}
 
-      if channel in ~w(level2 user) do
-        {:ok, token} = DpExchange.Coinbase.Auth.jwt(credentials)
-        {:ok, Map.put(base, :jwt, token)}
-      else
-        {:ok, base}
+      cond do
+        channel == "user" ->
+          {:ok, token} = DpExchange.Coinbase.Auth.jwt(credentials)
+          {:ok, Map.put(base, :jwt, token)}
+
+        channel == "level2" and not is_nil(credentials) ->
+          {:ok, token} = DpExchange.Coinbase.Auth.jwt(credentials)
+          {:ok, Map.put(base, :jwt, token)}
+
+        true ->
+          {:ok, base}
       end
     end
   end
@@ -506,9 +532,24 @@ defmodule DpExchange.Coinbase.SocketTest do
           "type" => "snapshot",
           "product_id" => "BTC-USD",
           "updates" => [
-            %{"side" => "bid", "price_level" => "100.00", "new_quantity" => "1.5"},
-            %{"side" => "bid", "price_level" => "99.00", "new_quantity" => "2.0"},
-            %{"side" => "offer", "price_level" => "101.00", "new_quantity" => "0.5"}
+            %{
+              "event_time" => "2026-08-28T14:53:45.000000Z",
+              "side" => "bid",
+              "price_level" => "100.00",
+              "new_quantity" => "1.5"
+            },
+            %{
+              "event_time" => "2026-08-28T14:53:45.000000Z",
+              "side" => "bid",
+              "price_level" => "99.00",
+              "new_quantity" => "2.0"
+            },
+            %{
+              "event_time" => "2026-08-28T14:53:45.000000Z",
+              "side" => "offer",
+              "price_level" => "101.00",
+              "new_quantity" => "0.5"
+            }
           ]
         }
       ]
@@ -538,11 +579,36 @@ defmodule DpExchange.Coinbase.SocketTest do
             "type" => "snapshot",
             "product_id" => "BTC-USD",
             "updates" => [
-              %{"side" => "bid", "price_level" => "99.00", "new_quantity" => "2.0"},
-              %{"side" => "offer", "price_level" => "103.00", "new_quantity" => "0.1"},
-              %{"side" => "bid", "price_level" => "100.00", "new_quantity" => "1.5"},
-              %{"side" => "offer", "price_level" => "101.00", "new_quantity" => "0.5"},
-              %{"side" => "bid", "price_level" => "98.50", "new_quantity" => "4.0"}
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "bid",
+                "price_level" => "99.00",
+                "new_quantity" => "2.0"
+              },
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "offer",
+                "price_level" => "103.00",
+                "new_quantity" => "0.1"
+              },
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "bid",
+                "price_level" => "100.00",
+                "new_quantity" => "1.5"
+              },
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "offer",
+                "price_level" => "101.00",
+                "new_quantity" => "0.5"
+              },
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "bid",
+                "price_level" => "98.50",
+                "new_quantity" => "4.0"
+              }
             ]
           }
         ]
@@ -576,8 +642,18 @@ defmodule DpExchange.Coinbase.SocketTest do
             "type" => "update",
             "product_id" => "BTC-USD",
             "updates" => [
-              %{"side" => "bid", "price_level" => "100.50", "new_quantity" => "3.0"},
-              %{"side" => "offer", "price_level" => "101.50", "new_quantity" => "0.2"}
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "bid",
+                "price_level" => "100.50",
+                "new_quantity" => "3.0"
+              },
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "offer",
+                "price_level" => "101.50",
+                "new_quantity" => "0.2"
+              }
             ]
           }
         ]
@@ -606,7 +682,14 @@ defmodule DpExchange.Coinbase.SocketTest do
           %{
             "type" => "update",
             "product_id" => "BTC-USD",
-            "updates" => [%{"side" => "bid", "price_level" => "100.50", "new_quantity" => "3.0"}]
+            "updates" => [
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "bid",
+                "price_level" => "100.50",
+                "new_quantity" => "3.0"
+              }
+            ]
           }
         ]
       }
@@ -627,8 +710,18 @@ defmodule DpExchange.Coinbase.SocketTest do
             "type" => "update",
             "product_id" => "BTC-USD",
             "updates" => [
-              %{"side" => "bid", "price_level" => "99.00", "new_quantity" => "0"},
-              %{"side" => "offer", "price_level" => "101.00", "new_quantity" => "0.5"}
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "bid",
+                "price_level" => "99.00",
+                "new_quantity" => "0"
+              },
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "offer",
+                "price_level" => "101.00",
+                "new_quantity" => "0.5"
+              }
             ]
           }
         ]
@@ -655,7 +748,14 @@ defmodule DpExchange.Coinbase.SocketTest do
           %{
             "type" => "snapshot",
             "product_id" => "ETH-USD",
-            "updates" => [%{"side" => "bid", "price_level" => "10.00", "new_quantity" => "5.0"}]
+            "updates" => [
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "bid",
+                "price_level" => "10.00",
+                "new_quantity" => "5.0"
+              }
+            ]
           }
         ])
 
@@ -682,7 +782,14 @@ defmodule DpExchange.Coinbase.SocketTest do
           %{
             "type" => "snapshot",
             "product_id" => "BTC-USD",
-            "updates" => [%{"side" => "bid", "price_level" => "null", "new_quantity" => "1.0"}]
+            "updates" => [
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "bid",
+                "price_level" => "null",
+                "new_quantity" => "1.0"
+              }
+            ]
           }
         ]
       }
@@ -704,8 +811,18 @@ defmodule DpExchange.Coinbase.SocketTest do
             "type" => "update",
             "product_id" => "BTC-USD",
             "updates" => [
-              %{"side" => "bid", "price_level" => "null", "new_quantity" => "1.0"},
-              %{"side" => "offer", "price_level" => "101.00", "new_quantity" => "0.5"}
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "bid",
+                "price_level" => "null",
+                "new_quantity" => "1.0"
+              },
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "offer",
+                "price_level" => "101.00",
+                "new_quantity" => "0.5"
+              }
             ]
           }
         ]
@@ -726,7 +843,13 @@ defmodule DpExchange.Coinbase.SocketTest do
           %{
             "type" => "snapshot",
             "product_id" => "BTC-USD",
-            "updates" => [%{"side" => "bid", "price_level" => "100.00"}]
+            "updates" => [
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "bid",
+                "price_level" => "100.00"
+              }
+            ]
           }
         ]
       }
@@ -738,10 +861,18 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
     end
 
-    test "a snapshot with NO venue timestamp is not delivered" do
-      # Fails closed exactly as the ticker path does — this used to substitute
-      # DateTime.utc_now/0 unconditionally instead.
-      untimed = Map.delete(@snapshot, "timestamp")
+    test "a snapshot whose rows carry no event_time is not delivered" do
+      # Fails closed exactly as the ticker path does. This used to substitute
+      # DateTime.utc_now/0 unconditionally, then read the envelope `timestamp` rather
+      # than each row's own `event_time` — see `latest_event_time/1`. The envelope
+      # `timestamp` is irrelevant to this path now, so it stays present here; it is each
+      # row's `event_time` this test removes.
+      untimed =
+        update_in(
+          @snapshot,
+          ["events", Access.at(0), "updates", Access.all()],
+          &Map.delete(&1, "event_time")
+        )
 
       assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(untimed)}, state())
 
@@ -749,7 +880,7 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
     end
 
-    test "an update with NO venue timestamp is not delivered" do
+    test "an update whose rows carry no event_time is not delivered" do
       untimed = %{
         "channel" => "l2_data",
         "events" => [
@@ -767,6 +898,82 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
     end
 
+    test "venue_time is the MAX event_time across the snapshot's own rows, not the envelope's" do
+      # `L2Update.event_time` is per row (docs/reference/coinbase/openapi/at-async.json:
+      # 1367-1370) — this proves the batch's `venue_time` tracks the newest row rather than
+      # the envelope's own `timestamp`, which this fixture deliberately sets to something
+      # earlier than every row so a regression back to reading it would be caught.
+      multi_time = %{
+        "channel" => "l2_data",
+        "timestamp" => "2020-01-01T00:00:00.000000Z",
+        "events" => [
+          %{
+            "type" => "snapshot",
+            "product_id" => "BTC-USD",
+            "updates" => [
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "bid",
+                "price_level" => "100.00",
+                "new_quantity" => "1.0"
+              },
+              %{
+                "event_time" => "2026-08-28T14:53:47.000000Z",
+                "side" => "offer",
+                "price_level" => "101.00",
+                "new_quantity" => "0.5"
+              },
+              %{
+                "event_time" => "2026-08-28T14:53:46.000000Z",
+                "side" => "bid",
+                "price_level" => "99.00",
+                "new_quantity" => "2.0"
+              }
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(multi_time)}, state())
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
+      assert book.venue_time == ~U[2026-08-28 14:53:47.000000Z]
+    end
+
+    test "a row with an unparseable event_time is skipped, not fatal to the whole frame" do
+      # A bad `event_time` on one row must not sink a frame when another row's is readable
+      # — `decode_rows/2` already reports the row-level problem for the fields it decodes,
+      # separately.
+      mixed = %{
+        "channel" => "l2_data",
+        "events" => [
+          %{
+            "type" => "snapshot",
+            "product_id" => "BTC-USD",
+            "updates" => [
+              %{
+                "event_time" => "not a time",
+                "side" => "bid",
+                "price_level" => "100.00",
+                "new_quantity" => "1.0"
+              },
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "offer",
+                "price_level" => "101.00",
+                "new_quantity" => "0.5"
+              }
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(mixed)}, state())
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
+      assert book.venue_time == ~U[2026-08-28 14:53:45.000000Z]
+    end
+
     test "no market state survives a frame — the socket's own state carries nothing " <>
            "beyond connection bookkeeping, before or after a snapshot and an update" do
       before_keys = state() |> Map.keys() |> Enum.sort()
@@ -781,7 +988,14 @@ defmodule DpExchange.Coinbase.SocketTest do
           %{
             "type" => "update",
             "product_id" => "BTC-USD",
-            "updates" => [%{"side" => "bid", "price_level" => "100.50", "new_quantity" => "3.0"}]
+            "updates" => [
+              %{
+                "event_time" => "2026-08-28T14:53:45.000000Z",
+                "side" => "bid",
+                "price_level" => "100.50",
+                "new_quantity" => "3.0"
+              }
+            ]
           }
         ]
       }
@@ -820,8 +1034,18 @@ defmodule DpExchange.Coinbase.SocketTest do
           "type" => "snapshot",
           "product_id" => "BTC-USD",
           "updates" => [
-            %{"side" => "bid", "price_level" => "1.5", "new_quantity" => "1.0"},
-            %{"side" => "bid", "price_level" => "1.50", "new_quantity" => "2.0"}
+            %{
+              "event_time" => "2026-08-28T14:53:45.000000Z",
+              "side" => "bid",
+              "price_level" => "1.5",
+              "new_quantity" => "1.0"
+            },
+            %{
+              "event_time" => "2026-08-28T14:53:45.000000Z",
+              "side" => "bid",
+              "price_level" => "1.50",
+              "new_quantity" => "2.0"
+            }
           ]
         }
       ]
@@ -856,7 +1080,12 @@ defmodule DpExchange.Coinbase.SocketTest do
           "type" => "snapshot",
           "product_id" => "BTC-USD",
           "updates" => [
-            %{"side" => "bid", "price_level" => "1.123456789", "new_quantity" => "1.0"}
+            %{
+              "event_time" => "2026-08-28T14:53:45.000000Z",
+              "side" => "bid",
+              "price_level" => "1.123456789",
+              "new_quantity" => "1.0"
+            }
           ]
         }
       ]
