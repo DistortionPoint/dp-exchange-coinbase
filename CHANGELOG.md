@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.81] - 2026-09-29
+
 ### Added
 
 - Spec-example tests drive every REST operation, Prime staking call and WebSocket channel
