@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.77] - 2026-09-29
+
 ### Fixed
 
 - `get_order_book/2` refuses a reply whose `bids` or `asks` is missing or not a list, with
