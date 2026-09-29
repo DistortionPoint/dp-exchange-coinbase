@@ -20,6 +20,10 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.76] - 2026-09-29
+
+_No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
+
 ## [0.3.75] - 2026-09-29
 
 ### Fixed
