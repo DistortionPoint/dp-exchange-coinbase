@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.80] - 2026-09-29
+
 ### Fixed
 
 - A frame on the `ticker_batch`, `status` or `futures_balance_summary` channel, none of which
