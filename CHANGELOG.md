@@ -20,6 +20,14 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- `get_order_book/2` refuses a reply whose `bids` or `asks` is missing or not a list, with
+  `{:error, :unexpected_response_shape}`. Such a side read as `[]`, so the reply became a
+  book in which nobody bids or offers, carrying a real timestamp. An empty list is still an
+  empty side.
+- Locked `dp_exchange_core` 0.3.48.
+
 ## [0.3.76] - 2026-09-29
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

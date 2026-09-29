@@ -1949,8 +1949,13 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  # **Both sides must be lists.** `levels/1` answered `[]` for a side that was missing or not
+  # a list, so such a reply became a book in which nobody bids or nobody offers, with a real
+  # timestamp on it. An illiquid product's empty side arrives as `[]`, which is still read
+  # as empty; a side this package cannot read is refused.
   defp build_order_book(native, pricebook) do
-    with {:ok, timestamp} <- parse_time(pricebook["time"]) do
+    with {:ok, timestamp} <- parse_time(pricebook["time"]),
+         true <- is_list(pricebook["bids"]) and is_list(pricebook["asks"]) do
       {:ok,
        %Types.OrderBook{
          symbol: SymbolFormat.to_canonical_symbol(native),
@@ -1963,14 +1968,15 @@ defmodule DpExchange.Coinbase.Rest do
          sequence: nil,
          provider: :coinbase
        }}
+    else
+      false -> {:error, :unexpected_response_shape}
+      error -> error
     end
   end
 
   defp levels(rows) when is_list(rows) do
     for %{"price" => price, "size" => size} <- rows, do: {decimal(price), decimal(size)}
   end
-
-  defp levels(_absent), do: []
 
   # Best price first, because `Core.Types.OrderBook` makes that part of the contract rather
   # than a convenience: "a caller reading `hd(bids)` as the best bid is reading it correctly,

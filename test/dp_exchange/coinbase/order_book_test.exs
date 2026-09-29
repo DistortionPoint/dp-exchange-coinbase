@@ -627,4 +627,24 @@ defmodule DpExchange.Coinbase.OrderBookTest do
                Rest.quantization("BTC-USD", plug: responding(%{}), retry_attempts: 0)
     end
   end
+
+  describe "get_order_book/2 with a side it cannot read" do
+    # A missing or non-list side used to read as `[]`: a book in which nobody bids, with a
+    # real timestamp. An empty list is still an empty side.
+    test "is refused, not built with an empty side" do
+      for overrides <- [%{"bids" => nil}, %{"asks" => "x"}, %{"bids" => %{}}] do
+        body = %{"pricebook" => pricebook(overrides)}
+
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_order_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+      end
+    end
+
+    test "an empty list is still an empty side" do
+      body = %{"pricebook" => pricebook(%{"bids" => []})}
+
+      assert {:ok, %Types.OrderBook{bids: []}} =
+               Rest.get_order_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+    end
+  end
 end
