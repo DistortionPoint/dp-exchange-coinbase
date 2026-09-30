@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.82] - 2026-09-30
+
 ### Fixed
 
 - **A dropped frame's `:data_quality` notice says what was dropped and why**
