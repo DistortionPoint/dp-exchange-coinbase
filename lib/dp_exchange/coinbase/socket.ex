@@ -534,7 +534,7 @@ defmodule DpExchange.Coinbase.Socket do
     case Jason.decode(payload) do
       {:ok, decoded} -> {:ok, sequenced(decoded, state)}
       # A payload that did not parse is reported, not swallowed and not fatal.
-      {:error, _reason} -> {:ok, report_quality(state, payload)}
+      {:error, reason} -> {:ok, report_quality(state, :frame, payload, reason)}
     end
   end
 
@@ -673,8 +673,8 @@ defmodule DpExchange.Coinbase.Socket do
         send(state.subscriber, {:dp_exchange, :coinbase, quote_struct})
         %{state | delivering: MapSet.put(state.delivering, symbol)}
 
-      {:error, _reason} ->
-        report_quality(state, product)
+      {:error, reason} ->
+        report_quality(state, :ticker, product, reason)
     end
   end
 
@@ -780,8 +780,8 @@ defmodule DpExchange.Coinbase.Socket do
         send(state.subscriber, {:dp_exchange, :coinbase, order_book})
         %{state | delivering: MapSet.put(state.delivering, symbol)}
 
-      {:error, _reason} ->
-        report_quality(state, symbol)
+      {:error, reason} ->
+        report_quality(state, :level2, symbol, reason)
     end
   end
 
@@ -814,8 +814,8 @@ defmodule DpExchange.Coinbase.Socket do
         send(state.subscriber, {:dp_exchange, :coinbase, delta})
         %{state | delivering: MapSet.put(state.delivering, symbol)}
 
-      {:error, _reason} ->
-        report_quality(state, symbol)
+      {:error, reason} ->
+        report_quality(state, :level2, symbol, reason)
     end
   end
 
@@ -883,7 +883,8 @@ defmodule DpExchange.Coinbase.Socket do
 
   defp decode_row(_row), do: :error
 
-  defp malformed_row(state, row), do: report_quality(state, inspect(row))
+  defp malformed_row(state, row),
+    do: report_quality(state, :level2, inspect(row), :unreadable_price_level_or_quantity)
 
   # `Types.OrderBookDelta.side/0` is `:bid | :ask` — singular, unlike `OrderBook`'s
   # separate `bids`/`asks` lists, because one delta level names its own side rather
@@ -1043,11 +1044,20 @@ defmodule DpExchange.Coinbase.Socket do
   defp sequence_message(:out_of_order, _details),
     do: "a message arrived after a newer one and was ignored, as the venue advises"
 
-  defp report_quality(state, detail) do
+  # **What was dropped, from which channel, and why.** dp-exchange-core issue #41: this
+  # carried only `payload` (a product id, for most callers) and no `message`, and every
+  # caller discarded the reason, so a host logged `data_quality: (no message) %{payload:
+  # "CT-USD"}` thirty times a day with no way to tell a bad venue frame from a decoder gap.
+  # `payload` keeps its old meaning and truncation, since hosts already read it. `channel`,
+  # `reason` and a readable `message` are added, the way `report_sequence/3` already did.
+  defp report_quality(state, channel, detail, reason) do
+    subject = String.slice(to_string(detail), 0, 120)
+
     notify(
       state,
       Notice.new(:data_quality, :coinbase,
-        details: %{payload: String.slice(to_string(detail), 0, 120)}
+        message: "dropped a #{channel} frame for #{subject}: #{inspect(reason)}",
+        details: %{payload: subject, channel: channel, reason: reason}
       )
     )
 

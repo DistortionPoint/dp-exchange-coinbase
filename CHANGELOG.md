@@ -20,6 +20,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A dropped frame's `:data_quality` notice says what was dropped and why**
+  (dp-exchange-core issue #41). It carried only `details.payload`, usually the product id,
+  and no `message`, and every caller discarded the reason. A host logged
+  `data_quality: (no message) %{payload: "CT-USD"}` about thirty times a day and could not
+  tell a bad venue frame from a decoder gap. It now carries a readable `message` and
+  `details.channel` (`:ticker`, `:level2` or `:frame` for unparseable JSON) and
+  `details.reason`, beside the unchanged `payload`.
+
 ## [0.3.81] - 2026-09-29
 
 ### Added

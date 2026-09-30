@@ -353,7 +353,24 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert {:ok, _state} = frame(ticker)
 
       refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
-      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality} = notice}
+
+      # dp-exchange-core issue #41: the notice names what was dropped and why, not only
+      # the product id with no message.
+      assert notice.details.channel == :ticker
+      assert notice.details.payload == "BTC-USD"
+      assert notice.details.reason != nil
+      assert notice.message =~ "ticker"
+      assert notice.message =~ "BTC-USD"
+    end
+
+    test "an unparseable frame says so, with the decode reason" do
+      assert {:ok, _state} = Socket.handle_frame({:text, "{not json"}, state())
+
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality} = notice}
+      assert notice.details.channel == :frame
+      assert notice.details.reason != nil
+      assert is_binary(notice.message)
     end
   end
 
