@@ -286,7 +286,15 @@ defmodule DpExchange.Coinbase do
       # chunked at 30 — the per-session product ceiling DpCryptoManagement bisected live
       # on 2026-09-06. See `Feed`'s moduledoc and
       # `docs/reference/coinbase/level2-session-limit.md`.
-      streamable: [:quotes, :order_book],
+      #
+      # `:trades` is `market_trades`, opt-in on the Feed (`channels: [..., :trades]`; the
+      # default is unchanged). Its message shape and the maker-to-taker side flip were
+      # checked against the live public endpoint on 2026-10-02 (BTC-USD, about 10 s, no
+      # credentials); the 100-pairs-per-socket sharding it shares with `ticker` was NOT
+      # measured, and no per-session ceiling for this channel is published. It delivers
+      # `update` prints only — the repeated `snapshot` history is dropped, so a reconnect
+      # gap loses prints. See `Socket`'s moduledoc.
+      streamable: [:quotes, :order_book, :trades],
 
       # **Nothing streamable here genuinely requires a credential.** This used to declare
       # `[:order_book]`, on the reasoning that `level2`'s subscribe needs a JWT the way
@@ -345,7 +353,9 @@ defmodule DpExchange.Coinbase do
           "rests on api.prime.coinbase.com's own published paths, deduplicated " <>
           "2026-08-31 from thirteen documentation pages to the nine endpoints " <>
           "DpExchange.Coinbase.Prime implements; read from documentation, not probed, " <>
-          "and said so rather than implied otherwise"
+          "and said so rather than implied otherwise; the `:trades` stream's frame shape " <>
+          "and side direction were observed live against wss://advanced-trade-ws.coinbase.com " <>
+          "(market_trades, BTC-USD) 2026-10-02, its per-socket product ceiling was not probed"
     )
   end
 

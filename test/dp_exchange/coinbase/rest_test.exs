@@ -62,6 +62,8 @@ defmodule DpExchange.Coinbase.RestTest do
       assert Decimal.equal?(quote_struct.price, Decimal.new("79478.7"))
       assert quote_struct.venue_time == ~U[2026-08-28 14:53:45.649112Z]
       assert quote_struct.provider == :coinbase
+      # The newest trade's own size: one print (dp-exchange-core issue #42).
+      assert quote_struct.volume_window == :print
     end
 
     test "sends limit=1 — the venue's own ticker param is required: true, with no default" do

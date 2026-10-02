@@ -1754,11 +1754,16 @@ defmodule DpExchange.Coinbase.Rest do
   defp to_quote(%{"trades" => [trade | _rest]} = _body, symbol) when is_map(trade) do
     with {:ok, at} <- parse_time(trade["time"]),
          {:ok, price} <- required_decimal(trade["price"], :price) do
+      # The latest trade's own size: one print (dp-exchange-core issue #42). The streamed
+      # `Quote` carries a rolling 24-hour total instead, and `volume_window` tells them apart.
+      volume = decimal(trade["size"])
+
       {:ok,
        %Types.Quote{
          symbol: symbol,
          price: price,
-         volume: decimal(trade["size"]),
+         volume: volume,
+         volume_window: volume && :print,
          venue_time: at,
          observed_at: DateTime.utc_now(),
          provider: :coinbase

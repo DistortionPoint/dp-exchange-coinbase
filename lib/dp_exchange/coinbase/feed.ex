@@ -1104,6 +1104,24 @@ defmodule DpExchange.Coinbase.Feed do
   update carries both kinds at once, and one going dark does not erase the other.
   `coverage_by_kind/1` folds that structure the other way — kind first, then symbol — to
   match the shape `c:DpExchange.Core.Venue.coverage_by_kind/1` promises.
+
+  ## `:trades` is opt-in — `market_trades`, and its history is not replayed
+
+  `channels: [:quotes, :order_book, :trades]` also subscribes each symbol to Coinbase's
+  public `market_trades` channel and delivers every print as a
+  `DpExchange.Core.Types.Trade`. The default stays `[:quotes, :order_book]`, exactly what a
+  feed delivered before `:trades` existed, the same convention `dp_exchange_gemini` follows:
+  a consumer that never asked for the tape must not find another stream open per symbol.
+
+  `market_trades` is public, so no JWT is sent. It is sharded with `ticker` (100 pairs per
+  socket) — **not measured**: the vendor publishes no per-session product ceiling for it and
+  none has been probed, so a venue refusal is possible and would surface as a venue error
+  notice, never as a quietly smaller coverage.
+
+  **The `snapshot` event is dropped, not delivered**, and a reconnect therefore loses the
+  prints made during the gap. See `DpExchange.Coinbase.Socket`'s moduledoc for why, and for
+  the taker-side mapping. `coverage_by_kind/1` reports `:trades` only for symbols whose
+  first `update` has arrived — the snapshot is deliberately not coverage.
   """
 
   use GenServer
@@ -1320,7 +1338,10 @@ defmodule DpExchange.Coinbase.Feed do
   #
   # Iterating the canonical list rather than the caller's preserves shard ordering
   # regardless of the order they wrote the option in.
-  @channels_in_order [{:quotes, "ticker"}, {:order_book, "level2"}]
+  #
+  # `:trades` (`market_trades`) is LAST and is a known channel but not a default one — see
+  # `@default_channels` below and the moduledoc's "`:trades` is opt-in" section.
+  @channels_in_order [{:quotes, "ticker"}, {:order_book, "level2"}, {:trades, "market_trades"}]
 
   defp active_channels(state) do
     for {kind, channel} <- @channels_in_order,
@@ -1349,6 +1370,14 @@ defmodule DpExchange.Coinbase.Feed do
   defp shards_for(symbols, "level2", level2_pairs_per_socket),
     do: level2_shards(symbols, level2_pairs_per_socket)
 
+  # `market_trades` shares `ticker`'s grouping. NOT measured: no per-session product
+  # ceiling for this channel is published (at-async.json's `market_trades` section names
+  # none, and only `level2` has a located one), and none has been probed. Sized with
+  # `ticker`, the public channel with no known ceiling, rather than with `level2`'s
+  # measured-for-a-different-channel 30. A refusal would surface as a venue `error` frame
+  # the way a `level2` one does — see the moduledoc's "`:trades` is opt-in" section.
+  defp shards_for(symbols, "market_trades", _level2_pairs_per_socket), do: shards(symbols)
+
   # `ticker` sorts ahead of `level2` wherever shard keys are ordered, so a call touching
   # both keeps its synchronous reply — and the front of any stagger sequence — on `ticker`,
   # preserving that channel's boot-time coverage exactly as before `level2` got its own,
@@ -1356,6 +1385,7 @@ defmodule DpExchange.Coinbase.Feed do
   # groups on one sequence" section.
   defp channel_priority("ticker"), do: 0
   defp channel_priority("level2"), do: 1
+  defp channel_priority("market_trades"), do: 2
 
   defp shard_key_order({channel_a, index_a}, {channel_b, index_b}) do
     {channel_priority(channel_a), index_a} <= {channel_priority(channel_b), index_b}
@@ -2967,6 +2997,7 @@ defmodule DpExchange.Coinbase.Feed do
   # it would have carried.
   defp channel_kind("ticker"), do: :quotes
   defp channel_kind("level2"), do: :order_book
+  defp channel_kind("market_trades"), do: :trades
 
   # Removes exactly `kind` from each symbol's kind map, dropping the symbol entirely
   # once it has no kind left delivering — the same shape `coverage/1` already expects
@@ -3049,6 +3080,7 @@ defmodule DpExchange.Coinbase.Feed do
   defp payload_kind(%Types.Quote{}), do: :quotes
   defp payload_kind(%Types.OrderBook{}), do: :order_book
   defp payload_kind(%Types.OrderBookDelta{}), do: :order_book
+  defp payload_kind(%Types.Trade{}), do: :trades
 
   # Schedules the alias-map fetch exactly once, the first time it is needed — see the
   # moduledoc. `:unfetched` is the only status this fires from, and it flips to

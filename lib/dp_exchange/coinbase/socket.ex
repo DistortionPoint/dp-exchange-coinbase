@@ -97,6 +97,46 @@ defmodule DpExchange.Coinbase.Socket do
   this family's `usage-rules/feeds.md` for the full account of why those two signals
   are sufficient.
 
+  ## `market_trades` — the trade tape, taker side, and no snapshot history
+
+  `market_trades` is public (no JWT) and delivers each print as a
+  `DpExchange.Core.Types.Trade`. Three decisions in `decode_trade_event/2` and
+  `build_trade/1`, each with the reason it exists.
+
+  **`side` is the TAKER's, so the venue's value is flipped.** The venue documents
+  `MarketTrade.side` as "The maker's side of the trade." (docs/reference/coinbase/openapi/
+  at-async.json:1407), the same words it uses for the REST tape's `HistoricalMarketTrade.side`
+  ("The maker side of the trade.", at-spec.yaml:7752), which `DpExchange.Coinbase.Rest`
+  already flips. `Core.Types.Trade` states its `:side` as "who removed liquidity" — the
+  taker — so `"BUY"` becomes `:sell` and `"SELL"` becomes `:buy`. Passing it through would
+  invert the aggressor on every print while every number stayed real. Anything other than
+  `BUY`/`SELL` becomes `nil` ("the venue did not say"), never a guess.
+
+  *Measured 2026-10-02 against the live public endpoint (BTC-USD, about 10 s, no
+  credentials):* the documentation's reading holds. Within one `update`, the trades that one
+  taker order produced share a `time`, and walking them in ascending `trade_id` order, the
+  ones labelled `BUY` fell in price (a taker SELL sweeping down through resting bids) and the
+  ones labelled `SELL` rose (a taker BUY sweeping up through resting asks). That is the
+  label naming the resting order's side, which is what "maker" means. It confirms the
+  direction of the label; it does not replace the vendor's statement.
+
+  **The `snapshot` event is dropped, never delivered.** The first `market_trades` frame
+  after every subscribe is a `snapshot` of recent history (measured 2026-10-02: it arrived
+  as `sequence_num` 0, before the venue's `subscriptions` acknowledgement, carrying trades
+  that had already printed), and it arrives again on every reconnect and resubscribe.
+  Emitting it would hand a consumer that sums trade quantities the same prints again on
+  every reconnect, and the repeat looks exactly like new volume. Dropping it costs the
+  prints made while this connection was down: **a reconnect gap loses trades, and nothing
+  here backfills it.** `get_trades/2` (REST) is the consumer's tool for that. Dropped rather
+  than de-duplicated by `trade_id` because a bounded per-product memory would still miss
+  some repeats and still carry state this module does not otherwise hold.
+
+  **An unreadable trade is reported, never dropped quietly or filled in.** A missing or
+  non-string `trade_id`, an unparseable `price`, `size` or `time` (including `NaN` or
+  infinity) raises the `:data_quality` notice through `report_quality/4` and the trade is
+  not delivered. Substituting `now` or a zero would put a plausible, wrong print into a
+  consumer's series.
+
   ## A quiet connection is kept open by the venue's heartbeats
 
   The venue closes a connection "within 60-90 seconds when no updates arrive", and
@@ -607,6 +647,11 @@ defmodule DpExchange.Coinbase.Socket do
     Enum.reduce(events, state, &decode_book_event(&1, &2))
   end
 
+  defp dispatch(%{"channel" => "market_trades", "events" => events}, state)
+       when is_list(events) do
+    Enum.reduce(events, state, &decode_trade_event(&1, &2))
+  end
+
   defp dispatch(%{"channel" => "subscriptions"}, state) do
     # The venue acknowledging a subscribe. Not data, and deliberately NOT recorded as
     # coverage: a confirmation is intent, and coverage reports what arrived.
@@ -619,7 +664,10 @@ defmodule DpExchange.Coinbase.Socket do
   # list named three of them; `ticker_batch`, `status` and `futures_balance_summary` (the
   # envelope `channel` consts at at-async.json:1011, 931 and 1177) fell to the catch-all below
   # and were dropped with no notice, which is the silence this clause exists to prevent.
-  @unsubscribed_data_channels ~w(market_trades candles user ticker_batch status futures_balance_summary)
+  #
+  # `market_trades` is not in the list: it is subscribed (opt-in, `Feed`'s `:trades` kind) and
+  # has its own clause above.
+  @unsubscribed_data_channels ~w(candles user ticker_batch status futures_balance_summary)
 
   defp dispatch(%{"channel" => channel, "events" => _events}, state)
        when channel in @unsubscribed_data_channels do
@@ -689,11 +737,19 @@ defmodule DpExchange.Coinbase.Socket do
   defp build_quote(%{"price" => price} = ticker, symbol, timestamp) do
     with {:ok, at} <- parse_time(timestamp),
          {:ok, parsed_price} <- required_decimal(price, :price) do
+      # `volume_24_h` is the trailing 24 hours, recomputed on every ticker — a quantity no
+      # interval's volume can be derived from. A consumer summed it into candles as if it
+      # were one print and read a pair's average volume about 1000× too high
+      # (dp-exchange-core issue #42), so it is labelled `:rolling_24h`. Per-interval volume
+      # comes from the `:trades` stream.
+      volume = decimal(ticker["volume_24_h"])
+
       {:ok,
        %Types.Quote{
          symbol: symbol,
          price: parsed_price,
-         volume: decimal(ticker["volume_24_h"]),
+         volume: volume,
+         volume_window: volume && :rolling_24h,
          venue_time: at,
          observed_at: DateTime.utc_now(),
          provider: :coinbase
@@ -702,6 +758,73 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   defp build_quote(_ticker, _symbol, _timestamp), do: {:error, :unexpected_payload}
+
+  # --- market_trades / trade tape ------------------------------------------
+
+  # See the moduledoc's "`market_trades`" section for all three decisions here.
+  #
+  # `snapshot` is recent history, repeated on every (re)subscribe: dropped, whatever it
+  # carries, so a reconnect cannot double count. Only `update` is delivered.
+  defp decode_trade_event(%{"type" => "snapshot"}, state), do: state
+
+  defp decode_trade_event(%{"type" => "update", "trades" => trades}, state)
+       when is_list(trades),
+       do: Enum.reduce(trades, state, &deliver_trade(&1, &2))
+
+  # An event that is neither, or an `update` whose `trades` is absent or `null`, is a
+  # shape this module does not know. Reported rather than dropped: silence here reads as
+  # a quiet market.
+  defp decode_trade_event(event, state),
+    do: report_quality(state, :market_trades, inspect(event), :unexpected_event)
+
+  defp deliver_trade(trade, state) do
+    case build_trade(trade) do
+      {:ok, %Types.Trade{} = built} ->
+        send(state.subscriber, {:dp_exchange, :coinbase, built})
+        %{state | delivering: MapSet.put(state.delivering, built.symbol)}
+
+      {:error, reason} ->
+        report_quality(state, :market_trades, trade_subject(trade), reason)
+    end
+  end
+
+  defp trade_subject(%{"product_id" => product}) when is_binary(product), do: product
+  defp trade_subject(other), do: inspect(other)
+
+  # `is_binary/1` on `product_id` for the reason `deliver_ticker/3` records: `SymbolFormat`
+  # raises on anything else, and a raise in a frame handler takes the connection down.
+  #
+  # The venue's `side` is the MAKER's — flipped to the taker's below. `time` is the trade's
+  # own (`MarketTrade.time`, "Time the trade occurred"), not the envelope's send time.
+  defp build_trade(%{"product_id" => product} = trade) when is_binary(product) do
+    with {:ok, id} <- required_trade_id(trade["trade_id"]),
+         {:ok, at} <- parse_time(trade["time"]),
+         {:ok, price} <- required_decimal(trade["price"], :price),
+         {:ok, quantity} <- required_decimal(trade["size"], :quantity) do
+      {:ok,
+       %Types.Trade{
+         id: id,
+         symbol: SymbolFormat.to_canonical_symbol(product),
+         side: taker_side(trade["side"]),
+         price: price,
+         quantity: quantity,
+         timestamp: at,
+         # No bust flag on this channel.
+         broken: false,
+         provider: :coinbase
+       }}
+    end
+  end
+
+  defp build_trade(_trade), do: {:error, :unexpected_payload}
+
+  defp required_trade_id(id) when is_binary(id) and id != "", do: {:ok, id}
+  defp required_trade_id(_missing), do: {:error, {:missing_required_field, :id}}
+
+  # Maker's side in, taker's side out; see the moduledoc.
+  defp taker_side("BUY"), do: :sell
+  defp taker_side("SELL"), do: :buy
+  defp taker_side(_other), do: nil
 
   # --- level2 / order book -------------------------------------------------
 

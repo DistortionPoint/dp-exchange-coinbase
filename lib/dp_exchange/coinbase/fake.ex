@@ -63,6 +63,9 @@ defmodule DpExchange.Coinbase.Fake do
 
   @symbols ~w(BTC-USD BTC-USDC ETH-USD ETH-EUR)
 
+  # Process-dictionary key for the symbols subscribed WITH `:trades` — see `subscribe/2`.
+  @trades_key {__MODULE__, :trades}
+
   @price %{
     "BTC-USD" => "78776.85",
     "BTC-USDC" => "78780.10",
@@ -105,6 +108,8 @@ defmodule DpExchange.Coinbase.Fake do
              symbol: symbol,
              price: Decimal.new(price),
              volume: Decimal.new("1234.5"),
+             # As the real `get_price/2`: the latest trade's size, one print.
+             volume_window: :print,
              venue_time: @at,
              observed_at: @at,
              provider: :coinbase
@@ -469,16 +474,40 @@ defmodule DpExchange.Coinbase.Fake do
   # Streaming, in memory. The fake pushes immediately on subscribe, which is what the
   # real venue's first tick does from the caller's side — and the caller cannot tell the
   # difference, which is the property the facade exists to hold.
+  #
+  # `opts[:channels]` mirrors `DpExchange.Coinbase.Feed`'s `:channels` (see its moduledoc's
+  # "`:trades` is opt-in" section), per call here because this fake has no connection to
+  # configure. `:trades` in the list also pushes one `Types.Trade` per carried symbol. The
+  # default is `[:quotes]` — exactly what this fake pushed before `:trades` existed; it
+  # has never pushed a book, which `coverage_by_kind/1` says.
   @impl true
   def subscribe(symbols, opts \\ []) do
     symbols = canonical_case(symbols)
     target = Config.opt(opts, :to, self())
+    channels = Config.opt(opts, :channels, [:quotes])
 
     for symbol <- symbols, symbol in @symbols do
       case get_price(symbol, []) do
-        {:ok, quote_struct} -> send(target, {:dp_exchange, :coinbase, quote_struct})
-        _refused -> :ok
+        # The real stream's volume is `volume_24_h`, a rolling total, where `get_price/2`'s is
+        # one print — so the pushed quote says what the real one says.
+        {:ok, quote_struct} ->
+          streamed = %{quote_struct | volume_window: :rolling_24h}
+          send(target, {:dp_exchange, :coinbase, streamed})
+
+        _refused ->
+          :ok
       end
+
+      if :trades in channels, do: send(target, {:dp_exchange, :coinbase, trade_for(symbol)})
+    end
+
+    # Unioned, and only for symbols this call pushed a trade for: a symbol subscribed
+    # earlier without `:trades` does not gain trade coverage from a later call for others.
+    if :trades in channels do
+      Process.put(
+        @trades_key,
+        MapSet.union(subscribed_trades(), MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
+      )
     end
 
     # **Added to, never replacing.** This was the identical line `update_symbols/2`
@@ -506,13 +535,18 @@ defmodule DpExchange.Coinbase.Fake do
   def unsubscribe(symbols, _opts \\ []) do
     symbols = canonical_case(symbols)
     Process.put(__MODULE__, MapSet.difference(subscribed(), MapSet.new(symbols)))
+    Process.put(@trades_key, MapSet.difference(subscribed_trades(), MapSet.new(symbols)))
     :ok
   end
 
   @impl true
   def update_symbols(symbols, _opts \\ []) do
     symbols = canonical_case(symbols)
-    Process.put(__MODULE__, MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
+    wanted = MapSet.new(Enum.filter(symbols, &(&1 in @symbols)))
+    Process.put(__MODULE__, wanted)
+    # Narrowed, never widened: `update_symbols/2` carries no `:channels`, so a symbol it
+    # adds cannot be assumed to want trades.
+    Process.put(@trades_key, MapSet.intersection(subscribed_trades(), wanted))
     :ok
   end
 
@@ -531,10 +565,22 @@ defmodule DpExchange.Coinbase.Fake do
   fake never actually sends, which is exactly the "differently capable" divergence this
   module's own moduledoc forbids. Less capable than the real venue here is honest; a
   fabricated `:order_book` entry would not be.
+
+  `:trades` appears only for symbols a `subscribe/2` call named it for, through
+  `opts[:channels]`, and is absent otherwise — the same "only what arrived" rule the real
+  `Feed` follows.
   """
   @impl true
   @spec coverage_by_kind(keyword()) :: %{Capabilities.data_kind() => %{String.t() => atom()}}
-  def coverage_by_kind(_opts \\ []), do: %{quotes: Map.new(subscribed(), &{&1, :stream})}
+  def coverage_by_kind(_opts \\ []) do
+    by_kind = %{quotes: Map.new(subscribed(), &{&1, :stream})}
+
+    trades = subscribed_trades()
+
+    if MapSet.size(trades) == 0,
+      do: by_kind,
+      else: Map.put(by_kind, :trades, Map.new(trades, &{&1, :stream}))
+  end
 
   @impl true
   def subscribe_notices(opts \\ []) do
@@ -547,6 +593,26 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())
+
+  # Kept apart from `subscribed/0`: a symbol can be subscribed for quotes without trades.
+  defp subscribed_trades, do: Process.get(@trades_key, MapSet.new())
+
+  # One print, shaped as `Socket`'s decode of a `market_trades` `update` row: a real id, a
+  # taker `side`, `broken: false` because the channel has no bust flag, and a fixed non-nil
+  # timestamp.
+  defp trade_for(symbol) do
+    %Types.Trade{
+      id: "fake-trade-1",
+      symbol: symbol,
+      side: :buy,
+      price: Decimal.new(@price[symbol]),
+      quantity: Decimal.new("0.25"),
+      timestamp: @at,
+      broken: false,
+      provider: :coinbase
+    }
+  end
+
   @impl true
   def test_connection(credentials, _opts) do
     with_injection(fn ->

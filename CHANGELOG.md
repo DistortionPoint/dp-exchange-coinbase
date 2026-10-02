@@ -20,6 +20,39 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **Every `Quote` that carries a volume now says which quantity it is**, in
+  `volume_window` (dp_exchange_core 0.3.50, dp-exchange-core issue #42). The stream's
+  `volume_24_h` is `:rolling_24h`: a trailing day, which no interval's volume can be derived
+  from. A consumer summed it into candles and read a pair's average volume about 1000× too
+  high. `get_price/2`'s volume is the latest trade's size, so `:print`. For per-interval
+  volume, use the new `:trades` stream.
+
+### Added
+
+- **A streamable `:trades` kind** (issue #3). `capabilities().streamable` now includes
+  `:trades`. Start the feed with `channels: [:quotes, :order_book, :trades]` and it also
+  subscribes each symbol to the public `market_trades` channel, delivering every print as a
+  `Core.Types.Trade`. The default is unchanged (`[:quotes, :order_book]`), and
+  `Fake.subscribe/2` takes the same `channels:`.
+  - `side` is the **taker's**. The venue documents `MarketTrade.side` as "The maker's side of
+    the trade." (the REST tape says the same, and `get_trades/2` already flips it), so a
+    venue `BUY` is delivered as `:sell`.
+  - **The venue's opening `snapshot` of recent history is not delivered.** It repeats on every
+    subscribe and reconnect and would double count a consumer that sums quantities. Only
+    `update` events are delivered, so **prints made during a reconnect gap are lost**;
+    `get_trades/2` is the way to repair one.
+  - An unreadable trade raises a `:data_quality` notice and is not delivered.
+  - Observed live against the public endpoint on 2026-10-02 (BTC-USD, about 10 s): the frame
+    shape, the snapshot-then-update order, and the side direction. **Not measured:** how many
+    products one `market_trades` session accepts. It shares `ticker`'s 100-per-socket shards.
+
+### Changed
+
+- `market_trades` frames are no longer reported as "received an unsubscribed channel": the
+  channel is now subscribed when `:trades` is asked for.
+
 ## [0.3.83] - 2026-10-01
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

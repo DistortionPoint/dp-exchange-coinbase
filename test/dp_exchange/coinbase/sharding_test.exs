@@ -747,7 +747,9 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, provider: :coinbase} = notice},
-                     500
+                     # 2s, not 500ms: a refused connect to 127.0.0.1:1 took longer than 500ms
+                     # under full-suite load once (2026-10-02). Only the wait is longer.
+                     2_000
 
       assert notice.details.shard == 0
       assert notice.details.channel == "ticker"

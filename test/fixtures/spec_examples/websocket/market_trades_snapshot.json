@@ -1,0 +1,28 @@
+{
+  "channel": "market_trades",
+  "timestamp": "2026-10-02T14:54:02.962942Z",
+  "sequence_num": 0,
+  "events": [
+    {
+      "type": "snapshot",
+      "trades": [
+        {
+          "product_id": "BTC-USD",
+          "trade_id": "1101555342",
+          "price": "85713.82",
+          "size": "0.00000058",
+          "time": "2026-10-02T14:54:02.674387Z",
+          "side": "BUY"
+        },
+        {
+          "product_id": "BTC-USD",
+          "trade_id": "1101555341",
+          "price": "85718.32",
+          "size": "0.00125251",
+          "time": "2026-10-02T14:54:02.450326Z",
+          "side": "SELL"
+        }
+      ]
+    }
+  ]
+}

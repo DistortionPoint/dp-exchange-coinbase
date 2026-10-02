@@ -93,9 +93,10 @@ defmodule DpExchange.Coinbase.BaselineTest do
       # Silence is the failure mode: an unrecognised channel that falls through looks
       # identical to a channel that stopped arriving. `l2_data` is excluded here — it is
       # subscribed and decoded now, not merely recognised; its own test covers it above.
+      # `market_trades` is excluded too: subscribed on opt-in (`:trades`), see market_trades_test.exs.
       # `ticker_batch`, `status` and `futures_balance_summary` were missing from the list and
-      # dropped in silence; at-async.json documents all six.
-      for channel <- ~w(market_trades candles user ticker_batch status futures_balance_summary) do
+      # dropped in silence; at-async.json documents the remaining five.
+      for channel <- ~w(candles user ticker_batch status futures_balance_summary) do
         assert {:ok, _state} = frame(%{"channel" => channel, "events" => []})
 
         assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}},

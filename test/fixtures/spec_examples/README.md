@@ -512,7 +512,7 @@ Every fixture below is therefore built strictly from the payload schema's own pr
 there is no vendor example to defer to, and every field present here is one the schema
 documents as `type: string`/`integer`/etc with plausible values, not a copied vendor sample.
 
-- `websocket/ticker.json` — `TickerEnvelope` (`docs/reference/coinbase/openapi/at-async.json:965`), each ticker row is `Ticker` (`:1208`). This package only ever subscribes `ticker` and `level2` — see `lib/dp_exchange/coinbase/socket.ex`'s `@unsubscribed_data_channels`.
+- `websocket/ticker.json` — `TickerEnvelope` (`docs/reference/coinbase/openapi/at-async.json:965`), each ticker row is `Ticker` (`:1208`). This package subscribes `ticker` and `level2` by default, and `market_trades` on opt-in (see the last section) — see `lib/dp_exchange/coinbase/socket.ex`'s `@unsubscribed_data_channels`.
 - `websocket/l2_snapshot.json` / `websocket/l2_update.json` — `L2Envelope` (`:1045`), each row is `L2Update` (`:1356`). `side` is documented as an enum of exactly `bid`/`offer`; `decode_row/1` in `socket.ex` maps `"bid"` to `:bid` and anything else (including `"offer"`) to `:ask`, which `l2_snapshot.json`'s two rows exercise directly.
 - `websocket/heartbeats.json` — `HeartbeatEnvelope` (`:851`). Dispatched to a no-op clause; the fixture exists to prove that a real heartbeat shape does not crash the handler, not to check a decoded value.
 - `websocket/status_unsubscribed.json` — `StatusEnvelope` (`:925`) carrying `ProductStatus` rows (`:1320`). `status` is a channel this package never subscribes to (it declares `streamable: [:quotes, :order_book]` only); this fixture proves `dispatch/2`'s catch-all recognises a genuine vendor-shaped `status` frame and reports it as a `:data_quality` notice rather than crashing or silently dropping it.
@@ -563,3 +563,16 @@ wallet-scoped schema would reject).
   the venue's real `"offer"` spelling rather than pre-translating it, so the test asserts
   the mapping actually happens rather than assuming it.
 
+
+### `market_trades` (added with the `:trades` stream)
+
+- `websocket/market_trades_snapshot.json` / `websocket/market_trades_update.json` —
+  `MarketTradesEnvelope` (`docs/reference/coinbase/openapi/at-async.json:1088`), each row is
+  `MarketTrade` (`:1382`). Like every data channel in this spec it has **no vendor example**,
+  so these are built from the schema's own properties. The *shape* (envelope keys, event
+  `type` of `snapshot` first at `sequence_num` 0 then `update`, string-typed `price`/`size`,
+  `BUY`/`SELL` `side`, RFC 3339 `time`) is what was observed live against
+  `wss://advanced-trade-ws.coinbase.com` on 2026-10-02; the *values* are hand-picked
+  (`BUY` and `SELL` both present, so the side flip is exercised in both directions).
+  `side` is "The maker's side of the trade." (`:1407`) and `socket.ex` flips it to the
+  taker's; the snapshot fixture exists to prove that history is NOT delivered.

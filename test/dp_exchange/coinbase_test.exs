@@ -38,7 +38,7 @@ defmodule DpExchange.CoinbaseTest do
       # unauthenticated when no credential is given, and `Feed.channel_permitted?/2` no
       # longer filters it out for a credential-less caller.
       assert Coinbase.capabilities().authenticated_streamable == []
-      assert Coinbase.capabilities().streamable == [:quotes, :order_book]
+      assert Coinbase.capabilities().streamable == [:quotes, :order_book, :trades]
     end
 
     test "nothing claims :proven — nothing has run in production" do

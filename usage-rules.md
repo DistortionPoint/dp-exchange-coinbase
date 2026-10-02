@@ -269,7 +269,7 @@ market rather than a broken credential.
 
 ### Neither `:order_book` nor `:quotes` requires a credential to stream
 
-`capabilities/0` says so: `streamable` is `[:quotes, :order_book]` and
+`capabilities/0` says so: `streamable` is `[:quotes, :order_book, :trades]` and
 `authenticated_streamable` is `[]`. Without credentials this package still subscribes both
 `ticker` and `level2` — `SubscribeLevel2`'s own JWT is documented "Optional here;
 recommended for connection reliability.", not required, unlike `SubscribeUser`'s.
@@ -337,6 +337,37 @@ book.
 
 A kind this venue does not stream (`:candles`, say) also fails at `init/1` rather than being
 silently dropped.
+
+### `:trades` — the public trade tape, opt-in, and its history is NOT replayed
+
+```elixir
+children = [{DpExchange.Coinbase, channels: [:quotes, :order_book, :trades]}]
+```
+
+`:trades` subscribes Coinbase's public `market_trades` channel (no credential) and delivers
+each print as a `DpExchange.Core.Types.Trade`. It is **not** in the default, which stays
+`[:quotes, :order_book]`: ask for it by name, and expect one more stream per symbol.
+
+- **`side` is the taker's** — who removed liquidity — as the contract defines it. The venue
+  reports the *maker's* side ("The maker's side of the trade.") and this package flips it, so
+  a venue `BUY` arrives as `:sell`. `side` is `nil` for a value that is neither `BUY` nor
+  `SELL`; check it. `broken` is always `false`: the channel has no bust flag.
+- **The `snapshot` the venue sends first is dropped.** Every subscribe, resubscribe and
+  reconnect begins with a `snapshot` of recent history. Delivering it would repeat the same
+  prints on every reconnect and double count any consumer that sums quantities, so only
+  `update` events are delivered. **The consequence: prints made while a connection was down
+  are lost, and nothing backfills them.** Treat `:link_up` after a `:link_down` as a gap in
+  your tape and repair it with `get_trades/2` if you need it complete.
+- **`coverage_by_kind/1` reports `:trades` only once an `update` has arrived** for the symbol.
+  The dropped snapshot is deliberately not coverage, so a quiet pair reads as not yet
+  delivering rather than delivering.
+- **An unreadable trade is a `:data_quality` notice, not a dropped row or a filled-in one**
+  (missing id, non-numeric price or size, unparseable time).
+- `market_trades` shares `ticker`'s 100-pairs-per-socket sharding. That figure is **not
+  measured** for this channel, and the venue publishes no ceiling for it. The frame shape and
+  the side direction were observed live on 2026-10-02 (BTC-USD, about 10 seconds).
+- The fake takes the same option per call: `Fake.subscribe(symbols, channels: [:quotes,
+  :trades])` pushes one `Trade` per symbol and reports `:trades` in `coverage_by_kind/1`.
 
 ### `level2` delivers deltas, not a maintained book — BREAKING as of 0.2.0
 

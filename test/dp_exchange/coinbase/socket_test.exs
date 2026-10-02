@@ -329,6 +329,11 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert quote_struct.symbol == "BTC-USD"
       assert Decimal.equal?(quote_struct.price, Decimal.new("79478.7"))
       assert quote_struct.venue_time == ~U[2026-08-28 14:53:45.649112Z]
+
+      # A rolling 24-hour total, labelled as one: summed as per-print volume it read about
+      # 1000× too high in a consumer (dp-exchange-core issue #42).
+      assert Decimal.equal?(quote_struct.volume, Decimal.new("1234.5"))
+      assert quote_struct.volume_window == :rolling_24h
     end
 
     test "a tick with NO venue timestamp is not delivered" do
