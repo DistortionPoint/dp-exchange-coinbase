@@ -702,8 +702,11 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       @behaviour DpExchange.Core.RateLimitBehaviour
 
       @impl true
-      def acquire(_provider, _weight, _opts) do
-        Process.put(:rate_limiter_call, :acquire)
+      # dp_exchange_core 0.3.52: a non-blocking request reserves with `acquire/3` and a zero
+      # timeout (it never waits), where it used to `check/3` first and race other callers.
+      def acquire(_provider, _weight, opts) do
+        call = if Keyword.get(opts, :timeout) == 0, do: :acquire_without_waiting, else: :acquire
+        Process.put(:rate_limiter_call, call)
         :ok
       end
 
@@ -731,14 +734,14 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       assert Process.get(:rate_limiter_call) == :acquire
     end
 
-    test "rate_limit_blocking: false (or omitted) reaches Core.HttpClient as check/3" do
+    test "rate_limit_blocking: false (or omitted) reaches Core.HttpClient as acquire/3 with no wait" do
       Config.put_override(:rate_limit_module, RecordingLimiter)
       plug = fn conn -> Req.Test.json(conn, %{"status" => "ACTIVE"}) end
 
       assert {:ok, _result} =
                Prime.staking_status(@credentials, "pf-1", "w-9", plug: plug, retry_attempts: 0)
 
-      assert Process.get(:rate_limiter_call) == :check
+      assert Process.get(:rate_limiter_call) == :acquire_without_waiting
     end
   end
 
