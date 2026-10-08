@@ -556,6 +556,50 @@ defmodule DpExchange.Coinbase.RestTest do
       assert {:error, :unexpected_response_shape} =
                Rest.list_instruments(plug: responding(%{"nope" => 1}), retry_attempts: 0)
     end
+
+    # Issue #5: WHUF-USD/WHUF-USDC were `online` and `cancel_only` on 2026-10-08, and never
+    # ticked once collected as tradable.
+    for flag <- ~w(cancel_only trading_disabled is_disabled view_only) do
+      test "an online product flagged #{flag} is not :tradable" do
+        product = %{
+          "product_id" => "WHUF-USDC",
+          "base_currency_id" => "WHUF",
+          "quote_currency_id" => "USDC",
+          "product_type" => "SPOT",
+          "status" => "online",
+          unquote(flag) => true
+        }
+
+        assert {:ok, [instrument]} =
+                 Rest.list_instruments(
+                   plug: responding(%{"products" => [product]}),
+                   retry_attempts: 0
+                 )
+
+        assert instrument.status == :unknown
+      end
+    end
+
+    test "limit_only and post_only still trade, so the product stays :tradable" do
+      product = %{
+        "product_id" => "BTC-USD",
+        "base_currency_id" => "BTC",
+        "quote_currency_id" => "USD",
+        "product_type" => "SPOT",
+        "status" => "online",
+        "limit_only" => true,
+        "post_only" => true,
+        "cancel_only" => false
+      }
+
+      assert {:ok, [instrument]} =
+               Rest.list_instruments(
+                 plug: responding(%{"products" => [product]}),
+                 retry_attempts: 0
+               )
+
+      assert instrument.status == :tradable
+    end
   end
 
   describe "get_alias_map/1" do

@@ -45,7 +45,19 @@ defmodule DpExchange.Coinbase.SymbolFormat do
 
   alias DpExchange.Core.CanonicalPair
 
-  @mapping %{sep: "-", quotes: ~w(USDC USDT USD EUR GBP BTC ETH)}
+  # **The one list of this venue's quote currencies** (issue #4). It used to exist twice:
+  # here, for splitting, and in `capabilities/0`'s `supported_quotes`, and the two had already
+  # drifted. INR, AUD, CAD and SGD were declared but missing here, and BRL was listed by the
+  # venue but in neither. A consumer measured USDC-BRL in the product listing from 2026-08-19
+  # to 2026-10-07. `capabilities/0` now reads `quotes/0`, as `dp_exchange_gemini` does.
+  # Longer codes first is kept for a concatenating venue's sake (see the moduledoc).
+  @quotes ~w(USDC USDT USD EUR GBP BTC ETH INR AUD CAD SGD BRL)
+
+  @mapping %{sep: "-", quotes: @quotes}
+
+  @doc "Every quote currency this venue lists — the source `capabilities/0` declares from."
+  @spec quotes() :: [String.t()]
+  def quotes, do: @quotes
 
   @impl true
   @spec to_canonical_symbol(String.t()) :: String.t()

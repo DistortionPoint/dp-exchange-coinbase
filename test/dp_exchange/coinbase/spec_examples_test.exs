@@ -252,9 +252,11 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       # placeholder "SPOT" (see README) — `product_type: "SPOT"` is what the fixture
       # carries, and `Instrument.instrument_from/1` maps it to `:spot`.
       assert instrument.instrument == :spot
-      # `status: "online"` (a manual fill — Product.status has no vendor example at all,
-      # required though it is; see fills.md) maps through `Instrument.status_from/1`.
-      assert instrument.status == :tradable
+      # `status: "online"` (a manual fill — Product.status has no vendor example at all;
+      # see fills.md), BUT the vendor's own example sets `cancel_only: true` and
+      # `view_only: true`, and an online product the venue says is cancel-only or view-only
+      # is not tradable (issue #5). Decoded honestly, this example is `:unknown`.
+      assert instrument.status == :unknown
     end
 
     test "get_symbols/1 (public) reads GetPublicProducts and returns canonical symbols" do

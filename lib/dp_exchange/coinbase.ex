@@ -49,7 +49,7 @@ defmodule DpExchange.Coinbase do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Coinbase.{Feed, Prime, Rest, Supervisor}
+  alias DpExchange.Coinbase.{Feed, Prime, Rest, Supervisor, SymbolFormat}
   alias DpExchange.Core.{Capabilities, Config, Venue}
 
   # The venue serves none of these. **That is a claim about Coinbase, not about how far
@@ -218,7 +218,8 @@ defmodule DpExchange.Coinbase do
   def capabilities do
     Capabilities.new(
       endpoints: endpoint_maturities(),
-      supported_quotes: ~w(USDC USD EUR GBP BTC USDT ETH INR AUD CAD SGD),
+      # One list, owned by `SymbolFormat` (issue #4) — see `SymbolFormat.quotes/0`.
+      supported_quotes: SymbolFormat.quotes(),
       # `:future` joined on 2026-09-01 with the CFM surface — US derivatives are dated
       # futures, margined in a separate account. `:perp` is **not** here: Advanced Trade's
       # perpetuals live behind the INTX endpoints, which are `APPROVED-SKIP` as deprecated,

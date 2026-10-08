@@ -20,6 +20,21 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`list_instruments/1` no longer marks a product `:tradable` when it is online but not
+  trading** (issue #5). It read `status` alone. Coinbase also flags `cancel_only`,
+  `trading_disabled`, `is_disabled` and `view_only`. On 2026-10-08, WHUF-USD and WHUF-USDC
+  were `online` and `cancel_only`, so a consumer collected them and they never ticked. Any
+  of those flags now gives `:unknown`, which is how `dp_exchange_webull` reports its
+  liquidate-only rows, and the product returns to `:tradable` when the venue clears the
+  flag. `limit_only` and `post_only` still trade, so they stay `:tradable`.
+- **BRL is a declared quote, and there is one list of quotes** (issue #4). USDC-BRL has
+  been listed since at least 2026-08-19. The quote list existed twice, in
+  `capabilities/0` and in `SymbolFormat`, and the two had drifted: INR, AUD, CAD and SGD
+  were declared but not split on. `SymbolFormat.quotes/0` is now the only list, and
+  `capabilities/0` declares from it.
+
 ## [0.3.87] - 2026-10-05
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

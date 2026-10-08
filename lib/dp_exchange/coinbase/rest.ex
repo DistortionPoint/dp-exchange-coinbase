@@ -327,8 +327,26 @@ defmodule DpExchange.Coinbase.Rest do
       base: product["base_currency_id"],
       quote: product["quote_currency_id"],
       instrument: Instrument.instrument_from(product["product_type"]),
-      status: Instrument.status_from(product["status"])
+      status: product_status(product)
     )
+  end
+
+  # **`status: "online"` is not the whole answer** (issue #5). The venue also flags a product
+  # that is online but not trading: `cancel_only` ("orders of the product can only be
+  # cancelled"), `trading_disabled` ("disabled for trading for all"), `is_disabled`
+  # ("disabled for trading") and `view_only` (`at-spec.yaml`'s `Product` schema). On
+  # 2026-10-08, WHUF-USD and WHUF-USDC were `online` with `cancel_only: true`. Read as
+  # `:tradable`, a consumer collected them and they never ticked, the signature of a
+  # subscription that silently failed. A product with any of these flags is `:unknown`,
+  # which is how `dp_exchange_webull` reports its liquidate-only and non-tradable rows. It
+  # returns to `:tradable` by itself once the venue clears the flag. `limit_only` and
+  # `post_only` still trade, just with order-type restrictions, so they stay `:tradable`.
+  @not_trading ~w(cancel_only trading_disabled is_disabled view_only)
+
+  defp product_status(product) do
+    if Enum.any?(@not_trading, &(product[&1] == true)),
+      do: :unknown,
+      else: Instrument.status_from(product["status"])
   end
 
   @doc """

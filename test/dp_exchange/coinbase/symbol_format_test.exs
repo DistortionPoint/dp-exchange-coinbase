@@ -5,6 +5,16 @@ defmodule DpExchange.Coinbase.SymbolFormatTest do
 
   doctest SymbolFormat
 
+  describe "one list of quotes (issue #4)" do
+    test "capabilities/0 declares exactly the quotes SymbolFormat splits on, BRL included" do
+      # Two lists had drifted: INR/AUD/CAD/SGD declared but not split on, and BRL (USDC-BRL,
+      # listed since 2026-08-19) in neither.
+      assert DpExchange.Coinbase.capabilities().supported_quotes == SymbolFormat.quotes()
+      assert "BRL" in SymbolFormat.quotes()
+      assert SymbolFormat.to_canonical_symbol("USDC-BRL") == "USDC-BRL"
+    end
+  end
+
   describe "the round trip holds" do
     test "for every pair over every declared quote" do
       quotes = DpExchange.Coinbase.capabilities().supported_quotes
