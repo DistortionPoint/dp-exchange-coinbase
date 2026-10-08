@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.88] - 2026-10-08
+
 ### Fixed
 
 - **`list_instruments/1` no longer marks a product `:tradable` when it is online but not
