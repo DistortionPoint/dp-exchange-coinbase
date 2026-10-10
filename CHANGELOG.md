@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.93] - 2026-10-10
+
 ### Fixed
 
 - **A level2 row whose side was neither `bid` nor `offer` was filed as an ask.** It is now
