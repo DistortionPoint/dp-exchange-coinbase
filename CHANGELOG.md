@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.98] - 2026-10-10
+
 ### Fixed
 
 - **`capabilities().measured_at` was older than the measurements `measured_against` cites.**
