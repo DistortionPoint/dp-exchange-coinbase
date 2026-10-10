@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.94] - 2026-10-10
+
 ### Fixed
 
 - **`Fake` conversions were stateless.** Any id committed, and read back `:settled`, so a
