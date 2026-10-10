@@ -278,6 +278,13 @@ defmodule DpExchange.Coinbase.Socket do
   @base_reconnect_delay_ms 1_000
   @max_reconnect_delay_ms 30_000
 
+  # How long a session must have stayed up before its drop counts as a healthy blip
+  # (reconnect at once) rather than another failure in a run. Long enough that a
+  # connect-then-drop flapper cannot reach it, far shorter than any real session. This
+  # package's own choice, not a venue figure — the same one `dp_exchange_webull`'s socket
+  # makes. See `handle_disconnect/2`.
+  @stable_session_ms 30_000
+
   @doc """
   How long to wait before the reconnect that `attempt` is about to make.
 
@@ -365,7 +372,12 @@ defmodule DpExchange.Coinbase.Socket do
       # When the last frame of any kind arrived, and the ref of this connection's silence
       # check. See the moduledoc's "A connection that has gone silent is closed".
       last_frame_at: nil,
-      silence_check: nil
+      silence_check: nil,
+      # When this connection's `handle_connect/2` ran (`nil` while disconnected), and how
+      # many consecutive sessions dropped before `@stable_session_ms`. See
+      # `handle_disconnect/2`.
+      connected_at: nil,
+      short_sessions: 0
     }
 
     opts = connection_opts(opts)
@@ -477,7 +489,8 @@ defmodule DpExchange.Coinbase.Socket do
          stale_run: nil,
          last_frame_at: now_ms(),
          silence_check: check
-     }}
+     }
+     |> Map.put(:connected_at, now_ms())}
   end
 
   @impl true
@@ -534,7 +547,24 @@ defmodule DpExchange.Coinbase.Socket do
     # `Map.get/3` rather than a pattern, so the unit tests that call this callback directly
     # with a bare `%{reason: ...}` keep describing what they mean: one healthy session
     # dropping, which still reconnects at once.
-    attempt = Map.get(status, :attempt_number, 1)
+    #
+    # **A session that connected is not, by itself, a healthy one.** Found 2026-10-10 by
+    # reading this function: websockex restarts its count at 1 whenever a connect SUCCEEDS,
+    # so a venue that accepted the upgrade and dropped the socket a second later was
+    # reconnected at delay 0 every time — the storm the backoff exists to prevent, one
+    # successful handshake at a time. Drops of sessions that did not live
+    # `@stable_session_ms` are now counted here and feed the same backoff; a failed connect
+    # (websockex's own attempt above 1) leaves that count alone, since no session ran.
+    attempt_number = Map.get(status, :attempt_number, 1)
+
+    short_sessions =
+      cond do
+        attempt_number > 1 -> Map.get(state, :short_sessions, 0)
+        stable_session?(state) -> 0
+        true -> Map.get(state, :short_sessions, 0) + 1
+      end
+
+    attempt = attempt_number + short_sessions
     delay = reconnect_delay_ms(attempt)
 
     Telemetry.link_reconnect_attempt(:coinbase, attempt, delay)
@@ -558,8 +588,16 @@ defmodule DpExchange.Coinbase.Socket do
     # restore a symbol left that symbol reported as `:stream` indefinitely — the
     # 325-subscribed/174-delivering shape `coverage/1` was written for. `report_link_down/1`
     # above is what lets `Feed` narrow coverage to exactly this shard.
-    {:reconnect, state}
+    {:reconnect, Map.merge(state, %{connected_at: nil, short_sessions: short_sessions})}
   end
+
+  # Connected, and for at least `@stable_session_ms`. A state with no `:connected_at` (no
+  # session ran since the last drop) is not stable: with nothing to measure the age from,
+  # the answer that cannot cause a storm is "no".
+  defp stable_session?(%{connected_at: connected_at}) when is_integer(connected_at),
+    do: now_ms() - connected_at >= @stable_session_ms
+
+  defp stable_session?(_state), do: false
 
   @impl true
   def handle_frame({:text, payload}, state) do

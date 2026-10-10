@@ -96,8 +96,10 @@ defmodule DpExchange.Coinbase.Supervisor do
 
   defp authenticated?(opts) do
     case Keyword.get(opts, :credentials) do
-      %{} = credentials -> map_size(credentials) > 0
-      _absent -> false
+      # The same pair `Auth.jwt/2` needs to sign. A wrapped `%{}` or a map with a typo'd key
+      # has a non-zero `map_size/1` and cannot sign, so it must not buy the higher ceiling.
+      %{api_key: key, api_secret: secret} when is_binary(key) and is_binary(secret) -> true
+      _absent_or_unable_to_sign -> false
     end
   end
 

@@ -20,6 +20,35 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The JWT was the older Coinbase Cloud shape, not the claim set Coinbase documents.** It
+  sent `iss: "coinbase-cloud"`, an `aud: ["retail_rest_api_proxy"]`, and its REST scope as a
+  `uris` list. Coinbase's "API Key Authentication" samples (read 2026-10-10) build
+  `iss: "cdp"`, no `aud`, and one `uri` string, so a REST token named its scope under a key
+  the documented builder never writes. The token is now that documented set. Recorded in
+  `docs/reference/coinbase/jwt-auth.md`; documentation-derived, not yet probed with a live
+  key. `Auth.jwt/2`'s option is now `uri:` (a string), replacing `uris:` (a list).
+- **A socket that connected and dropped at once reconnected with no delay, forever.**
+  websockex restarts its attempt count at 1 after every successful connect, so a venue that
+  accepted the upgrade and dropped the socket a second later was reconnected at delay 0 each
+  time — the reconnect storm the backoff exists to prevent. A session that did not stay up
+  30 seconds now counts toward the backoff, as in `dp_exchange_webull`; a stable session's
+  drop still reconnects at once.
+- **`credentials: %{}` became a credential made of `nil`s.** `Credentials.wrap/1`
+  struct-ified an empty map, so through `child_spec/1` the "no credentials" paths did not
+  fire: `level2` was refused `{:missing_credentials, :coinbase}` on every subscribe instead of
+  going out without a JWT, and the limiter took the authenticated ceiling because a struct's
+  `map_size/1` is never zero. `wrap(%{})` is now `nil`, and the supervisor grants the higher
+  ceiling only to a pair `Auth.jwt/2` could sign with.
+- **`Prime.claim_rewards/4` raised or sent a bad `opts[:amount]`.** A float or integer raised
+  in `Decimal.to_string/2`; zero, negative and NaN went to the venue. A present amount is now
+  refused `{:error, {:invalid_amount, _}}` like every other Prime write.
+- **Docs.** `DpExchange.Coinbase.query_transaction_validators/3` documented `opts[:query]`,
+  which nothing reads; it takes `opts[:transaction_ids]` and `opts[:extra]`. The
+  `capabilities/0` `measured_against` text had a spliced, self-contradicting sentence about
+  the REST ceilings.
+
 ## [0.3.95] - 2026-10-10
 
 ### Fixed

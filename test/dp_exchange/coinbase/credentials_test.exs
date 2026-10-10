@@ -14,6 +14,11 @@ defmodule DpExchange.Coinbase.CredentialsTest do
       assert Credentials.wrap(nil) == nil
     end
 
+    test "an empty map names no credential, so it becomes nil rather than a pair of nils" do
+      assert Credentials.wrap(%{}) == nil
+      assert Credentials.wrap_opt(credentials: %{}, name: :x) == [credentials: nil, name: :x]
+    end
+
     test "a plain credentials map is struct-ified" do
       wrapped = Credentials.wrap(%{api_key: @api_key, api_secret: @api_secret})
 

@@ -277,12 +277,14 @@ defmodule DpExchange.Coinbase.Prime do
   @spec claim_rewards(credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def claim_rewards(credentials, portfolio_id, wallet_id, opts) do
-    post(
-      "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/claim_rewards",
-      claim_rewards_body(opts),
-      credentials: credentials,
-      opts: opts
-    )
+    with :ok <- valid_claim_amount(Config.opt(opts, :amount, nil)) do
+      post(
+        "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/claim_rewards",
+        claim_rewards_body(opts),
+        credentials: credentials,
+        opts: opts
+      )
+    end
   end
 
   @doc """
@@ -315,6 +317,13 @@ defmodule DpExchange.Coinbase.Prime do
   end
 
   defp valid_amount(amount), do: {:error, {:invalid_amount, amount}}
+
+  # `claim_rewards/4`'s amount is optional (absent claims the maximum), but a PRESENT one is
+  # held to the same rule as every other write here. A float or integer used to raise
+  # `FunctionClauseError` in `Decimal.to_string/2` inside the caller's process, and a zero or
+  # negative `Decimal` was sent to the venue as given.
+  defp valid_claim_amount(nil), do: :ok
+  defp valid_claim_amount(amount), do: valid_amount(amount)
 
   defp valid_asset(asset) when is_binary(asset) and asset != "", do: :ok
   defp valid_asset(asset), do: {:error, {:invalid_asset, asset}}
@@ -429,8 +438,8 @@ defmodule DpExchange.Coinbase.Prime do
   # Signed per attempt, not once per call: `Core.HttpClient` retries a timeout or a 5xx, and
   # a retry carrying the first attempt's `X-CB-ACCESS-TIMESTAMP` ages with every attempt
   # until the venue refuses it as a credential problem. `Core.HttpClient` calls this again
-  # for each attempt. Every write here already survives a retry — the staking writes carry
-  # an idempotency key, and `claim_rewards/4` is sent once.
+  # for each attempt. Every write here already survives a retry — the staking writes and
+  # `claim_rewards/4` all carry an idempotency key.
   defp signer(method, path, body, credentials),
     do: fn -> headers(method, path, body, credentials) end
 

@@ -48,15 +48,28 @@ defmodule DpExchange.Coinbase.AuthTest do
       assert exp - nbf == 120
     end
 
-    test "uris are included only when given" do
-      # The WebSocket token omits them — a socket is not one request — so defaulting the
+    test "uri is included only when given" do
+      # The WebSocket token omits it — a socket is not one request — so defaulting the
       # claim to something plausible would produce a token that looks right and is
       # rejected.
       {:ok, without} = Auth.jwt(@credentials)
-      {:ok, with_uris} = Auth.jwt(@credentials, uris: ["GET api.coinbase.com/x"])
+      {:ok, with_uri} = Auth.jwt(@credentials, uri: "GET api.coinbase.com/x")
 
-      refute Map.has_key?(claims_of(without), "uris")
-      assert claims_of(with_uris)["uris"] == ["GET api.coinbase.com/x"]
+      refute Map.has_key?(claims_of(without), "uri")
+      assert claims_of(with_uri)["uri"] == "GET api.coinbase.com/x"
+    end
+
+    test "the claim set is the one Coinbase documents: iss cdp, no aud, no uris" do
+      # Coinbase's "API Key Authentication" samples, read 2026-10-10. This built the older
+      # Coinbase Cloud shape (`iss: "coinbase-cloud"`, an `aud`, a `uris` list) before.
+      {:ok, token} = Auth.jwt(@credentials, uri: "GET api.coinbase.com/x")
+      claims = claims_of(token)
+
+      assert claims["iss"] == "cdp"
+      assert claims["sub"] == @credentials.api_key
+      refute Map.has_key?(claims, "aud")
+      refute Map.has_key?(claims, "uris")
+      assert claims |> Map.keys() |> Enum.sort() == ["exp", "iss", "nbf", "sub", "uri"]
     end
 
     test "accepts the 64-byte seed-plus-public-key form" do
@@ -85,7 +98,7 @@ defmodule DpExchange.Coinbase.AuthTest do
       assert {:ok, [{"Authorization", "Bearer " <> token}, {"Content-Type", "application/json"}]} =
                Auth.rest_headers(:get, "/api/v3/brokerage/accounts", nil, @credentials)
 
-      assert claims_of(token)["uris"] == ["GET api.coinbase.com/api/v3/brokerage/accounts"]
+      assert claims_of(token)["uri"] == "GET api.coinbase.com/api/v3/brokerage/accounts"
     end
 
     test "a signing failure refuses the call rather than letting it be sent unsigned" do

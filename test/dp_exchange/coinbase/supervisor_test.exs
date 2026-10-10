@@ -68,6 +68,21 @@ defmodule DpExchange.Coinbase.SupervisorTest do
       assert_ceiling(limiter, 3)
     end
 
+    test "credentials that cannot sign do not buy the higher ceiling, wrapped or not" do
+      # `Credentials.wrap/1` struct-ifies, and a struct's `map_size/1` is never zero — so a
+      # wrapped map with a typo'd key used to count as authenticated.
+      alias DpExchange.Coinbase.Credentials
+
+      for credentials <- [
+            Credentials.wrap(%{api_key: "k"}),
+            Credentials.wrap(%{key: "k", secret: "s"}),
+            %{api_key: "k", api_secret: nil}
+          ] do
+        opts = start_venue(credentials: credentials)
+        assert_ceiling(VenueSupervisor.limiter_name(opts), 3)
+      end
+    end
+
     # Pins the ceiling at exactly `ceiling`, without depending on elapsed time anywhere.
     #
     # Both earlier versions of this were races, and the second one is the instructive one.

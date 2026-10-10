@@ -58,7 +58,7 @@ These are in the host's declaration and have no equivalent in this package's:
 
 ## Still to reconcile
 
-- Authentication — the CDP JWT claim set and `uris` scoping, against the adapter's builder
+- ~~Authentication — the CDP JWT claim set and `uris` scoping~~ — reconciled 2026-10-10 against the documented samples (see `jwt-auth.md`, "The claim set"): `iss: "cdp"`, no `aud`, a singular `uri`. Documentation only; not probed live.
 - WebSocket channels and their payload shapes
 - Rate limits, public and authenticated, as two ceilings rather than one
 - Order types and time-in-force, which the host declared nowhere at all

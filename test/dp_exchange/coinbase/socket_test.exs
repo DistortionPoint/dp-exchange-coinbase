@@ -18,7 +18,11 @@ defmodule DpExchange.Coinbase.SocketTest do
       last_seq: nil,
       stale_run: nil,
       last_frame_at: nil,
-      silence_check: nil
+      silence_check: nil,
+      # A session that has been up a minute: its drop is the healthy blip, so the tests
+      # that call `handle_disconnect/2` with this state describe an ordinary reconnect.
+      connected_at: System.monotonic_time(:millisecond) - 60_000,
+      short_sessions: 0
     }
   end
 
@@ -1080,7 +1084,8 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert {:reconnect, after_disconnect} = Socket.handle_disconnect(%{reason: :closed}, s)
       # Nothing to wipe means nothing changes: nothing beyond `:delivering` (kept
       # deliberately, per the moduledoc) is even present to compare.
-      assert after_disconnect == s
+      # (`:connected_at` is reconnect-backoff bookkeeping, not data.)
+      assert Map.drop(after_disconnect, [:connected_at]) == Map.drop(s, [:connected_at])
       refute Map.has_key?(after_disconnect, :books)
     end
   end
@@ -1293,6 +1298,50 @@ defmodule DpExchange.Coinbase.SocketTest do
                Socket.handle_disconnect(%{reason: :closed, attempt_number: 3}, state())
 
       assert System.monotonic_time(:millisecond) - started >= 2_000
+    end
+
+    test "a session that connected and dropped at once is not a healthy blip" do
+      # websockex reports attempt 1 after every SUCCESSFUL connect, so a venue that accepts
+      # the upgrade and drops the socket a second later used to be reconnected at delay 0
+      # forever. A short session now counts toward the backoff.
+      just_connected = %{state() | connected_at: System.monotonic_time(:millisecond)}
+      started = System.monotonic_time(:millisecond)
+
+      assert {:reconnect, after_drop} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, just_connected)
+
+      assert System.monotonic_time(:millisecond) - started >= 1_000
+      assert after_drop.short_sessions == 1
+      assert after_drop.connected_at == nil
+    end
+
+    test "a stable session's drop clears the short-session run" do
+      assert {:reconnect, after_drop} =
+               Socket.handle_disconnect(
+                 %{reason: :closed, attempt_number: 1},
+                 %{state() | short_sessions: 3}
+               )
+
+      assert after_drop.short_sessions == 0
+    end
+
+    test "a failed connect neither adds to nor clears the short-session run" do
+      # attempt 2 plus a run of 1 is attempt 3: 2000ms.
+      started = System.monotonic_time(:millisecond)
+
+      assert {:reconnect, after_fail} =
+               Socket.handle_disconnect(
+                 %{reason: :closed, attempt_number: 2},
+                 %{state() | connected_at: nil, short_sessions: 1}
+               )
+
+      assert System.monotonic_time(:millisecond) - started >= 2_000
+      assert after_fail.short_sessions == 1
+    end
+
+    test "handle_connect/2 stamps the session start" do
+      assert {:ok, connected} = Socket.handle_connect(nil, %{state() | connected_at: nil})
+      assert is_integer(connected.connected_at)
     end
   end
 end

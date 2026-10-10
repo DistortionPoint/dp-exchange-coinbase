@@ -55,7 +55,7 @@ defmodule DpExchange.Coinbase.Auth do
   def rest_headers(method, path, _body, credentials) do
     uri = "#{method |> to_string() |> String.upcase()} api.coinbase.com#{path}"
 
-    with {:ok, token} <- jwt(credentials, uris: [uri]) do
+    with {:ok, token} <- jwt(credentials, uri: uri) do
       {:ok, [{"Authorization", "Bearer #{token}"}, {"Content-Type", "application/json"}]}
     end
   end
@@ -63,12 +63,25 @@ defmodule DpExchange.Coinbase.Auth do
   @doc """
   Builds a signed CDP JWT.
 
-  ## `:uris`
+  ## The claim set is the one Coinbase documents
 
-  Scopes the token to specific REST calls, per Coinbase's documentation. **The WebSocket
-  token omits it** — a socket is not one request — so the claim is included only when
-  given rather than defaulted to something plausible. Defaulting it would produce a token
-  that looks right and is rejected.
+  `sub` and `kid` are the key name, `iss` is `"cdp"`, `nbf`/`exp` bound the window, and a
+  REST token carries one `uri` string (`"GET api.coinbase.com/api/v3/..."`). Taken from
+  Coinbase's "API Key Authentication" page (read 2026-10-10, quoted in
+  `docs/reference/coinbase/jwt-auth.md`): every sample but one builds exactly this, with no
+  `aud`. Documentation-derived, **not yet probed with a live key** — tier 3 needs
+  credentials this repo never holds.
+
+  This built the older Coinbase Cloud shape until 2026-10-10: `iss: "coinbase-cloud"`, an
+  `aud: ["retail_rest_api_proxy"]`, and the scope as a `uris` LIST. The documented claim is
+  the singular `uri`, so a REST token named its scope under a key the venue's own builder
+  never writes — a token that looks scoped and, by the documentation, is not.
+
+  ## `:uri`
+
+  Scopes the token to one REST call. **The WebSocket token omits it** — a socket is not one
+  request — so the claim is included only when given rather than defaulted to something
+  plausible. Defaulting it would produce a token that looks right and is rejected.
 
   ## The two-minute expiry is deliberate
 
@@ -111,13 +124,12 @@ defmodule DpExchange.Coinbase.Auth do
     claims =
       %{
         "sub" => api_key,
-        "iss" => "coinbase-cloud",
-        "aud" => ["retail_rest_api_proxy"],
+        "iss" => "cdp",
         "nbf" => now,
         # 120s — Coinbase's own documented default, see this function's own @doc.
         "exp" => now + 120
       }
-      |> maybe_put_uris(Keyword.get(opts, :uris))
+      |> maybe_put_uri(Keyword.get(opts, :uri))
       |> Jason.encode!()
       |> Base.url_encode64(padding: false)
 
@@ -135,8 +147,8 @@ defmodule DpExchange.Coinbase.Auth do
 
   def jwt(_credentials, _opts), do: {:error, {:missing_credentials, :coinbase}}
 
-  defp maybe_put_uris(claims, nil), do: claims
-  defp maybe_put_uris(claims, uris), do: Map.put(claims, "uris", uris)
+  defp maybe_put_uri(claims, nil), do: claims
+  defp maybe_put_uri(claims, uri) when is_binary(uri), do: Map.put(claims, "uri", uri)
 
   # The raw 32-byte Ed25519 seed. Coinbase issues both a 32-byte seed and a 64-byte
   # seed-plus-public-key; the second is the seed followed by the public key, so the

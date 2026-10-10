@@ -145,6 +145,23 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       assert path == "/v1/portfolios/pf-1/wallets/w-9/staking/claim_rewards"
     end
 
+    test "claiming rewards refuses an amount it cannot send, instead of raising or sending it" do
+      me = self()
+
+      for bad <- [1.5, 3, "1", Decimal.new("0"), Decimal.new("-1"), Decimal.new("NaN")] do
+        assert {:error, {:invalid_amount, _amount}} =
+                 Prime.claim_rewards(@credentials, "pf-1", "w-9", opts(me, amount: bad))
+      end
+
+      refute_received {:request, _method, _path, _raw, _headers}
+
+      good = opts(me, amount: Decimal.new("2"))
+      assert {:ok, _result} = Prime.claim_rewards(@credentials, "pf-1", "w-9", good)
+
+      assert_receive {:request, "POST", _path, raw, _headers}
+      assert Jason.decode!(raw)["inputs"] == %{"amount" => "2"}
+    end
+
     test "the validator query is a POST that reads" do
       me = self()
 

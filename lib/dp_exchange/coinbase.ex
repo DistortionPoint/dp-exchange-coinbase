@@ -349,7 +349,7 @@ defmodule DpExchange.Coinbase do
           "published by the vendor at all — all 84 Advanced Trade documentation pages were " <>
           "fetched and searched 2026-09-09 and only the WebSocket page carries a limit " <>
           "(8 connections/sec/IP); the REST ceilings remain inherited from the prior " <>
-          "confirmed against Coinbase documentation — inherited from the prior adapter. " <>
+          "adapter and are not confirmed against Coinbase documentation. " <>
           "has_staking is NOT measured live — this repo holds no Prime credential — and " <>
           "rests on api.prime.coinbase.com's own published paths, deduplicated " <>
           "2026-08-31 from thirteen documentation pages to the nine endpoints " <>
@@ -882,9 +882,10 @@ defmodule DpExchange.Coinbase do
   The validators a Prime staking transaction would touch, across a **portfolio** —
   see `DpExchange.Coinbase.Prime.query_transaction_validators/3`.
 
-  A read, despite Prime taking the query as a POST body. `opts[:query]` is the venue's
-  own filter map and is sent as given — reshaping a vocabulary only Prime defines would
-  be a second place to be wrong about it.
+  A read, despite Prime taking the query as a POST body. `opts[:transaction_ids]` is
+  required (absent or empty is `{:error, :missing_transaction_ids}`). `opts[:extra]` is the
+  venue's other filter fields (`cursor`, `limit`, `sort_direction`), merged in as given —
+  reshaping a vocabulary only Prime defines would be a second place to be wrong about it.
   """
   @spec query_transaction_validators(Prime.credentials(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}

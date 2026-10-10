@@ -81,6 +81,10 @@ defmodule DpExchange.Coinbase.Credentials do
   @spec wrap(map() | nil) :: t() | nil
   def wrap(nil), do: nil
   def wrap(%__MODULE__{} = credentials), do: credentials
+  # `%{}` names no credential. Struct-ified it became a non-`nil` pair of `nil`s, so the
+  # "no credentials" branches (`level2` sent without a JWT, the public rate ceiling) did not
+  # fire and `level2` was refused `{:missing_credentials, :coinbase}` on every subscribe.
+  def wrap(credentials) when credentials == %{}, do: nil
   def wrap(credentials) when is_map(credentials), do: struct(__MODULE__, credentials)
 
   @doc """

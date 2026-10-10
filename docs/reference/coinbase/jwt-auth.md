@@ -23,3 +23,21 @@ requests — this package's own choice to use the venue's stated default is a re
 (a short-lived, unmemoised token is the safer failure mode — see `Auth`'s moduledoc "The
 two-minute expiry is deliberate" section), not a claim that a longer value would be
 rejected.
+
+## The claim set — read 2026-10-10
+
+**Source**: Coinbase's "API Key Authentication" page,
+`https://docs.cdp.coinbase.com/coinbase-app/authentication-authorization/api-key-authentication`,
+read 2026-10-10 through a fetch-and-summarise tool (not a raw copy). What the page's code
+samples build, as quoted from it:
+
+- Header: `kid` = the key name, `nonce` = a fresh random hex string (`secrets.token_hex()`).
+- Payload (Python sample): `'sub': key_name`, `'iss': "cdp"`, `'nbf': int(time.time())`,
+  `'exp': int(time.time()) + 120`, `'uri': uri`.
+- `uri` is one string, built as `f"{request_method} {request_host}{request_path}"`. The
+  page never uses `uris`.
+- No sample includes an `aud` claim.
+- `iss` is `"cdp"` in the Python, JavaScript, PHP, Java, TypeScript, Go and C++ samples. The
+  C# sample alone still uses `"coinbase-cloud"`. The page does not say which is required.
+
+`Auth.jwt/2` builds this set. **Not yet probed with a live key** (tier 3).
