@@ -452,6 +452,24 @@ defmodule DpExchange.Coinbase.SocketTest do
                          message: "too many L2 streams requested in a single session"
                        }}
     end
+
+    test "any other venue error is degraded, not a credential problem" do
+      # Everything that was not "too many" became `:credentials_rejected`, so a bad product
+      # id on the public `ticker` channel told the host to rotate a key never involved.
+      assert {:ok, _state} =
+               frame(%{
+                 "type" => "error",
+                 "message" => "Failed to subscribe: invalid product_ids"
+               })
+
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :degraded}}
+      refute_received {:dp_exchange, :coinbase, %Notice{kind: :credentials_rejected}}
+    end
+
+    test "an error whose message is not a string is reported, and does not crash the socket" do
+      assert {:ok, _state} = frame(%{"type" => "error", "message" => %{"code" => 7}})
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :degraded}}
+    end
   end
 
   describe "subscription messages" do

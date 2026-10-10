@@ -54,15 +54,18 @@ defmodule DpExchange.Coinbase.MarketTradesTest do
       assert_received {:dp_exchange, :coinbase, %Types.Trade{} = first}
       assert_received {:dp_exchange, :coinbase, %Types.Trade{} = second}
 
-      assert first.id == "1101555350"
+      # Oldest first, by the trade's own time. The venue lists the frame newest first, and
+      # delivering in that order made the last print a consumer saw the oldest one.
+      assert first.id == "1101555349"
       assert first.symbol == "BTC-USD"
-      assert Decimal.equal?(first.price, Decimal.new("85701.9"))
-      assert Decimal.equal?(first.quantity, Decimal.new("0.09334681"))
+      assert Decimal.equal?(first.price, Decimal.new("85709"))
+      assert Decimal.equal?(first.quantity, Decimal.new("0.000013"))
       # The trade's own `time`, not the envelope's send time.
-      assert first.timestamp == ~U[2026-10-02 14:54:03.341087Z]
+      assert first.timestamp == ~U[2026-10-02 14:54:03.336865Z]
       assert first.provider == :coinbase
       assert first.broken == false
-      assert second.id == "1101555349"
+      assert second.id == "1101555350"
+      assert DateTime.compare(first.timestamp, second.timestamp) == :lt
       assert MapSet.member?(state.delivering, "BTC-USD")
     end
 

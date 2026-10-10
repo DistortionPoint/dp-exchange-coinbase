@@ -1245,6 +1245,13 @@ defmodule DpExchange.Coinbase.Feed do
   # on every re-issue tick, so there is no shared-budget arithmetic to repeat.
   @max_alias_map_retries 2
 
+  # **The catalogue is re-read hourly, and after giving up.** It was read once, at the
+  # first subscribe. A product listed after that (`XYZ-USDC`, delivered by the venue as
+  # `XYZ-USD`) was in no map, so every frame for it was dropped as unwanted, with no notice.
+  # And a fetch that gave up left aliasing off until the tree restarted. One hour is chosen,
+  # not measured: listings are rare, and the read costs one public request.
+  @alias_map_refresh_ms 3_600_000
+
   # How long the alias-catalogue fetch may run before this feed stops waiting for it.
   #
   # Without a bound, a source that never answers wedges the fetch permanently: `state
@@ -1311,13 +1318,11 @@ defmodule DpExchange.Coinbase.Feed do
   def shards([]), do: []
   def shards(symbols), do: Enum.chunk_every(symbols, @pairs_per_socket)
 
-  # `level2`'s own grouping — never exposed, for the same reason `shards/1` documents
-  # itself as `ticker`-only above: this module's whole point is that a consumer cannot
-  # tell how data arrives, and per-channel shard sizes are exactly that. `size` is
-  # `state.level2_pairs_per_socket` at every call site — the caller-supplied or default
-  # value, already validated in `init/1`.
-  defp level2_shards([], _size), do: []
-  defp level2_shards(symbols, size), do: Enum.chunk_every(symbols, size)
+  # `level2`'s own grouping is never exposed, for the same reason `shards/1` documents itself
+  # as `ticker`-only above: this module's whole point is that a consumer cannot tell how data
+  # arrives, and per-channel shard sizes are exactly that. Its size is
+  # `state.level2_pairs_per_socket` — the caller-supplied or default value, already validated
+  # in `init/1` — and the placement is `planned_shards/3`'s.
 
   # Which channels this feed carries at all: what the caller asked for, narrowed by what its
   # credentials allow.
@@ -1365,10 +1370,8 @@ defmodule DpExchange.Coinbase.Feed do
   # `level2_pairs_per_socket` is unused for `ticker`, which has no per-channel size of
   # its own to read from state (see the moduledoc's "ticker gets no equivalent option"
   # paragraph).
-  defp shards_for(symbols, "ticker", _level2_pairs_per_socket), do: shards(symbols)
-
-  defp shards_for(symbols, "level2", level2_pairs_per_socket),
-    do: level2_shards(symbols, level2_pairs_per_socket)
+  defp shard_size("ticker", _level2_pairs_per_socket), do: @pairs_per_socket
+  defp shard_size("level2", level2_pairs_per_socket), do: level2_pairs_per_socket
 
   # `market_trades` shares `ticker`'s grouping. NOT measured: no per-session product
   # ceiling for this channel is published (at-async.json's `market_trades` section names
@@ -1376,7 +1379,50 @@ defmodule DpExchange.Coinbase.Feed do
   # `ticker`, the public channel with no known ceiling, rather than with `level2`'s
   # measured-for-a-different-channel 30. A refusal would surface as a venue `error` frame
   # the way a `level2` one does — see the moduledoc's "`:trades` is opt-in" section.
-  defp shards_for(symbols, "market_trades", _level2_pairs_per_socket), do: shards(symbols)
+  defp shard_size("market_trades", _level2_pairs_per_socket), do: @pairs_per_socket
+
+  # **Sticky placement, not position in a list.** Shards were the wanted set chunked in
+  # `MapSet.to_list/1` order, so one added symbol shifted every later chunk boundary by one:
+  # nearly every `ticker` and `level2` shard unsubscribed a symbol and subscribed another,
+  # and each `level2` change re-sent a snapshot. Now a shard keeps the still-wanted symbols it
+  # already carries, new symbols (sorted, so the plan is deterministic) fill gaps in index
+  # order, and only what does not fit opens new shards past the last. A shard left empty
+  # drops out, and `reshard/1`'s vanishing-key path unsubscribes it.
+  defp planned_shards(state, channel, wanted_list) do
+    size = shard_size(channel, state.level2_pairs_per_socket)
+    wanted = MapSet.new(wanted_list)
+
+    kept =
+      for {{^channel, index}, %{symbols: symbols}} <- state.shards, into: %{} do
+        {index, Enum.filter(symbols, &MapSet.member?(wanted, &1))}
+      end
+
+    placed = kept |> Map.values() |> Enum.concat() |> MapSet.new()
+    fresh = wanted_list |> Enum.reject(&MapSet.member?(placed, &1)) |> Enum.sort()
+
+    {filled, left} =
+      kept
+      |> Enum.sort_by(fn {index, _symbols} -> index end)
+      |> Enum.map_reduce(fresh, fn {index, symbols}, remaining ->
+        {added, rest} = Enum.split(remaining, max(size - length(symbols), 0))
+        {{index, symbols ++ added}, rest}
+      end)
+
+    next = Enum.max(Map.keys(kept), fn -> -1 end) + 1
+
+    overflow =
+      left
+      |> chunk_overflow(channel, size)
+      |> Enum.with_index(next)
+      |> Enum.map(fn {symbols, index} -> {index, symbols} end)
+
+    Enum.reject(filled ++ overflow, fn {_index, symbols} -> symbols == [] end)
+  end
+
+  # `ticker` and `market_trades` overflow is `shards/1`, the public statement of that
+  # grouping; `level2` is chunked at its own configured size.
+  defp chunk_overflow(symbols, "level2", size), do: Enum.chunk_every(symbols, size)
+  defp chunk_overflow(symbols, _ticker_sized, _size), do: shards(symbols)
 
   # `ticker` sorts ahead of `level2` wherever shard keys are ordered, so a call touching
   # both keeps its synchronous reply — and the front of any stagger sequence — on `ticker`,
@@ -1711,6 +1757,8 @@ defmodule DpExchange.Coinbase.Feed do
        # proving the timeout fires need not wait out thirty real seconds.
        alias_map_fetch_timeout_ms:
          Keyword.get(opts, :alias_map_fetch_timeout_ms) || @alias_map_fetch_timeout_ms,
+       # See `@alias_map_refresh_ms`.
+       alias_map_refresh_ms: Keyword.get(opts, :alias_map_refresh_ms) || @alias_map_refresh_ms,
        # The venue's own declared alias relationships — see the moduledoc's "the venue
        # rewrites an aliased product id on delivery" section. `%{}` until fetched (or
        # forever, if every retry is exhausted), which is deliberately indistinguishable
@@ -2011,6 +2059,11 @@ defmodule DpExchange.Coinbase.Feed do
     attempt_alias_map_fetch(1, state)
   end
 
+  # See `@alias_map_refresh_ms`. The map in hand stays in force while the refresh runs.
+  def handle_info(:refresh_alias_map, state) do
+    attempt_alias_map_fetch(1, state)
+  end
+
   # The retry this module schedules on a transient failure — see the moduledoc's "the
   # fetch has to wait, not fail" and "classified and retried" sections. `attempt` starts
   # at `2` here; the first attempt is always the bare `:fetch_alias_map` clause above,
@@ -2272,10 +2325,9 @@ defmodule DpExchange.Coinbase.Feed do
     state
     |> active_channels()
     |> Enum.flat_map(fn channel ->
-      wanted_list
-      |> shards_for(channel, state.level2_pairs_per_socket)
-      |> Enum.with_index()
-      |> Enum.map(fn {symbols, index} -> {{channel, index}, symbols} end)
+      state
+      |> planned_shards(channel, wanted_list)
+      |> Enum.map(fn {index, symbols} -> {{channel, index}, symbols} end)
     end)
     |> Enum.reject(fn {key, _symbols} -> key in existing end)
     |> Enum.sort_by(fn {key, _symbols} -> key end, &shard_key_order/2)
@@ -2325,10 +2377,9 @@ defmodule DpExchange.Coinbase.Feed do
       state
       |> active_channels()
       |> Enum.flat_map(fn channel ->
-        wanted_list
-        |> shards_for(channel, state.level2_pairs_per_socket)
-        |> Enum.with_index()
-        |> Enum.map(fn {symbols, index} -> {{channel, index}, symbols} end)
+        state
+        |> planned_shards(channel, wanted_list)
+        |> Enum.map(fn {index, symbols} -> {{channel, index}, symbols} end)
       end)
       |> Map.new()
 
@@ -3156,6 +3207,7 @@ defmodule DpExchange.Coinbase.Feed do
   # The fetch answered. Identical classification to the synchronous version this replaced —
   # only the moment it runs changed.
   defp apply_alias_map_result({:ok, map}, _attempt, state) when is_map(map) do
+    schedule_alias_map_refresh(state)
     {:noreply, %{state | alias_map: map, alias_map_status: :ok, alias_map_failure_reason: nil}}
   end
 
@@ -3229,12 +3281,30 @@ defmodule DpExchange.Coinbase.Feed do
     end
   end
 
+  # A refresh that fails keeps the map it already had: it was right an hour ago, and an
+  # empty one would switch attribution off for every aliased product at once.
+  defp give_up_on_alias_map(%{alias_map_status: :ok} = state, reason) do
+    Logger.warning(
+      "[Coinbase Feed] alias catalogue refresh failed (#{inspect(reason)}) — keeping the " <>
+        "map already loaded; next refresh in #{state.alias_map_refresh_ms}ms"
+    )
+
+    schedule_alias_map_refresh(state)
+    {:noreply, state}
+  end
+
   defp give_up_on_alias_map(state, reason) do
-    notify_degraded_attribution(state, reason)
+    # Once per outage: an hourly retry that fails again changes nothing a subscriber has
+    # not already been told.
+    if state.alias_map_status != :unavailable, do: notify_degraded_attribution(state, reason)
+    schedule_alias_map_refresh(state)
 
     {:noreply,
      %{state | alias_map: %{}, alias_map_status: :unavailable, alias_map_failure_reason: reason}}
   end
+
+  defp schedule_alias_map_refresh(state),
+    do: Process.send_after(self(), :refresh_alias_map, state.alias_map_refresh_ms)
 
   # See the moduledoc's "the venue rewrites an aliased product id on delivery" section.
   # `delivered` is whatever the venue actually tagged this frame with; `equivalent` is its

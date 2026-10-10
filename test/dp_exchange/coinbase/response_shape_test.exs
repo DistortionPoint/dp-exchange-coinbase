@@ -131,6 +131,28 @@ defmodule DpExchange.Coinbase.ResponseShapeTest do
       end
     end
 
+    test "an order book level this package cannot read refuses the book" do
+      # A `""` price became `{nil, size}` and raised in the sort; a row missing `size` was
+      # silently skipped, a hole in a book whose other levels were real.
+      book = fn bids ->
+        %{
+          "pricebook" => %{
+            "product_id" => "BTC-USD",
+            "time" => "2026-10-02T14:54:03.341087Z",
+            "bids" => bids,
+            "asks" => [%{"price" => "101", "size" => "1"}]
+          }
+        }
+      end
+
+      for bids <- [[%{"price" => "", "size" => "1"}], [%{"price" => "100"}]] do
+        assert {:error, :unexpected_response_shape} ==
+                 answers_without_raising("get_order_book", fn ->
+                   Rest.get_order_book("BTC-USD", opts(book.(bids)))
+                 end)
+      end
+    end
+
     test "a catalogue row naming no product is skipped, not raised on" do
       # One malformed row among hundreds used to take the whole catalogue with it.
       named = %{"product_id" => "BTC-USD", "alias" => "BTC-USDC"}

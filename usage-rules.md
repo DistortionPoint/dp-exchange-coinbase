@@ -312,8 +312,9 @@ If you route order-book depth over REST, or simply do not read books, say so at 
 children = [{DpExchange.Coinbase, credentials: creds, channels: [:quotes]}]
 ```
 
-The vocabulary is `capabilities().streamable`'s data kinds — `:quotes` and `:order_book` —
-not this venue's channel names. Omit the option and you get both, exactly as before.
+The vocabulary is `capabilities().streamable`'s data kinds — `:quotes`, `:order_book` and
+`:trades` — not this venue's channel names. Omit the option and you get `:quotes` and
+`:order_book`, exactly as before; `:trades` is opt-in.
 
 **What it saves is not small.** `level2` shards at 30 pairs per socket, so a 406-pair scope
 opens **14 `level2` sockets** on top of its 5 `ticker` shards. A consumer reading only

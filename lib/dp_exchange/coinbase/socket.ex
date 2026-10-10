@@ -672,7 +672,7 @@ defmodule DpExchange.Coinbase.Socket do
   defp dispatch(%{"channel" => channel, "events" => _events}, state)
        when channel in @unsubscribed_data_channels do
     # Recognised, and not delivered. This package declares `streamable: [:quotes,
-    # :order_book]`, so these channels are never subscribed — arriving means the venue
+    # :order_book, :trades]`, so these channels are never subscribed — arriving means the venue
     # sent something this package did not ask for, which is worth noticing rather than
     # silently dropping.
     notify(
@@ -686,8 +686,15 @@ defmodule DpExchange.Coinbase.Socket do
     state
   end
 
-  defp dispatch(%{"type" => "error", "message" => message}, state) do
+  defp dispatch(%{"type" => "error", "message" => message}, state) when is_binary(message) do
     notify(state, Notice.new(error_kind(message), :coinbase, message: message))
+    state
+  end
+
+  # A non-string `message` made `String.downcase/1` raise inside `handle_frame`, and that
+  # took the whole connection down. It is still the venue reporting an error.
+  defp dispatch(%{"type" => "error"} = frame, state) do
+    notify(state, Notice.new(:degraded, :coinbase, details: %{venue_error: inspect(frame)}))
     state
   end
 
@@ -702,10 +709,24 @@ defmodule DpExchange.Coinbase.Socket do
   # issue #22, where "too many L2 streams requested in a single session" surfaced only
   # once the consumer wired `subscribe_notices/1` and still read as an auth error until
   # traced. `:rate_limited` is Core's own kind for exactly this: pressure, not identity.
+  #
+  # **Only an authentication failure is `:credentials_rejected`.** Everything else fell
+  # through to it, so a bad `product_ids` entry or a malformed subscribe on the public
+  # `ticker` channel told the host to rotate a key that was never involved. Anything that is
+  # neither pressure nor authentication is `:degraded`, carrying the venue's own text.
   defp error_kind(message) do
-    if String.contains?(String.downcase(message), "too many"),
-      do: :rate_limited,
-      else: :credentials_rejected
+    lowered = String.downcase(message)
+
+    cond do
+      String.contains?(lowered, "too many") ->
+        :rate_limited
+
+      String.contains?(lowered, ["authentication", "unauthorized", "jwt"]) ->
+        :credentials_rejected
+
+      true ->
+        :degraded
+    end
   end
 
   # `is_binary/1` on `product_id` here and in `decode_book_event/2`: `SymbolFormat` raises
@@ -767,9 +788,29 @@ defmodule DpExchange.Coinbase.Socket do
   # carries, so a reconnect cannot double count. Only `update` is delivered.
   defp decode_trade_event(%{"type" => "snapshot"}, state), do: state
 
+  # **Delivered oldest first, by the trade's own time.** The venue lists a frame's prints
+  # newest first (`market_trades_update.json`: 1101555350 before 1101555349), so the last
+  # print a consumer received was the OLDEST, and the stream disagreed with `get_trades/2`,
+  # which returns oldest first. A stable sort, so prints sharing a timestamp keep the venue's
+  # relative order, and no assumption about the venue's order is built in.
   defp decode_trade_event(%{"type" => "update", "trades" => trades}, state)
-       when is_list(trades),
-       do: Enum.reduce(trades, state, &deliver_trade(&1, &2))
+       when is_list(trades) do
+    {built, state} =
+      Enum.reduce(trades, {[], state}, fn trade, {acc, state} ->
+        case build_trade(trade) do
+          {:ok, %Types.Trade{} = built} ->
+            {[built | acc], state}
+
+          {:error, reason} ->
+            {acc, report_quality(state, :market_trades, trade_subject(trade), reason)}
+        end
+      end)
+
+    built
+    |> Enum.reverse()
+    |> Enum.sort_by(& &1.timestamp, DateTime)
+    |> Enum.reduce(state, &deliver_trade/2)
+  end
 
   # An event that is neither, or an `update` whose `trades` is absent or `null`, is a
   # shape this module does not know. Reported rather than dropped: silence here reads as
@@ -777,15 +818,9 @@ defmodule DpExchange.Coinbase.Socket do
   defp decode_trade_event(event, state),
     do: report_quality(state, :market_trades, inspect(event), :unexpected_event)
 
-  defp deliver_trade(trade, state) do
-    case build_trade(trade) do
-      {:ok, %Types.Trade{} = built} ->
-        send(state.subscriber, {:dp_exchange, :coinbase, built})
-        %{state | delivering: MapSet.put(state.delivering, built.symbol)}
-
-      {:error, reason} ->
-        report_quality(state, :market_trades, trade_subject(trade), reason)
-    end
+  defp deliver_trade(%Types.Trade{} = built, state) do
+    send(state.subscriber, {:dp_exchange, :coinbase, built})
+    %{state | delivering: MapSet.put(state.delivering, built.symbol)}
   end
 
   defp trade_subject(%{"product_id" => product}) when is_binary(product), do: product

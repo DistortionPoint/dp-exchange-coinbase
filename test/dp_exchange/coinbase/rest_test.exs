@@ -710,13 +710,24 @@ defmodule DpExchange.Coinbase.RestTest do
     test "a caller giving no range gets a window inside the venue's boundary" do
       # 300 candles rather than 350: the caller did not ask for a specific window, so the
       # package picks one that cannot be refused rather than one that sits on the edge.
+      test_pid = self()
+
       plug = fn conn ->
-        assert conn.query_string =~ "granularity=ONE_HOUR"
+        send(test_pid, {:query, URI.decode_query(conn.query_string)})
         Req.Test.json(conn, %{"candles" => []})
       end
 
       assert {:ok, []} =
                Rest.get_historical_prices("BTC-USD", "1h", [], plug: plug, retry_attempts: 0)
+
+      # The window itself, which is what this test is named for: 300 one-hour bars ending
+      # now. It asserted only the granularity, so any window at all passed.
+      assert_received {:query, %{"granularity" => "ONE_HOUR"} = query}
+      finish = String.to_integer(query["end"])
+      start = String.to_integer(query["start"])
+
+      assert finish - start == 300 * 3_600
+      assert abs(finish - System.os_time(:second)) <= 5
     end
   end
 

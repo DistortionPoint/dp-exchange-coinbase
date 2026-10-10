@@ -327,27 +327,21 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                       }}
     end
 
-    test "a base quantity wins when both are given, and is sent as base_size" do
+    test "both a base quantity and a quote size is refused before anything is sent" do
+      # This used to be "a base quantity wins". Two sizes describe two different orders,
+      # and choosing one spent money on an order the caller did not describe (2026-10-10).
       me = self()
 
       plug = fn conn ->
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        send(me, {:sent, Jason.decode!(body)})
-
-        conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(accepted()))
+        send(me, :sent)
+        conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.resp(200, "{}")
       end
 
       request =
         limit_request(%{order_type: :market, time_in_force: :ioc, quote_size: Decimal.new("100")})
 
-      assert {:ok, _order} = place(request, plug)
-
-      assert_receive {:sent, %{"order_configuration" => %{"market_market_ioc" => leaf}}}
-
-      assert leaf["base_size"] == "0.5"
-      refute Map.has_key?(leaf, "quote_size")
+      assert {:error, :ambiguous_order_size} = place(request, plug)
+      refute_received :sent
     end
   end
 

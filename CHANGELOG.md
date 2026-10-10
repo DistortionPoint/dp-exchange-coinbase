@@ -20,6 +20,41 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The alias catalogue was read once and never again.** A product listed after the first
+  subscribe was in no map, so every frame the venue delivered for it under its alias was dropped
+  as unwanted. A fetch that gave up left aliasing off until restart. The catalogue is now
+  re-read hourly (`:alias_map_refresh_ms`), including after giving up. A refresh that fails
+  keeps the map already loaded, and the degraded notice fires once per outage.
+- **`get_order_book/2` raised on a `""` price and skipped a row missing `price` or `size`.**
+  Any unreadable level now refuses the book with `{:error, :unexpected_response_shape}`.
+- **Every venue `error` frame that was not "too many" became `:credentials_rejected`.** A bad
+  product id on the public `ticker` channel told the host to rotate a key. Only an
+  authentication failure is `:credentials_rejected` now, and anything else is `:degraded`. A
+  non-string `message` no longer crashes the socket.
+- **A market order with both `quantity` and `quote_size` sent `quantity` and dropped the
+  other.** It is now `{:error, :ambiguous_order_size}`.
+- **`market_trades` prints were delivered newest first within a frame**, so the last print a
+  consumer saw was the oldest, and the stream disagreed with `get_trades/2`. They are now
+  delivered oldest first, by the trade's own time, using a stable sort.
+- **One added symbol reshuffled every shard.** Shards were the wanted set chunked by position.
+  Placement is now sticky: a shard keeps the symbols it carries, new symbols fill gaps, and
+  only the overflow opens new shards.
+- **`Prime` classified a refusal by matching `(404)` anywhere in the message.** A 5xx whose
+  body quoted it came back as a permanent `{:refused, _}`. The match is now anchored to the
+  message Core builds.
+- Two tests that could not fail now assert what they name. One slept and checked
+  `Process.alive?`, and now traces the feed's own `:resubscribe` ticks. The other checked only
+  the granularity, and now checks the default 300-bar window.
+
+### Documentation
+
+- `Rest`'s moduledoc said the authenticated candles path still 401s. Since 2026-09-01 a
+  credentialed caller reads it, and the July incident is now recorded as history. That path
+  has not been probed since.
+- `usage-rules.md` and a `Socket` comment listed `streamable` without `:trades`.
+
 ## [0.3.88] - 2026-10-08
 
 ### Fixed

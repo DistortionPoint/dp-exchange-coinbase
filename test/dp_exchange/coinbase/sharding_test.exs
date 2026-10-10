@@ -1320,8 +1320,13 @@ defmodule DpExchange.Coinbase.ShardingTest do
       refute_receive {:DOWN, ^ref, :process, ^old_socket, _reason}, 200
       assert Process.alive?(old_socket)
 
-      assert %{{"level2", 0} => %{socket: ^old_socket, symbols: ^target}} =
+      # The same symbols, compared as a set: placement is sticky now (2026-10-10), so the 25
+      # the shard already carried keep their places and the 5 it gains are appended, rather
+      # than the shard being re-cut by list position.
+      assert %{{"level2", 0} => %{socket: ^old_socket, symbols: symbols}} =
                Map.take(:sys.get_state(feed).shards, [{"level2", 0}])
+
+      assert Enum.sort(symbols) == Enum.sort(target)
     end
 
     test "a shard that only LOSES symbols keeps mutating its existing socket" do

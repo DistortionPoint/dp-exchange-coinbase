@@ -15,10 +15,15 @@ defmodule DpExchange.Coinbase.Rest do
   price-collection task did not pass credentials, hit the authenticated path anyway, and
   produced **315 Unauthorized warnings overnight** on 2026-04-30.
 
-  ## Historical candles are public
+  ## Historical candles: public without a credential, authenticated with one
 
-  `/market/products/{id}/candles`, no auth. The authenticated variant `401`s on every
-  backfill call, which is what it did until 2026-07-02.
+  `/market/products/{id}/candles` needs no auth, and is what a caller without a credential
+  reads. Since 2026-09-01 a caller holding one reads `/products/{id}/candles` (see
+  `get_historical_prices/4`). History, kept because it is why the public path exists: until
+  2026-07-02 every credentialed backfill call `401`ed on the authenticated path. This
+  section said that still held until it was checked against the code on 2026-10-10. The
+  authenticated path has not been probed since, because doing so needs a credential this
+  repository never holds.
 
   ## This module cannot fabricate
 
@@ -2078,12 +2083,14 @@ defmodule DpExchange.Coinbase.Rest do
   # as empty; a side this package cannot read is refused.
   defp build_order_book(native, pricebook) do
     with {:ok, timestamp} <- parse_time(pricebook["time"]),
-         true <- is_list(pricebook["bids"]) and is_list(pricebook["asks"]) do
+         true <- is_list(pricebook["bids"]) and is_list(pricebook["asks"]),
+         {:ok, bids} <- levels(pricebook["bids"]),
+         {:ok, asks} <- levels(pricebook["asks"]) do
       {:ok,
        %Types.OrderBook{
          symbol: SymbolFormat.to_canonical_symbol(native),
-         bids: pricebook["bids"] |> levels() |> sorted(:desc),
-         asks: pricebook["asks"] |> levels() |> sorted(:asc),
+         bids: sorted(bids, :desc),
+         asks: sorted(asks, :asc),
          venue_time: timestamp,
          observed_at: DateTime.utc_now(),
          # The venue publishes no sequence number on this endpoint. `nil` means it did not
@@ -2097,8 +2104,26 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  defp levels(rows) when is_list(rows) do
-    for %{"price" => price, "size" => size} <- rows, do: {decimal(price), decimal(size)}
+  # **Every row readable, or no book.** The comprehension's pattern silently skipped a row
+  # missing `price` or `size`, a hole in the book with every other level real. And a
+  # `"price": ""` (this venue sends `""` for absent values) became `{nil, size}`, which then
+  # raised inside `sorted/2`'s `Decimal.compare/2` in the caller's process.
+  defp levels(rows) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn
+      %{"price" => price, "size" => size}, {:ok, acc} ->
+        case {decimal(price), decimal(size)} do
+          {%Decimal{} = p, %Decimal{} = s} -> {:cont, {:ok, [{p, s} | acc]}}
+          _unreadable -> {:halt, {:error, :unexpected_response_shape}}
+        end
+
+      _not_a_level, _acc ->
+        {:halt, {:error, :unexpected_response_shape}}
+    end)
+    |> case do
+      {:ok, levels} -> {:ok, Enum.reverse(levels)}
+      error -> error
+    end
   end
 
   # Best price first, because `Core.Types.OrderBook` makes that part of the contract rather
@@ -2415,10 +2440,13 @@ defmodule DpExchange.Coinbase.Rest do
   # own schema names, and a caller asking for a field a leaf cannot carry is refused locally
   # rather than silently ignored.
   defp configuration_leaf(:market, _tif, request) do
+    # Both sizes is two different orders. `quantity` silently won, so "spend $100" with a
+    # `quantity: 5` beside it bought five units at whatever they cost. Refused, not chosen.
     case {Map.get(request, :quantity), Map.get(request, :quote_size)} do
       {nil, nil} -> {:error, :missing_order_size}
       {nil, quote_size} -> {:ok, %{"quote_size" => wire_number(quote_size)}}
-      {quantity, _quote_size} -> {:ok, %{"base_size" => wire_number(quantity)}}
+      {quantity, nil} -> {:ok, %{"base_size" => wire_number(quantity)}}
+      {_quantity, _quote_size} -> {:error, :ambiguous_order_size}
     end
   end
 

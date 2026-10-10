@@ -33,12 +33,13 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       assert :sys.get_state(pid).resubscribe_interval_ms == 40
 
-      # And it actually drives the timer: with no shards open the tick is a no-op, so the
-      # observable proof is that the process keeps ticking and stays healthy rather than
-      # scheduling once and stopping.
-      Process.sleep(150)
-      assert Process.alive?(pid)
-      assert :sys.get_state(pid).resubscribe_interval_ms == 40
+      # And it actually drives the timer: the feed receives its own `:resubscribe` tick.
+      # Sleeping and asserting `Process.alive?/1` passed for a timer that never fired,
+      # because with no shards open a tick changes nothing. 40 ms is below one re-issue
+      # window, so a re-armed tick is floored to it (`next_resubscribe_delay/1`); the wait
+      # here covers that floor.
+      :erlang.trace(pid, true, [:receive])
+      assert_receive {:trace, ^pid, :receive, :resubscribe}, 6_000
     end
 
     test "the default is 60s when the caller supplies nothing" do
@@ -953,6 +954,54 @@ defmodule DpExchange.Coinbase.FeedTest do
       # The entry already present — the same socket pid — is untouched.
       assert :sys.get_state(feed).shards ==
                %{{"ticker", 0} => %{socket: existing_socket, symbols: ["A-USD"]}}
+    end
+  end
+
+  describe "shard placement is sticky (2026-10-10)" do
+    # A socket stand-in that answers every send `:ok`, the way a healthy one does.
+    defp answering_socket do
+      pid =
+        spawn(fn ->
+          Stream.repeatedly(fn ->
+            receive do
+              {:"$websockex_send", from, _frame} -> :gen.reply(from, :ok)
+              _other -> :ok
+            end
+          end)
+          |> Stream.run()
+        end)
+
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      pid
+    end
+
+    test "a new symbol fills a gap in an existing shard and leaves the others untouched" do
+      # Shards were the wanted set chunked by list position, so one added symbol moved
+      # every later boundary and nearly every shard unsubscribed one symbol and subscribed
+      # another.
+      many = for n <- 1..99, do: "M#{String.pad_leading(Integer.to_string(n), 3, "0")}-USD"
+      feed = start_feed(channels: [:quotes])
+      # Made here, in the test process: `answering_socket/0` registers an `on_exit`, which
+      # `:sys.replace_state/2`'s function, running inside the feed, cannot.
+      first = answering_socket()
+      second = answering_socket()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | wanted: MapSet.new(["A-USD" | many]),
+            shards: %{
+              {"ticker", 0} => %{socket: first, symbols: many},
+              {"ticker", 1} => %{socket: second, symbols: ["A-USD"]}
+            }
+        }
+      end)
+
+      _reply = Feed.subscribe(feed, ["B-USD"])
+      shards = :sys.get_state(feed).shards
+
+      assert shards[{"ticker", 1}].symbols == ["A-USD"]
+      assert shards[{"ticker", 0}].symbols == many ++ ["B-USD"]
     end
   end
 

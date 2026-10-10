@@ -483,5 +483,8 @@ defmodule DpExchange.Coinbase.Prime do
 
   defp unwrap({:error, reason}), do: {:error, reason}
 
-  defp refusal?(message), do: Regex.match?(~r/\((?:400|401|403|404)\)/, message)
+  # Anchored to the start of the message Core builds (`"Client error (404): …"`). Unanchored,
+  # a 5xx or 429 whose quoted body contained `(404)` matched, and a retryable failure came
+  # back as a permanent `{:refused, _}`, the false positive `Rest`'s own docs record.
+  defp refusal?(message), do: Regex.match?(~r/\AClient error \((?:400|401|403|404)\)/, message)
 end
