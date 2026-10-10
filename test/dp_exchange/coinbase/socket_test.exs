@@ -242,6 +242,8 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality} = notice}
       assert notice.details.reason == :sequence_gap
       assert notice.details.dropped == 3
+      # The ticker before the gap delivered its product, so the notice names it as suspect.
+      assert notice.details.symbols == ["BTC-USD"]
       assert notice.severity == :warning
 
       for _each <- 1..2, do: assert_received({:dp_exchange, :coinbase, %Types.Quote{}})
@@ -610,6 +612,29 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert book.provider == :coinbase
     end
 
+    test "an event with an unreadable row is refused whole, never delivered without it" do
+      # A side neither `bid` nor `offer` used to be filed as an ask, and an unparseable row
+      # was dropped and the rest delivered: a book with a level silently missing.
+      [event] = @snapshot["events"]
+
+      sideways = %{
+        "event_time" => "2026-08-28T14:53:45.000000Z",
+        "side" => "sideways",
+        "price_level" => "1.00",
+        "new_quantity" => "9"
+      }
+
+      for kind <- ["snapshot", "update"] do
+        updates = event["updates"] ++ [sideways]
+        frame = %{@snapshot | "events" => [%{event | "type" => kind, "updates" => updates}]}
+
+        assert {:ok, _state} = Socket.handle_frame({:text, Jason.encode!(frame)}, state())
+        assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+        refute_received {:dp_exchange, :coinbase, %Types.OrderBook{}}
+        refute_received {:dp_exchange, :coinbase, %Types.OrderBookDelta{}}
+      end
+    end
+
     test "a snapshot's rows are sorted even when the venue sends them out of price order" do
       scrambled = %{
         "channel" => "l2_data",
@@ -807,7 +832,7 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert eth_book.bids == [{Decimal.new("10.00"), Decimal.new("5.0")}]
     end
 
-    test "an unparseable price or quantity is dropped from a snapshot AND reported, " <>
+    test "an unparseable price or quantity refuses the snapshot AND is reported, " <>
            "not swallowed" do
       # Every other decode failure in this module reports through `report_quality/2` —
       # `deliver_ticker/3` does too. This row used to be the one exception: the book
@@ -836,13 +861,12 @@ defmodule DpExchange.Coinbase.SocketTest do
 
       assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(bad_row)}, state())
 
-      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
-      assert book.bids == []
+      refute_received {:dp_exchange, :coinbase, %Types.OrderBook{}}
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
     end
 
-    test "an unparseable row in an update is dropped from the delta AND reported, " <>
-           "while a valid sibling row in the same frame still arrives" do
+    test "an unparseable row in an update refuses the whole delta, valid sibling included, " <>
+           "and is reported" do
       bad_row = %{
         "channel" => "l2_data",
         "timestamp" => "2026-08-28T14:53:45.649112Z",
@@ -870,8 +894,9 @@ defmodule DpExchange.Coinbase.SocketTest do
 
       assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(bad_row)}, state())
 
-      assert_received {:dp_exchange, :coinbase, %Types.OrderBookDelta{} = delta}
-      assert delta.levels == [{:ask, Decimal.new("101.00"), Decimal.new("0.5")}]
+      # Refused whole: the valid sibling is not delivered without the row beside it, which
+      # would leave whatever that row changed standing. See `decode_rows/2`, 2026-10-10.
+      refute_received {:dp_exchange, :coinbase, %Types.OrderBookDelta{}}
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
     end
 
@@ -896,8 +921,7 @@ defmodule DpExchange.Coinbase.SocketTest do
 
       assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(malformed_shape)}, state())
 
-      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
-      assert book.bids == []
+      refute_received {:dp_exchange, :coinbase, %Types.OrderBook{}}
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
     end
 

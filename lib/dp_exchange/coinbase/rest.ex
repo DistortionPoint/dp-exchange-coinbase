@@ -850,7 +850,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec delete_portfolio(map(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def delete_portfolio(credentials, portfolio_uuid, opts) when is_binary(portfolio_uuid) do
-    case request(:delete, "/portfolios/#{portfolio_uuid}", credentials, opts) do
+    case request(:delete, "/portfolios/#{portfolio_uuid}", credentials, once(opts)) do
       {:ok, %{body: %{} = result}} -> {:ok, result}
       {:ok, _unexpected} -> {:error, :unexpected_response_shape}
       {:error, reason} -> classify(reason)
@@ -1012,7 +1012,7 @@ defmodule DpExchange.Coinbase.Rest do
   defp conversion_status("TRADE_STATUS_CREATED"), do: :quoted
   defp conversion_status("TRADE_STATUS_STARTED"), do: :committed
   defp conversion_status("TRADE_STATUS_COMPLETED"), do: :settled
-  defp conversion_status("TRADE_STATUS_CANCELED"), do: :expired
+  defp conversion_status("TRADE_STATUS_CANCELED"), do: :cancelled
   defp conversion_status("TRADE_STATUS_EXPIRED"), do: :expired
   defp conversion_status("TRADE_STATUS_FAILED"), do: :failed
   defp conversion_status(_other), do: nil
@@ -1256,7 +1256,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec cancel_futures_sweep(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def cancel_futures_sweep(credentials, opts) do
-    case request(:delete, "/cfm/sweeps", credentials, opts) do
+    case request(:delete, "/cfm/sweeps", credentials, once(opts)) do
       {:ok, %{body: %{} = result}} -> {:ok, result}
       {:ok, _unexpected} -> {:error, :unexpected_response_shape}
       {:error, reason} -> classify(reason)
@@ -2706,7 +2706,11 @@ defmodule DpExchange.Coinbase.Rest do
   # `put_new`, as `Prime.claim_rewards/4` does: a caller who knows how to make the request
   # safe to repeat can still raise `:retry_attempts` deliberately.
   defp post_once(path, body, credentials, opts),
-    do: post_json(path, body, credentials, Keyword.put_new(opts, :retry_attempts, 1))
+    do: post_json(path, body, credentials, once(opts))
+
+  # The same one attempt for a `DELETE`, whose repeat after a lost answer is a 404 for a
+  # deletion that happened.
+  defp once(opts), do: Keyword.put_new(opts, :retry_attempts, 1)
 
   defp put_json(path, body, credentials, opts),
     do: json_request(:put, path, body, credentials, opts)
@@ -2775,7 +2779,9 @@ defmodule DpExchange.Coinbase.Rest do
   @spec cancel_order(map(), String.t(), keyword()) ::
           {:ok, :cancelled} | {:error, term()} | {:refused, term()}
   def cancel_order(credentials, order_id, opts) do
-    case post_json("/orders/batch_cancel", %{"order_ids" => [order_id]}, credentials, opts) do
+    # Once, as `post_once/4` says: a cancel that took effect before a lost answer, retried,
+    # comes back "not there to cancel", a refusal for an order this call did cancel.
+    case post_once("/orders/batch_cancel", %{"order_ids" => [order_id]}, credentials, opts) do
       {:ok, %{body: body}} -> cancel_result(body, order_id)
       {:error, reason} -> classify(reason)
     end

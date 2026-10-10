@@ -76,19 +76,21 @@ defmodule DpExchange.Coinbase.Prime do
   This acts on every eligible wallet in the portfolio. `stake_wallet/6` names one instead,
   and the two are not the same operation.
 
-  **This moves funds.** `opts[:idempotency_key]` is passed through where the caller supplies
-  one; this package does not generate it, because an idempotency key a caller cannot
-  reproduce protects nothing on a retry it did not make.
+  **This moves funds.** `opts[:idempotency_key]` is sent where the caller supplies one, and
+  one is generated otherwise, once per call, so this call's own retries cannot stake twice. A
+  caller retrying the call itself must pass its own key, or the venue sees a new request.
   """
   @spec stake_portfolio(credentials(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def stake_portfolio(credentials, portfolio_id, asset, amount, opts) do
-    post(
-      "/portfolios/#{portfolio_id}/staking/initiate",
-      portfolio_stake_body(asset, amount, opts),
-      credentials: credentials,
-      opts: opts
-    )
+    with :ok <- valid_asset(asset), :ok <- valid_amount(amount) do
+      post(
+        "/portfolios/#{portfolio_id}/staking/initiate",
+        portfolio_stake_body(asset, amount, opts),
+        credentials: credentials,
+        opts: opts
+      )
+    end
   end
 
   @doc """
@@ -102,12 +104,14 @@ defmodule DpExchange.Coinbase.Prime do
   @spec unstake_portfolio(credentials(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def unstake_portfolio(credentials, portfolio_id, asset, amount, opts) do
-    post(
-      "/portfolios/#{portfolio_id}/staking/unstake",
-      portfolio_stake_body(asset, amount, opts),
-      credentials: credentials,
-      opts: opts
-    )
+    with :ok <- valid_asset(asset), :ok <- valid_amount(amount) do
+      post(
+        "/portfolios/#{portfolio_id}/staking/unstake",
+        portfolio_stake_body(asset, amount, opts),
+        credentials: credentials,
+        opts: opts
+      )
+    end
   end
 
   @doc """
@@ -155,12 +159,14 @@ defmodule DpExchange.Coinbase.Prime do
   @spec stake_wallet(credentials(), String.t(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def stake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
-    post(
-      "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/initiate",
-      wallet_stake_body(amount, opts),
-      credentials: credentials,
-      opts: opts
-    )
+    with :ok <- valid_amount(amount) do
+      post(
+        "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/initiate",
+        wallet_stake_body(amount, opts),
+        credentials: credentials,
+        opts: opts
+      )
+    end
   end
 
   @doc """
@@ -180,12 +186,14 @@ defmodule DpExchange.Coinbase.Prime do
         ) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
-    post(
-      "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake",
-      wallet_stake_body(amount, opts),
-      credentials: credentials,
-      opts: opts
-    )
+    with :ok <- valid_amount(amount) do
+      post(
+        "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake",
+        wallet_stake_body(amount, opts),
+        credentials: credentials,
+        opts: opts
+      )
+    end
   end
 
   @doc """
@@ -213,12 +221,14 @@ defmodule DpExchange.Coinbase.Prime do
           keyword()
         ) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
-    post(
-      "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake/preview",
-      %{"amount" => Decimal.to_string(amount, :normal)},
-      credentials: credentials,
-      opts: opts
-    )
+    with :ok <- valid_amount(amount) do
+      post(
+        "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake/preview",
+        %{"amount" => Decimal.to_string(amount, :normal)},
+        credentials: credentials,
+        opts: opts
+      )
+    end
   end
 
   @doc """
@@ -293,6 +303,21 @@ defmodule DpExchange.Coinbase.Prime do
   end
 
   # --- internals ----------------------------------------------------------
+
+  # **A write that moves funds refuses an amount it cannot send, instead of raising.**
+  # `Decimal.to_string/2` on a float or `nil`, or `String.upcase/1` on a `nil` asset, raised
+  # inside the caller's process. A zero, negative, NaN or infinite amount is no stake at all,
+  # and the venue is not the place to find that out.
+  defp valid_amount(%Decimal{} = amount) do
+    if Decimal.inf?(amount) or Decimal.nan?(amount) or not Decimal.positive?(amount),
+      do: {:error, {:invalid_amount, amount}},
+      else: :ok
+  end
+
+  defp valid_amount(amount), do: {:error, {:invalid_amount, amount}}
+
+  defp valid_asset(asset) when is_binary(asset) and asset != "", do: :ok
+  defp valid_asset(asset), do: {:error, {:invalid_asset, asset}}
 
   # Full notation, never scientific: `Decimal.to_string/1` renders a small quantity as
   # 1E-8, which is not a number this venue reads.

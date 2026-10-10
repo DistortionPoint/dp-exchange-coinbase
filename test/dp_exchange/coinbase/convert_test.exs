@@ -164,7 +164,7 @@ defmodule DpExchange.Coinbase.ConvertTest do
           {"TRADE_STATUS_CREATED", :quoted},
           {"TRADE_STATUS_STARTED", :committed},
           {"TRADE_STATUS_COMPLETED", :settled},
-          {"TRADE_STATUS_CANCELED", :expired},
+          {"TRADE_STATUS_CANCELED", :cancelled},
           {"TRADE_STATUS_EXPIRED", :expired},
           {"TRADE_STATUS_FAILED", :failed}
         ] do

@@ -921,7 +921,14 @@ defmodule DpExchange.Coinbase.Socket do
   # this package read it", never a venue-stated time, so there is nothing here for it to
   # read from the frame.
   defp deliver_snapshot(state, symbol, rows) do
-    {levels, state} = decode_rows(rows, state)
+    case decode_rows(rows, state) do
+      {:ok, levels, state} -> snapshot(state, symbol, rows, levels)
+      # Refused whole, every bad row already reported — see `decode_rows/2`.
+      {:refused, state} -> state
+    end
+  end
+
+  defp snapshot(state, symbol, rows, levels) do
     {bids, asks} = split_sides(levels)
 
     case latest_event_time(rows) do
@@ -958,8 +965,14 @@ defmodule DpExchange.Coinbase.Socket do
   # no `observed_at` slot the way `OrderBook` does, so there is nothing here to hold the
   # envelope time in even if it were still wanted.
   defp deliver_delta(state, symbol, rows) do
-    {levels, state} = decode_rows(rows, state)
+    case decode_rows(rows, state) do
+      {:ok, levels, state} -> delta(state, symbol, rows, levels)
+      # Refused whole, every bad row already reported — see `decode_rows/2`.
+      {:refused, state} -> state
+    end
+  end
 
+  defp delta(state, symbol, rows, levels) do
     case latest_event_time(rows) do
       {:ok, at} ->
         delta = %Types.OrderBookDelta{
@@ -1012,26 +1025,27 @@ defmodule DpExchange.Coinbase.Socket do
   # convenient. A snapshot re-sorts its own two sides afterward regardless, so
   # preserving order here costs it nothing.
   #
-  # An unparseable `price_level` or `new_quantity` is reported through the same
-  # `:data_quality` path as any other unparseable row, and dropped from the result —
-  # from a snapshot's book, or from a delta's own list of changed rows. That matters
-  # concretely for `new_quantity: "0"`: it is how the venue signals removal, so an
-  # unparseable quantity silently ignored could leave a stale price level unaccounted
-  # for with nothing indicating why. Reported, not swallowed, same as `deliver_ticker/3`
-  # — and still never fatal to the connection.
+  # An unparseable `price_level` or `new_quantity`, or a `side` that is neither `bid` nor
+  # `offer`, is reported through the same `:data_quality` path as any other unparseable row
+  # — and **the whole event is then refused**, not delivered without it. Dropping the row
+  # and delivering the rest made a snapshot a book with a level silently missing, and a
+  # delta one that left a stale level standing (`new_quantity: "0"` is how the venue says
+  # "removed"). Both look like a whole, true answer. Found 2026-10-10. Still never fatal to
+  # the connection, and the venue's next snapshot is a fresh baseline.
   defp decode_rows(rows, state) do
-    {reversed, state} =
-      Enum.reduce(rows, {[], state}, fn row, {levels, acc_state} ->
+    {reversed, state, malformed?} =
+      Enum.reduce(rows, {[], state, false}, fn row, {levels, acc_state, malformed?} ->
         case decode_row(row) do
-          {:ok, level} -> {[level | levels], acc_state}
-          :error -> {levels, malformed_row(acc_state, row)}
+          {:ok, level} -> {[level | levels], acc_state, malformed?}
+          :error -> {levels, malformed_row(acc_state, row), true}
         end
       end)
 
-    {Enum.reverse(reversed), state}
+    if malformed?, do: {:refused, state}, else: {:ok, Enum.reverse(reversed), state}
   end
 
-  defp decode_row(%{"side" => side, "price_level" => price, "new_quantity" => quantity}) do
+  defp decode_row(%{"side" => side, "price_level" => price, "new_quantity" => quantity})
+       when side in ["bid", "offer"] do
     case {decimal(price), decimal(quantity)} do
       {nil, _ignored} -> :error
       {_ignored, nil} -> :error
@@ -1048,7 +1062,10 @@ defmodule DpExchange.Coinbase.Socket do
   # separate `bids`/`asks` lists, because one delta level names its own side rather
   # than living in a side-keyed collection.
   defp book_side("bid"), do: :bid
-  defp book_side(_offer_or_other), do: :ask
+  # Only `"offer"`. Any other side used to be filed as an ask, so a row the venue labelled
+  # something this package does not know moved the ask side of the book. It is now an
+  # unreadable row, reported and dropped like an unparseable price — see `decode_rows/2`.
+  defp book_side("offer"), do: :ask
 
   # Both accumulators are reversed once at the end, so a tie in `sorted/2`'s stable
   # sort breaks in the venue's own row order rather than the reverse of it — matters
@@ -1139,7 +1156,11 @@ defmodule DpExchange.Coinbase.Socket do
         report_sequence(state, :sequence_gap, %{
           expected: last + 1,
           got: seq,
-          dropped: seq - last - 1
+          dropped: seq - last - 1,
+          # Every symbol this connection delivers. The venue numbers per connection, not per
+          # product, so which product lost the message cannot be known; naming none left a
+          # consumer holding several books unable to tell which to re-read. All of them.
+          symbols: state.delivering |> MapSet.to_list() |> Enum.sort()
         })
 
         dispatch(decoded, %{state | last_seq: seq, stale_run: nil})

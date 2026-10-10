@@ -399,9 +399,15 @@ sending your subscribe frames, capping throughput and starving `ticker`.
 **A gap can open without a reconnect, and you are told when it does.** The venue numbers
 every message on a connection and says its servers can drop messages even though the
 transport is TCP. This package checks that numbering. A jump raises a `:data_quality`
-notice with `details.reason: :sequence_gap` and the number of messages lost. Treat it
-exactly as `:link_up` below: the book you built from deltas is no longer reliable, so
-re-read it. A message older than one already delivered is dropped, as the venue advises,
+notice with `details.reason: :sequence_gap` and the number of messages lost. `details.symbols`
+lists every symbol the connection delivers. The numbering is per connection, so any of those
+could be the one that lost a message. Treat it exactly as `:link_up` below: the book you
+built from deltas is no longer reliable, so re-read it.
+
+**A level2 event with an unreadable row is not delivered at all.** Each bad row raises a
+`:data_quality` notice, and the snapshot or delta it came in is dropped whole. Delivering the
+rest would hand you a book missing a level, or a delta leaving a removed level standing. A
+message older than one already delivered is dropped, as the venue advises,
 with `details.reason: :out_of_order`. If several such messages arrive in a row, counting up
 one at a time, the baseline this package held was wrong, not the messages. It adopts the
 venue's numbering, says so once with `details.reason: :sequence_reset`, and delivers

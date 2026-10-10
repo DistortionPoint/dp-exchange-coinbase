@@ -20,6 +20,29 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A level2 row whose side was neither `bid` nor `offer` was filed as an ask.** It is now
+  an unreadable row.
+- **A level2 event with an unreadable row was delivered without that row.** A snapshot came
+  out as a book with a level silently missing, and a delta left a stale level standing. The
+  whole event is now refused, after each bad row is reported through `:data_quality`.
+- **A `:sequence_gap` notice named no symbols.** It now lists every symbol the connection
+  delivers in `details.symbols`. The venue numbers per connection, so which product lost the
+  message cannot be known.
+- **`cancel_order/3`, `delete_portfolio/3` and `cancel_futures_sweep/2` were retried.** If
+  one took effect and its answer was lost, the retry came back as "not there", a refusal for
+  something the call had done. Each is now sent once, as other writes already are.
+- **A cancelled conversion (`TRADE_STATUS_CANCELED`) was reported `:expired`.** It is now
+  `:cancelled`, which `dp_exchange_core` 0.3.60 adds.
+- **Prime staking writes raised on a `nil` asset or a non-Decimal amount.** They now return
+  `{:error, {:invalid_asset, _}}` or `{:error, {:invalid_amount, _}}`. A zero, negative, NaN
+  or infinite amount is also refused before anything is sent.
+- **`Fake.stake/3` and `Fake.unstake/3` succeeded without Prime credentials**, which the real
+  facade refuses. They now run the facade's checks. `Fake.transfer_internal/4` no longer
+  echoes a `funds` field that `MovePortfolioFundsResponse` does not have.
+- **The Prime staking docs said no idempotency key is generated.** One is, once per call.
+
 ## [0.3.92] - 2026-10-10
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

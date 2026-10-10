@@ -161,6 +161,25 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
     end
   end
 
+  describe "a write that cannot be sent is refused, not raised" do
+    test "a non-Decimal, non-positive or non-finite amount, or a nil asset, sends nothing" do
+      me = self()
+
+      for amount <- [1.5, nil, "1", Decimal.new(0), Decimal.new(-1), Decimal.new("NaN")] do
+        assert {:error, {:invalid_amount, ^amount}} =
+                 Prime.stake_portfolio(@credentials, "pf-1", "ETH", amount, opts(me))
+
+        assert {:error, {:invalid_amount, ^amount}} =
+                 Prime.stake_wallet(@credentials, "pf-1", "w-1", "ETH", amount, opts(me))
+      end
+
+      assert {:error, {:invalid_asset, nil}} =
+               Prime.unstake_portfolio(@credentials, "pf-1", nil, Decimal.new(1), opts(me))
+
+      refute_received {:request, _method, _path, _raw, _headers}
+    end
+  end
+
   describe "what goes on the wire" do
     test "the amount is full notation, never scientific" do
       me = self()
@@ -541,17 +560,45 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
     end
 
     test "the scope follows the wallet, as it does in the package" do
-      assert {:ok, portfolio} = Fake.stake("ETH", Decimal.new("1"), portfolio_id: "pf-1")
+      assert {:ok, portfolio} =
+               Fake.stake("ETH", Decimal.new("1"),
+                 portfolio_id: "pf-1",
+                 credentials: @credentials
+               )
+
       assert portfolio["scope"] == "portfolio"
 
       assert {:ok, wallet} =
-               Fake.stake("ETH", Decimal.new("1"), portfolio_id: "pf-1", wallet_id: "w-9")
+               Fake.stake("ETH", Decimal.new("1"),
+                 portfolio_id: "pf-1",
+                 wallet_id: "w-9",
+                 credentials: @credentials
+               )
 
       assert wallet["scope"] == "wallet"
     end
 
+    test "a stake without Prime credentials, or with an unsendable amount, is refused" do
+      assert {:error, :missing_prime_credentials} =
+               Fake.stake("ETH", Decimal.new("1"), portfolio_id: "pf-1")
+
+      assert {:error, {:invalid_amount, 1.5}} =
+               Fake.stake("ETH", 1.5, portfolio_id: "pf-1", credentials: @credentials)
+
+      assert {:error, {:invalid_asset, nil}} =
+               Fake.unstake(nil, Decimal.new("1"),
+                 portfolio_id: "pf-1",
+                 credentials: @credentials
+               )
+    end
+
     test "an unstake is not settled" do
-      assert {:ok, result} = Fake.unstake("ETH", Decimal.new("1"), portfolio_id: "pf-1")
+      assert {:ok, result} =
+               Fake.unstake("ETH", Decimal.new("1"),
+                 portfolio_id: "pf-1",
+                 credentials: @credentials
+               )
+
       assert result["settled"] == false
     end
   end

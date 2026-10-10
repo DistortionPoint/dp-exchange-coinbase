@@ -727,10 +727,11 @@ defmodule DpExchange.Coinbase.Fake do
     with_injection(fn ->
       # Same guard as the package: a portfolio or nothing. A fake that defaulted one would
       # let a consumer ship a stake into a portfolio it never named.
-      with {:ok, portfolio} <- fake_portfolio(opts) do
+      with {:ok, portfolio} <- fake_portfolio(opts),
+           :ok <- fake_prime_checks(asset, amount, opts) do
         {:ok,
          %{
-           "currency" => String.upcase(asset),
+           "currency" => asset && String.upcase(asset),
            "amount" => Decimal.to_string(amount, :normal),
            "portfolio_id" => portfolio,
            "wallet_id" => Keyword.get(opts, :wallet_id),
@@ -743,12 +744,13 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def unstake(asset, amount, opts \\ []) do
     with_injection(fn ->
-      with {:ok, portfolio} <- fake_portfolio(opts) do
+      with {:ok, portfolio} <- fake_portfolio(opts),
+           :ok <- fake_prime_checks(asset, amount, opts) do
         # Nothing has arrived. An unstake that reported itself settled would teach a consumer
         # to spend an asset that is still unbonding.
         {:ok,
          %{
-           "currency" => String.upcase(asset),
+           "currency" => asset && String.upcase(asset),
            "amount" => Decimal.to_string(amount, :normal),
            "portfolio_id" => portfolio,
            "wallet_id" => Keyword.get(opts, :wallet_id),
@@ -758,6 +760,31 @@ defmodule DpExchange.Coinbase.Fake do
       end
     end)
   end
+
+  # The real facade's own checks, in its order: a portfolio-scoped write wants an asset, both
+  # scopes want a positive finite Decimal, and Prime wants all three of its credentials.
+  # Without the last, a consumer's test staked with no Prime key and production refused it.
+  defp fake_prime_checks(asset, amount, opts) do
+    cond do
+      is_nil(Keyword.get(opts, :wallet_id)) and not (is_binary(asset) and asset != "") ->
+        {:error, {:invalid_asset, asset}}
+
+      not (is_struct(amount, Decimal) and not Decimal.nan?(amount) and not Decimal.inf?(amount) and
+               Decimal.positive?(amount)) ->
+        {:error, {:invalid_amount, amount}}
+
+      not prime_credentials?(Keyword.get(opts, :credentials)) ->
+        {:error, :missing_prime_credentials}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp prime_credentials?(%{access_key: key, passphrase: phrase, signing_key: signing}),
+    do: is_binary(key) and is_binary(phrase) and is_binary(signing)
+
+  defp prime_credentials?(_other), do: false
 
   defp fake_portfolio(opts) do
     case Keyword.get(opts, :portfolio_id) do
@@ -1217,17 +1244,18 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def transfer_internal(asset, amount, opts, _request_opts) do
+  def transfer_internal(_asset, _amount, opts, _request_opts) do
     with_injection(fn ->
       # Both uuids or nothing. A fake that defaulted one would let a consumer ship a move
       # between portfolios it never named.
       with from when is_binary(from) <- Keyword.get(opts, :from),
            to when is_binary(to) <- Keyword.get(opts, :to) do
+        # `MovePortfolioFundsResponse` (at-spec.yaml:7934) is the two uuids and nothing else. A
+        # `funds` echo was a field a consumer could come to read that the venue never sends.
         {:ok,
          %{
            "source_portfolio_uuid" => from,
-           "target_portfolio_uuid" => to,
-           "funds" => %{"value" => Decimal.to_string(amount, :normal), "currency" => asset}
+           "target_portfolio_uuid" => to
          }}
       else
         _missing -> {:error, :missing_portfolio}

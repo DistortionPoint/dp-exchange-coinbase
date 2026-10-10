@@ -93,6 +93,23 @@ defmodule DpExchange.Coinbase.WriteOnceTest do
     assert [_one] = requests()
   end
 
+  # A cancel or delete that took effect before a lost answer, retried, comes back "not there"
+  # — a refusal for something this call did. Found 2026-10-10.
+  test "an order cancel is sent once" do
+    Rest.cancel_order(@credentials, "order-1", opts([]))
+    assert [_one] = requests()
+  end
+
+  test "a portfolio delete is sent once" do
+    Rest.delete_portfolio(@credentials, "pf-1", opts([]))
+    assert [_one] = requests()
+  end
+
+  test "a futures sweep cancel is sent once" do
+    Rest.cancel_futures_sweep(@credentials, opts([]))
+    assert [_one] = requests()
+  end
+
   test "a caller can still ask for retries explicitly" do
     Rest.transfer_internal(
       @credentials,
