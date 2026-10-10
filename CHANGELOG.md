@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.96] - 2026-10-10
+
 ### Fixed
 
 - **The JWT was the older Coinbase Cloud shape, not the claim set Coinbase documents.** It
