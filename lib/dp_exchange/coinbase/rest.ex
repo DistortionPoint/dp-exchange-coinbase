@@ -2233,6 +2233,12 @@ defmodule DpExchange.Coinbase.Rest do
 
   # `nil` rather than zero for an absent number. Zero is a price, and a venue that did
   # not report volume has not reported zero volume.
+  # An order with nothing filled has no average price. The venue states `"0"` for it, and a
+  # consumer computing a notional from `average_price` read a fill at zero.
+  defp average_price(average, filled) do
+    if filled == nil or Decimal.eq?(filled, 0), do: nil, else: average
+  end
+
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: value
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
@@ -2379,11 +2385,12 @@ defmodule DpExchange.Coinbase.Rest do
   @spec place_order(map(), map(), keyword()) ::
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
   def place_order(credentials, request, opts) do
-    with {:ok, configuration} <- order_configuration(request) do
+    with {:ok, symbol, side} <- order_identity(request),
+         {:ok, configuration} <- order_configuration(request) do
       body = %{
         "client_order_id" => Map.get(request, :client_order_id) || generate_client_order_id(),
-        "product_id" => SymbolFormat.to_exchange_symbol(Map.fetch!(request, :symbol)),
-        "side" => request |> Map.fetch!(:side) |> to_string() |> String.upcase(),
+        "product_id" => SymbolFormat.to_exchange_symbol(symbol),
+        "side" => side |> to_string() |> String.upcase(),
         "order_configuration" => configuration
       }
 
@@ -2590,6 +2597,25 @@ defmodule DpExchange.Coinbase.Rest do
   defp put_raw_unless_nil(map, _key, nil), do: map
   defp put_raw_unless_nil(map, key, value), do: Map.put(map, key, value)
 
+  # The fields every order names, and `:quantity` for every type but a market order (which
+  # may be sized by `quote_size` instead — see `configuration_leaf/3`). `Map.fetch!/2` raised
+  # `KeyError` in the caller's process for each of them, on a money-moving call.
+  defp order_identity(request) do
+    with {:ok, symbol} <- required_field(request, :symbol, {:missing_field, :symbol}),
+         {:ok, side} <- required_field(request, :side, {:missing_field, :side}),
+         :ok <- sized(request) do
+      {:ok, symbol, side}
+    end
+  end
+
+  defp sized(%{order_type: :market}), do: :ok
+  defp sized(%{order_type: "market"}), do: :ok
+
+  defp sized(request) do
+    with {:ok, _quantity} <- required_field(request, :quantity, {:missing_field, :quantity}),
+         do: :ok
+  end
+
   defp required_field(request, key, error) do
     case Map.get(request, key) do
       nil -> {:error, error}
@@ -2600,16 +2626,23 @@ defmodule DpExchange.Coinbase.Rest do
   # The venue answers 200 with `success: false` for a rejected order. Treating that as a
   # placed order is the failure this clause exists to prevent — the HTTP call succeeded and
   # the order did not.
+  #
+  # `success: true` means an order is live at the venue, so it is `{:ok, _}` even when the
+  # body's id is unreadable (`id: nil`). Reviewed 2026-10-10 against making that an error: an
+  # `{:error, _}` reads as "nothing was placed", and a caller retrying on it places a second
+  # order. A `nil` id says the venue did not name it; `get_orders` is how to find it.
   defp to_placed_order(%{"success" => true, "success_response" => success}, request) do
     {:ok,
      %Types.Order{
        id: success_order_id(success),
-       symbol: Map.fetch!(request, :symbol),
-       side: Map.fetch!(request, :side),
+       symbol: Map.get(request, :symbol),
+       side: Map.get(request, :side),
        order_type: Map.get(request, :order_type, :limit),
        time_in_force: Map.get(request, :time_in_force, :gtc),
-       quantity: Map.get(request, :quantity),
-       price: Map.get(request, :price),
+       # As Decimals, the type `Order` declares: the caller's raw value (a string, a float)
+       # was echoed as it came.
+       quantity: request |> Map.get(:quantity) |> decimal(),
+       price: request |> Map.get(:price) |> decimal(),
        status: :pending,
        provider: :coinbase
      }}
@@ -2898,7 +2931,8 @@ defmodule DpExchange.Coinbase.Rest do
       # place `closing_configuration/1` below already reads it from for a closing order.
       quantity: quantity_from_configuration(order["order_configuration"]),
       filled_quantity: decimal(order["filled_size"]),
-      average_price: decimal(order["average_filled_price"]),
+      average_price:
+        average_price(decimal(order["average_filled_price"]), decimal(order["filled_size"])),
       fee: decimal(order["total_fees"]),
       # `Order` has no `fee_currency` field
       # (docs/reference/coinbase/openapi/at-spec.yaml:8223-8330) — this used to read one
@@ -2985,10 +3019,11 @@ defmodule DpExchange.Coinbase.Rest do
   @spec preview_order(map(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_order(credentials, request, opts) do
-    with {:ok, configuration} <- order_configuration(request) do
+    with {:ok, symbol, side} <- order_identity(request),
+         {:ok, configuration} <- order_configuration(request) do
       body = %{
-        "product_id" => SymbolFormat.to_exchange_symbol(Map.fetch!(request, :symbol)),
-        "side" => request |> Map.fetch!(:side) |> to_string() |> String.upcase(),
+        "product_id" => SymbolFormat.to_exchange_symbol(symbol),
+        "side" => side |> to_string() |> String.upcase(),
         "order_configuration" => configuration
       }
 

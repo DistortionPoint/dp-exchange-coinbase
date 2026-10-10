@@ -20,6 +20,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`place_order/3` and `preview_order/3` raised `KeyError` for a missing `:symbol`, `:side`
+  or (on a non-market order) `:quantity`.** Each is now `{:error, {:missing_field, key}}`.
+- **A placed order echoed the caller's raw quantity and price** (a string, a float) rather than
+  the Decimals `Order` declares. A `success: true` body with an unreadable id stays
+  `{:ok, %Order{id: nil}}`, deliberately: the order is live, and an error would invite a retry
+  that places a second one.
+- **An unfilled order reported the venue's `average_filled_price` of `"0"` as a price.** It is
+  now `nil` until something has filled.
+
 ## [0.3.90] - 2026-10-10
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

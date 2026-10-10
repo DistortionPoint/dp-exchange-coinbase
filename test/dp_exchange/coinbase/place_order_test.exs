@@ -887,4 +887,20 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       refute first == second
     end
   end
+
+  describe "an order the caller can track, or an error (2026-10-10)" do
+    test "a missing quantity, symbol or side is a named refusal, not a KeyError" do
+      for field <- [:quantity, :symbol, :side] do
+        assert {:error, {:missing_field, ^field}} =
+                 place(Map.delete(limit_request(), field), responding(accepted()))
+      end
+    end
+
+    test "the placed order echoes Decimals, not the caller's raw values" do
+      request = limit_request(%{quantity: "0.5", price: 40_000})
+      assert {:ok, order} = place(request, responding(accepted()))
+      assert Decimal.equal?(order.quantity, Decimal.new("0.5"))
+      assert Decimal.equal?(order.price, Decimal.new(40_000))
+    end
+  end
 end
