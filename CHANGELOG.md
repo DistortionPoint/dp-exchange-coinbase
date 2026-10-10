@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.89] - 2026-10-10
+
 ### Fixed
 
 - **The alias catalogue was read once and never again.** A product listed after the first
