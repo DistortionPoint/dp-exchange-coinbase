@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.91] - 2026-10-10
+
 ### Fixed
 
 - **`place_order/3` and `preview_order/3` raised `KeyError` for a missing `:symbol`, `:side`
