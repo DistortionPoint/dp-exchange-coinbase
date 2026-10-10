@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.95] - 2026-10-10
+
 ### Fixed
 
 - **A staggered `:resubscribe_shard` undid an unsubscribe.** It carried the shard's symbols
