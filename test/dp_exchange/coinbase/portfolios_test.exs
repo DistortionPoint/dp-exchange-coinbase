@@ -143,6 +143,18 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
       assert breakdown["portfolio_balances"]["total_balance"]["value"] == "100"
     end
 
+    test "an object without a breakdown is unreadable, not an empty portfolio" do
+      # Any map used to be returned as the breakdown, so `{}` read as a portfolio holding
+      # nothing — a plausible answer, and the wrong one.
+      for body <- [%{}, %{"error" => "NOT_FOUND"}, %{"breakdown" => nil}] do
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_portfolio_breakdown(@credentials, "pf-1",
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
     test "the currency filter reaches the venue" do
       me = self()
 
@@ -241,15 +253,19 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
 
   describe "the fake and the facade" do
     test "the fake keeps a deleted portfolio in its listing" do
-      assert {:ok, portfolios} = Fake.list_portfolios()
+      assert {:ok, portfolios} = Fake.list_portfolios(credentials: @credentials)
       assert Enum.any?(portfolios, & &1.deleted)
       assert Enum.any?(portfolios, &(&1.deleted == false))
     end
 
     test "the fake refuses a nameless create and echoes a rename" do
-      assert {:error, :name_required} = Fake.create_account()
-      assert {:ok, %{name: "Strategy A"}} = Fake.create_account(name: "Strategy A")
-      assert {:ok, %{id: "pf-1", name: "Renamed"}} = Fake.rename_account("pf-1", "Renamed")
+      assert {:error, :name_required} = Fake.create_account(credentials: @credentials)
+      auth = [credentials: @credentials]
+
+      assert {:ok, %{name: "Strategy A"}} = Fake.create_account([name: "Strategy A"] ++ auth)
+
+      assert {:ok, %{id: "pf-1", name: "Renamed"}} =
+               Fake.rename_account("pf-1", "Renamed", auth)
     end
 
     test "the facade delegates the listing, the breakdown and the delete" do

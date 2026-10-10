@@ -665,6 +665,17 @@ call this venue genuinely requires them for (see above). A test calling it with 
 on purpose: a fake that answered `:ok` regardless would pass a suite that then refuses in
 production.
 
+**Every private call refuses without a usable credential, in the fake too.** Balances,
+accounts, fees, fills, orders (place, preview, edit, cancel, read, list, close), payment
+methods, portfolios, conversions and transfers return
+`{:error, {:missing_credentials, :coinbase}}` for `nil`, `%{}` or a map without a binary
+`:api_key` and `:api_secret` — after the same local argument checks the real function runs
+first (an order missing its symbol or a limit price, an edit missing a field, a conversion
+missing `:from`/`:to`). Pass `credentials: ...` in `opts` where the call has no credential
+argument. The fake also narrows `get_orders/2` by `:status`/`:symbol` and
+`get_trade_history/2` by `:symbol`, `:order_id`, `:start` and `:end`, and an unknown order or
+account is `{:refused, :not_listed}` (the venue's 404), not `:not_found`.
+
 **Do not point tests at the live venue.** This package's own tier-2 tests do that, tagged
 and excluded, run by hand. A venue that sees a package polling it on a timer will
 rate-limit or block.

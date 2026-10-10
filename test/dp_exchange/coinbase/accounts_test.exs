@@ -228,6 +228,17 @@ defmodule DpExchange.Coinbase.AccountsTest do
       assert path =~ "/accounts/abc"
     end
 
+    test "a single-account body whose account is not an object is unreadable, not [nil]" do
+      for account <- [nil, "abc", [], 7] do
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_accounts(@credentials,
+                   uuid: "abc",
+                   plug: responding(%{"account" => account}),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
     test "a single-account body with no account key is unreadable" do
       assert {:error, :unexpected_response_shape} =
                Rest.get_accounts(@credentials,

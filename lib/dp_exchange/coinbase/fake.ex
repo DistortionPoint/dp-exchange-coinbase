@@ -49,16 +49,23 @@ defmodule DpExchange.Coinbase.Fake do
   wired either: both are local bookkeeping reads/writes that always succeed by
   construction, not a call standing in for one the real venue could refuse.
 
-  **No credential-bypass mode here.** Unlike `DpExchange.Robinhood.Fake`, this fake has no
-  central credential check to bypass — most functions below never inspect `credentials`
-  at all (an existing gap this wiring does not change; see `dp-exchange-core` issue #14).
-  Adding a check here that the fake never had would be a behaviour change beyond this
-  task's scope, not a wiring exercise.
+  ## Credentials, validation and order — the real path's, not a copy
+
+  Every private function checks its credential with `Rest.validate_credentials/1` (`nil`,
+  `%{}` and a map that cannot sign are `{:error, {:missing_credentials, :coinbase}}`), after
+  the injected outcome and after the same local argument checks, in the same order, as the
+  real function. The checks themselves are `Rest`'s (`validate_order_request/1`,
+  `validate_order_edit/1`, `validate_candle_request/2`, ...), called rather than re-stated, so
+  the two cannot drift. This fake used to inspect no credential at all, so a consumer that
+  forgot them saw green tests and a production `:missing_credentials`.
+
+  Public market data (`get_price/2`, `get_order_book/2`, `get_trades/2`, ...) needs none, as on
+  the venue; `get_top_of_book/2` is the one public-shaped call that does.
   """
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Coinbase.Rest
+  alias DpExchange.Coinbase.{Rest, SymbolFormat}
   alias DpExchange.Core.{Capabilities, Config, FakeInjection, Instrument, Notice, Types, Venue}
 
   @symbols ~w(BTC-USD BTC-USDC ETH-USD ETH-EUR)
@@ -139,9 +146,9 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
     with_injection(symbol, fn ->
-      if is_nil(Keyword.get(opts, :credentials)) do
-        {:error, {:missing_credentials, :coinbase}}
-      else
+      # `Rest`'s own test, so `%{}` — which the real path reads as no credential — refuses
+      # here too. This checked only `nil`, and a consumer passing `%{}` got a book.
+      with :ok <- Rest.validate_credentials(Keyword.get(opts, :credentials)) do
         case Map.fetch(@price, symbol) do
           {:ok, price} ->
             {:ok,
@@ -168,23 +175,19 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], _opts \\ []) do
     with_injection(symbol, fn ->
-      cond do
-        symbol not in @symbols ->
-          {:refused, :not_listed}
-
-        timeframe not in Rest.granularities() ->
-          # Includes `12h`, which the shared vocabulary models and Coinbase does not serve.
-          {:error, {:unsupported_timeframe, timeframe}}
-
-        requested(range, timeframe) > Rest.max_candles() ->
-          {:error,
-           {:range_too_wide, requested: requested(range, timeframe), max: Rest.max_candles()}}
-
-        true ->
+      # The real path's order: the timeframe and the window are refused locally, before any
+      # request, so they win over an unlisted symbol (which only the venue can name). The
+      # check is `Rest`'s own — this used to re-state it and answered `:not_listed` first.
+      # `12h`, which the shared vocabulary models and Coinbase does not serve, fails here.
+      with :ok <- Rest.validate_candle_request(timeframe, range) do
+        if symbol in @symbols do
           # A bar, not a quote. The fake returned `get_price/2`'s `Quote` here, which agreed
           # with the real package's own defect — a suite reproducing the bug it is meant to
           # catch.
           {:ok, [fake_candle(symbol, timeframe)]}
+        else
+          {:refused, :not_listed}
+        end
       end
     end)
   end
@@ -297,7 +300,9 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   defp book_side(mid, limit, direction) do
-    for step <- 1..limit do
+    # `//1`: a `limit` of 0 made `1..0` a descending range, so the book had two levels
+    # (`1` and `0`) where the caller asked for none.
+    for step <- 1..limit//1 do
       offset = Decimal.mult(Decimal.new("0.50"), Decimal.new(step))
       price = if direction == :sub, do: Decimal.sub(mid, offset), else: Decimal.add(mid, offset)
       {price, Decimal.mult(Decimal.new("0.1"), Decimal.new(step))}
@@ -349,8 +354,8 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_balances(_credentials, _opts) do
-    with_injection(fn ->
+  def get_balances(credentials, _opts) do
+    with_credentials(credentials, fn ->
       # A held amount that is not zero, so a consumer reading `available_balance` as the
       # total fails here rather than in production. The real venue reports both and no total.
       available = Decimal.new("1.25")
@@ -380,8 +385,8 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_accounts(_credentials, opts) do
-    with_injection(fn ->
+  def get_accounts(credentials, opts) do
+    with_credentials(credentials, fn ->
       accounts = [
         %{
           "uuid" => "8bfc20d7-f7c6-4422-bf07-8243ca4169fe",
@@ -399,14 +404,16 @@ defmodule DpExchange.Coinbase.Fake do
         nil -> {:ok, accounts}
         "8bfc20d7-f7c6-4422-bf07-8243ca4169fe" -> {:ok, accounts}
         # An id the venue does not hold. `{:ok, []}` would read as "this account has nothing".
-        _unknown -> {:refused, :not_found}
+        # The venue answers 404, which `Rest` classifies `{:refused, :not_listed}` — the fake
+        # said `:not_found`, a reason the real package can never return.
+        _unknown -> {:refused, :not_listed}
       end
     end)
   end
 
   @impl true
-  def get_fees(_credentials, _opts) do
-    with_injection(fn ->
+  def get_fees(credentials, _opts) do
+    with_credentials(credentials, fn ->
       # A promotion running, so the two tiers differ — the case a consumer that read only one
       # of them would get wrong.
       {:ok,
@@ -434,8 +441,8 @@ defmodule DpExchange.Coinbase.Fake do
   # refuses lets a consumer's suite go green against behaviour that cannot happen.
 
   @impl true
-  def get_trade_history(_credentials, opts) do
-    with_injection(fn ->
+  def get_trade_history(credentials, opts) do
+    with_credentials(credentials, fn ->
       # A REVERSAL alongside the FILL, because that is the distinction a consumer must handle:
       # summing a mixed list produces a position and a cost basis that are both wrong and both
       # plausible. The fake filters the same way the real package does.
@@ -472,9 +479,36 @@ defmodule DpExchange.Coinbase.Fake do
          }}
       ]
 
-      {:ok, for({type, fill} <- rows, type in wanted, do: fill)}
+      # `:order_id`, `:symbol`, `:start` and `:end` are filters the real package sends to the
+      # venue, so they narrow here too. Ignoring them returned a BTC-USD fill to a caller
+      # asking for ETH-USD's — a plausible answer to a question that was not asked.
+      {:ok,
+       for {type, fill} <- rows, type in wanted, fill_matches?(fill, opts) do
+         fill
+       end}
     end)
   end
+
+  defp fill_matches?(fill, opts) do
+    matches?(Keyword.get(opts, :order_id), fill.order_id) and
+      matches?(canonical_symbol(Keyword.get(opts, :symbol)), fill.symbol) and
+      after_start?(fill.timestamp, Keyword.get(opts, :start)) and
+      before_end?(fill.timestamp, Keyword.get(opts, :end))
+  end
+
+  defp matches?(nil, _actual), do: true
+  defp matches?(wanted, actual), do: wanted == actual
+
+  defp canonical_symbol(nil), do: nil
+  defp canonical_symbol(symbol), do: SymbolFormat.to_canonical_symbol(symbol)
+
+  defp after_start?(_at, nil), do: true
+  defp after_start?(at, %DateTime{} = start), do: DateTime.compare(at, start) == :gt
+  defp after_start?(_at, _unreadable), do: true
+
+  defp before_end?(_at, nil), do: true
+  defp before_end?(at, %DateTime{} = finish), do: DateTime.compare(at, finish) == :lt
+  defp before_end?(_at, _unreadable), do: true
 
   # Streaming, in memory. The fake pushes immediately on subscribe, which is what the
   # real venue's first tick does from the caller's side — and the caller cannot tell the
@@ -650,12 +684,21 @@ defmodule DpExchange.Coinbase.Fake do
   def test_connection(credentials, _opts) do
     with_injection(fn ->
       # With a credential the fake answers what the key can do; without one it answers
-      # reachability only, which is the same split the package makes.
-      if is_map(credentials) and map_size(credentials) > 0 do
-        {:ok,
-         %{"reachable" => true, "can_view" => true, "can_trade" => true, "can_transfer" => false}}
-      else
+      # reachability only, which is the same split the package makes. A credential that
+      # cannot sign (`%{api_key: "k"}`) is not "none" — the real path reads
+      # `/key_permissions` with it and fails signing, so it refuses here too.
+      if credentials in [nil, %{}] do
         {:ok, %{"reachable" => true, "time" => %{"iso" => "2026-09-01T20:00:00Z"}}}
+      else
+        with :ok <- Rest.validate_credentials(credentials) do
+          {:ok,
+           %{
+             "reachable" => true,
+             "can_view" => true,
+             "can_trade" => true,
+             "can_transfer" => false
+           }}
+        end
       end
     end)
   end
@@ -689,16 +732,6 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
-  defp requested(range, timeframe) do
-    finish = Config.opt(range, :end, @at)
-    {:ok, width} = DpExchange.Core.Timeframe.seconds(timeframe)
-
-    case Keyword.get(range, :start) do
-      nil -> 0
-      start -> div(DateTime.diff(finish, start, :second), width)
-    end
-  end
-
   # --- Declared but not yet implemented -----------------------------------
   #
   # Core 0.1.16 widened the facade to the surface the venues actually publish. These answer
@@ -711,8 +744,8 @@ defmodule DpExchange.Coinbase.Fake do
   # not offer something, the comment beside it says so.
 
   @impl true
-  def get_positions(_opts \\ []) do
-    with_injection(fn ->
+  def get_positions(opts \\ []) do
+    with_credentials(opts_credentials(opts), fn ->
       # A short, and a `realised_pnl` of nil — the two things the mapping has to get right.
       {:ok,
        [
@@ -831,8 +864,8 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def quote_conversion(from, to, amount, _opts \\ []) do
-    with_injection(fn ->
+  def quote_conversion(from, to, amount, opts \\ []) do
+    with_credentials(opts_credentials(opts), fn ->
       # `:quoted`, and no expiry — the two things a consumer must handle. A fake that returned
       # `:settled` would let one ship code that never commits.
       # Remembered, so a commit or a read names a conversion this fake actually quoted.
@@ -859,8 +892,10 @@ defmodule DpExchange.Coinbase.Fake do
   def commit_conversion(id, opts \\ []) do
     with_injection(fn ->
       # Both accounts or nothing, as in the package: committing against accounts the caller
-      # did not name converts between the wrong two balances.
-      with {:ok, from, to} <- fake_convert_accounts(opts),
+      # did not name converts between the wrong two balances. Then the credential, then the
+      # venue's own answer about the id — the real order.
+      with {:ok, from, to} <- Rest.convert_accounts(opts),
+           :ok <- Rest.validate_credentials(opts_credentials(opts)),
            {:ok, _status} <- fake_conversion(id) do
         Process.put(@conversions_key, Map.put(conversions(), id, :committed))
 
@@ -885,7 +920,8 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def get_conversion(id, opts \\ []) do
     with_injection(fn ->
-      with {:ok, from, to} <- fake_convert_accounts(opts),
+      with {:ok, from, to} <- Rest.convert_accounts(opts),
+           :ok <- Rest.validate_credentials(opts_credentials(opts)),
            {:ok, known} <- fake_conversion(id) do
         {:ok,
          %Types.Conversion{
@@ -918,19 +954,12 @@ defmodule DpExchange.Coinbase.Fake do
 
   defp conversions, do: Process.get(@conversions_key, %{})
 
-  defp fake_convert_accounts(opts) do
-    case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
-      {from, to} when is_binary(from) and is_binary(to) -> {:ok, from, to}
-      _missing -> {:error, :from_and_to_required}
-    end
-  end
-
   @impl true
   def convert(_from, _to, _amount, _opts \\ []), do: Venue.not_supported()
 
   @impl true
-  def get_trade_volume(_credentials, _opts \\ []) do
-    with_injection(fn ->
+  def get_trade_volume(credentials, _opts \\ []) do
+    with_credentials(credentials, fn ->
       # The Advanced Trade and Pro totals ride alongside the breakdown rather than being
       # folded into it: the venue documents the first as non-inclusive of the second, so
       # adding either to the breakdown double counts.
@@ -948,8 +977,8 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def list_portfolios(_opts \\ []) do
-    with_injection(fn ->
+  def list_portfolios(opts \\ []) do
+    with_credentials(opts_credentials(opts), fn ->
       # A deleted one alongside a live one: the venue keeps deleted portfolios in the listing
       # because old orders still name them, and a fake that returned only live ones would let
       # a consumer treat a historical id as one that never existed.
@@ -1030,26 +1059,24 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def create_account(opts \\ []) do
     with_injection(fn ->
-      case Keyword.get(opts, :name) do
-        name when is_binary(name) ->
-          {:ok,
-           %Types.Portfolio{
-             id: "pf-new",
-             name: name,
-             type: "CONSUMER",
-             deleted: false,
-             provider: :coinbase
-           }}
-
-        _missing ->
-          {:error, :name_required}
+      # The name first, then the credential: `Rest.create_portfolio/2`'s order.
+      with {:ok, name} <- Rest.required_name(opts),
+           :ok <- Rest.validate_credentials(opts_credentials(opts)) do
+        {:ok,
+         %Types.Portfolio{
+           id: "pf-new",
+           name: name,
+           type: "CONSUMER",
+           deleted: false,
+           provider: :coinbase
+         }}
       end
     end)
   end
 
   @impl true
-  def rename_account(id, name, _opts \\ []) do
-    with_injection(fn ->
+  def rename_account(id, name, opts \\ []) do
+    with_credentials(opts_credentials(opts), fn ->
       {:ok,
        %Types.Portfolio{
          id: id,
@@ -1062,8 +1089,8 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_roles(_opts \\ []) do
-    with_injection(fn ->
+  def get_roles(opts \\ []) do
+    with_credentials(opts_credentials(opts), fn ->
       # `can_transfer` false beside two trues: a key routinely holds some and not all, and a
       # fake that granted everything would let a consumer ship a withdrawal path it cannot use.
       {:ok,
@@ -1078,42 +1105,40 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def place_order(_credentials, request, _opts \\ []) do
+  def place_order(credentials, request, _opts \\ []) do
     with_injection(fn ->
-      # The fake accepts what the venue accepts and refuses what it refuses. The combination
-      # table is the venue's, so a caller that would be rejected upstream is rejected here —
-      # a fake that accepted everything would let a consumer's test pass on an order the
-      # venue will not take.
-      case {Map.get(request, :order_type, :limit), Map.get(request, :time_in_force, :gtc)} do
-        pair
-        when pair in [
-               {:market, :ioc},
-               {:market, :fok},
-               {:limit, :gtc},
-               {:limit, :gtd},
-               {:limit, :fok},
-               {:stop_limit, :gtc},
-               {:stop_limit, :gtd}
-             ] ->
-          {type, tif} = pair
-
-          {:ok,
-           %Types.Order{
-             id: "fake-order-1",
-             symbol: Map.fetch!(request, :symbol),
-             side: Map.fetch!(request, :side),
-             order_type: type,
-             time_in_force: tif,
-             quantity: Map.get(request, :quantity),
-             price: Map.get(request, :price),
-             status: :pending,
-             provider: :coinbase
-           }}
-
-        {type, tif} ->
-          {:error, {:unsupported_order_combination, type, tif}}
+      # The fake accepts what the venue accepts and refuses what it refuses, by running the
+      # real package's own checks in its order: the request (identity, the sparse
+      # type/time-in-force table, each leaf's required and refused fields), then the
+      # credential. This re-stated the table alone, so an order with no symbol raised
+      # `KeyError`, a limit order with no price was "placed", and `%{}` credentials passed —
+      # each refused by the real path.
+      with :ok <- Rest.validate_order_request(request),
+           :ok <- Rest.validate_credentials(credentials) do
+        {:ok,
+         %Types.Order{
+           id: "fake-order-1",
+           symbol: Map.fetch!(request, :symbol),
+           side: Map.fetch!(request, :side),
+           order_type: Map.get(request, :order_type, :limit),
+           time_in_force: Map.get(request, :time_in_force, :gtc),
+           # Decimals, as the real return: it casts the caller's value, string or float.
+           quantity: cast_decimal(Map.get(request, :quantity)),
+           price: cast_decimal(Map.get(request, :price)),
+           status: :pending,
+           provider: :coinbase
+         }}
       end
     end)
+  end
+
+  defp cast_decimal(nil), do: nil
+
+  defp cast_decimal(value) do
+    case Decimal.cast(value) do
+      {:ok, decimal} -> decimal
+      :error -> nil
+    end
   end
 
   @impl true
@@ -1122,8 +1147,8 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
   @impl true
-  def cancel_order(_credentials, order_id, _opts \\ []) do
-    with_injection(fn ->
+  def cancel_order(credentials, order_id, _opts \\ []) do
+    with_credentials(credentials, fn ->
       # The fake refuses the same way the venue does: an order that is not open cannot be
       # cancelled, and saying :ok would let a consumer's retry logic go untested.
       case order_id do
@@ -1135,19 +1160,37 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_order(_credentials, order_id, _opts \\ []) do
-    with_injection(fn ->
+  def get_order(credentials, order_id, _opts \\ []) do
+    with_credentials(credentials, fn ->
       case order_id do
         "fake-order-1" -> {:ok, fake_order()}
-        _unknown -> {:refused, :not_found}
+        # The venue's 404, which `Rest` classifies `{:refused, :not_listed}`. This said
+        # `:not_found`, a reason the real package can never return.
+        _unknown -> {:refused, :not_listed}
       end
     end)
   end
 
+  # `:status` and `:symbol` narrow the list as the real package's venue-side filters do.
+  # They were ignored, so a caller asking for FILLED orders or ETH-USD's was handed the one
+  # open BTC-USD order — the "plausible answer to a question not asked" this fake must not give.
   @impl true
-  def get_orders(_credentials, _opts \\ []) do
-    with_injection(fn -> {:ok, [fake_order()]} end)
+  def get_orders(credentials, opts \\ []) do
+    with_credentials(credentials, fn ->
+      orders =
+        Enum.filter([fake_order()], fn order ->
+          status_matches?(Keyword.get(opts, :status), order.status) and
+            matches?(canonical_symbol(Keyword.get(opts, :symbol)), order.symbol)
+        end)
+
+      {:ok, orders}
+    end)
   end
+
+  defp status_matches?(nil, _actual), do: true
+
+  defp status_matches?(wanted, actual) when is_atom(wanted) or is_binary(wanted),
+    do: String.upcase(to_string(wanted)) == String.upcase(to_string(actual))
 
   defp fake_order do
     %Types.Order{
@@ -1165,14 +1208,16 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def preview_order(_credentials, request, _opts \\ []) do
+  def preview_order(credentials, request, _opts \\ []) do
     with_injection(fn ->
-      with :ok <- fake_combination(request) do
+      # The same request checks `place_order/3` runs, then the credential — as the real path.
+      with :ok <- Rest.validate_order_request(request),
+           :ok <- Rest.validate_credentials(credentials) do
         {:ok,
          %{
            order_total: Decimal.new("20000.00"),
            commission_total: Decimal.new("10.00"),
-           base_size: Map.get(request, :quantity),
+           base_size: cast_decimal(Map.get(request, :quantity)),
            quote_size: nil,
            best_bid: Decimal.new("39990"),
            best_ask: Decimal.new("40010"),
@@ -1185,32 +1230,42 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def replace_order(_credentials, order_id, changes, _opts \\ []) do
+  def replace_order(credentials, order_id, changes, _opts \\ []) do
     with_injection(fn ->
       # The fake enforces the venue's edit surface: price and size only, both required. A fake
       # that accepted a side change, or only one of the two, would let a consumer's test pass
       # on an edit the real venue refuses — `EditOrderRequest` declares order_id, price AND
       # size all required (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852), the same
-      # requirement `Rest.replace_order/4` enforces.
-      with :ok <- fake_editable(changes) do
+      # requirement `Rest.replace_order/4` enforces — and `Rest`'s own check is what runs.
+      with :ok <- Rest.validate_order_edit(changes),
+           :ok <- Rest.validate_credentials(credentials) do
         # Read back, as the real package does: the venue's edit response carries no order.
-        {:ok, %{fake_order() | id: order_id, price: Map.get(changes, :price)}}
+        # Both edited fields show in it — the size was left at the original, so the read-back
+        # of an edit disagreed with the edit it followed.
+        {:ok,
+         %{
+           fake_order()
+           | id: order_id,
+             price: cast_decimal(Map.get(changes, :price)),
+             quantity: cast_decimal(Map.get(changes, :quantity))
+         }}
       end
     end)
   end
 
   @impl true
-  def preview_replace(_credentials, order_id, changes, _opts \\ []) do
+  def preview_replace(credentials, order_id, changes, _opts \\ []) do
     with_injection(fn ->
       # The same edit surface replace_order/4 enforces — price and size, both required.
       # Anything less is an edit the venue refuses, and a fake that priced it would let a
       # consumer's suite go green on a call that cannot be made.
-      with :ok <- fake_editable(changes) do
+      with :ok <- Rest.validate_order_edit(changes),
+           :ok <- Rest.validate_credentials(credentials) do
         {:ok,
          %{
            order_total: Decimal.new("20000.00"),
            commission_total: Decimal.new("10.00"),
-           base_size: Map.get(changes, :quantity),
+           base_size: cast_decimal(Map.get(changes, :quantity)),
            quote_size: nil,
            best_bid: Decimal.new("39990"),
            best_ask: Decimal.new("40010"),
@@ -1223,30 +1278,9 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
-  # Mirrors `Rest`'s `editable_changes/1` + `editable_present/1`: an unsupported field is
-  # refused by name, an empty change set is `:no_order_changes`, and exactly one of
-  # price/quantity — without the other — is `:missing_required_edit_field`, because
-  # `EditOrderRequest` requires both.
-  defp fake_editable(changes) do
-    case Map.keys(changes) -- [:price, :quantity] do
-      [] ->
-        has_price = Map.has_key?(changes, :price)
-        has_quantity = Map.has_key?(changes, :quantity)
-
-        cond do
-          has_price and has_quantity -> :ok
-          has_price or has_quantity -> {:error, :missing_required_edit_field}
-          true -> {:error, :no_order_changes}
-        end
-
-      unsupported ->
-        {:error, {:unsupported_order_edit, unsupported}}
-    end
-  end
-
   @impl true
-  def close_position(_credentials, symbol, _opts \\ []) do
-    with_injection(symbol, fn ->
+  def close_position(credentials, symbol, _opts \\ []) do
+    with_credentials(credentials, symbol, fn ->
       # Side stays nil, as it does in the real package: the venue never states it and this
       # package never read the position. A fake that filled in :sell would teach a consumer
       # to rely on a field that is nil in production.
@@ -1265,8 +1299,8 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def list_payment_methods(_credentials, _opts \\ []) do
-    with_injection(fn ->
+  def list_payment_methods(credentials, _opts \\ []) do
+    with_credentials(credentials, fn ->
       # One method verified for deposit but not withdrawal, because the two flags disagree
       # routinely and a fake that set them together would hide the case that bites.
       {:ok,
@@ -1290,19 +1324,20 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_payment_method(_credentials, id, _opts \\ []) do
-    with_injection(fn ->
+  def get_payment_method(credentials, id, _opts \\ []) do
+    with_credentials(credentials, fn ->
       {:ok, %{"id" => id, "type" => "ACH", "verified" => true, "allow_withdraw" => false}}
     end)
   end
 
   @impl true
-  def transfer_internal(_asset, _amount, opts, _request_opts) do
+  def transfer_internal(_asset, _amount, opts, request_opts) do
     with_injection(fn ->
       # Both uuids or nothing. A fake that defaulted one would let a consumer ship a move
-      # between portfolios it never named.
-      with from when is_binary(from) <- Keyword.get(opts, :from),
-           to when is_binary(to) <- Keyword.get(opts, :to) do
+      # between portfolios it never named. Merged and read as the facade does (`opts` over
+      # `request_opts`), then the credential from `request_opts` — the real order.
+      with {:ok, from, to} <- Rest.transfer_portfolios(Keyword.merge(request_opts, opts)),
+           :ok <- Rest.validate_credentials(opts_credentials(request_opts)) do
         # `MovePortfolioFundsResponse` (at-spec.yaml:7934) is the two uuids and nothing else. A
         # `funds` echo was a field a consumer could come to read that the venue never sends.
         {:ok,
@@ -1310,8 +1345,6 @@ defmodule DpExchange.Coinbase.Fake do
            "source_portfolio_uuid" => from,
            "target_portfolio_uuid" => to
          }}
-      else
-        _missing -> {:error, :missing_portfolio}
       end
     end)
   end
@@ -1344,24 +1377,19 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def list_custody_fees(_credentials, _opts \\ []), do: Venue.not_supported()
 
-  defp fake_combination(request) do
-    pair = {Map.get(request, :order_type, :limit), Map.get(request, :time_in_force, :gtc)}
-
-    if pair in [
-         {:market, :ioc},
-         {:market, :fok},
-         {:limit, :gtc},
-         {:limit, :gtd},
-         {:limit, :fok},
-         {:stop_limit, :gtc},
-         {:stop_limit, :gtd}
-       ] do
-      :ok
-    else
-      {type, tif} = pair
-      {:error, {:unsupported_order_combination, type, tif}}
-    end
+  # A private read or write: the injected outcome first, as everywhere, then the credential
+  # check `Rest` runs before it builds any request. This fake had no credential check at
+  # all (see the moduledoc), so a consumer that forgot its credentials saw its tests pass and
+  # production answer `{:error, {:missing_credentials, :coinbase}}`.
+  defp with_credentials(credentials, symbol \\ nil, fun) do
+    with_injection(symbol, fn ->
+      with :ok <- Rest.validate_credentials(credentials), do: fun.()
+    end)
   end
+
+  # Where the facade carries no credential argument, it reads `opts[:credentials]` and
+  # defaults to `%{}` — which `Rest` treats as none.
+  defp opts_credentials(opts), do: Keyword.get(opts, :credentials, %{})
 
   defp with_injection(symbol \\ nil, fun) do
     case FakeInjection.next_outcome(:coinbase, symbol) do

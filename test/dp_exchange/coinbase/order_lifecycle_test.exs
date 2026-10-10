@@ -161,6 +161,49 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
       assert order.provider == :coinbase
     end
 
+    test "price and stop_price come from the echoed order_configuration leaf" do
+      # Both were never read: every order read back carried `price: nil`, while the order
+      # `place_order/3` returned (and the fake) carried one.
+      leaf = %{"base_size" => "2", "limit_price" => "39000.5", "stop_price" => "39500"}
+
+      body = %{
+        "order" => order_json(%{"order_configuration" => %{"stop_limit_stop_limit_gtc" => leaf}})
+      }
+
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc-123", plug: responding(body), retry_attempts: 0)
+
+      assert Decimal.equal?(order.price, Decimal.new("39000.5"))
+      assert Decimal.equal?(order.stop_price, Decimal.new("39500"))
+      assert Decimal.equal?(order.quantity, Decimal.new("2"))
+    end
+
+    test "a plain limit leaf has a price and no stop price" do
+      body = %{"order" => order_json()}
+
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc-123", plug: responding(body), retry_attempts: 0)
+
+      assert Decimal.equal?(order.price, Decimal.new("40000"))
+      assert order.stop_price == nil
+    end
+
+    test "a market leaf has no price, rather than a guess" do
+      body = %{
+        "order" =>
+          order_json(%{
+            "order_type" => "MARKET",
+            "order_configuration" => %{"market_market_ioc" => %{"base_size" => "1"}}
+          })
+      }
+
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc-123", plug: responding(body), retry_attempts: 0)
+
+      assert order.price == nil
+      assert order.stop_price == nil
+    end
+
     test "quantity is the originally-requested size, not the filled amount — a partial fill has quantity > filled_quantity" do
       # Filed as a live bug: to_order/1 read both :quantity and :filled_quantity from the
       # venue's filled_size, so remaining_quantity == quantity - filled_quantity was always
@@ -520,6 +563,32 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
       assert {:ok, []} = Rest.get_orders(@credentials, limit: 25, plug: plug, retry_attempts: 0)
       assert_receive {:query, query}
       assert query =~ "limit=25"
+    end
+
+    test "a list of statuses and symbols is sent as the spec's repeated keys, not a crash" do
+      # `order_status` and `product_ids` are `explode: true` arrays in the spec.
+      # `URI.encode_query/1` raised on a list, in the caller's process.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"orders" => []}))
+      end
+
+      assert {:ok, []} =
+               Rest.get_orders(@credentials,
+                 status: [:open, "pending"],
+                 symbol: ["BTC-USD", "ETH-USD"],
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}
+      assert query =~ "order_status=OPEN&order_status=PENDING"
+      assert query =~ "product_ids=BTC-USD&product_ids=ETH-USD"
     end
   end
 end

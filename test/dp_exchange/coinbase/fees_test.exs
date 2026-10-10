@@ -187,13 +187,13 @@ defmodule DpExchange.Coinbase.FeesTest do
 
   describe "the fake and the facade" do
     test "the fake's two tiers differ, as the venue's do under a promotion" do
-      assert {:ok, fees} = Fake.get_fees(%{}, [])
+      assert {:ok, fees} = Fake.get_fees(@credentials, [])
       assert fees["fee_tier"]["taker_fee_rate"] != "0.0060"
       assert fees["fee_tier_without_promotion"]["current_tier"]["taker_fee_rate"] == "0.0060"
     end
 
     test "the fake's volume row carries the totals beside the breakdown" do
-      assert {:ok, [row]} = Fake.get_trade_volume(%{})
+      assert {:ok, [row]} = Fake.get_trade_volume(@credentials)
       assert row["volume"] == 1000
       assert row["coinbase_pro_volume"] == 250
     end

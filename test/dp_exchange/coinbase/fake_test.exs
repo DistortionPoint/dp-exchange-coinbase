@@ -4,9 +4,169 @@ defmodule DpExchange.Coinbase.FakeTest do
   alias DpExchange.Coinbase.Fake
   alias DpExchange.Core.{Notice, Types}
 
+  @credentials %{api_key: "k", api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="}
+  @missing {:error, {:missing_credentials, :coinbase}}
+
   # The fake is a real implementation, so it gets real tests. The two rules it exists to
   # honour — less capable but never differently capable, and never rewriting a caller's
   # value — are what these assert.
+
+  describe "private endpoints refuse what the real path refuses: no usable credential" do
+    # The real path answers `{:error, {:missing_credentials, :coinbase}}` for `nil`, `%{}` and
+    # a map that cannot sign, before any request. The fake used to inspect none of them.
+    test "every credentialed call, with the credential positional" do
+      one = Decimal.new("1")
+      request = %{symbol: "BTC-USD", side: :buy, quantity: one, price: one}
+      edit = %{price: Decimal.new("1"), quantity: Decimal.new("1")}
+
+      for bad <- [nil, %{}, %{api_key: "k"}, %{api_key: 1, api_secret: "s"}] do
+        assert @missing == Fake.get_balances(bad, [])
+        assert @missing == Fake.get_accounts(bad, [])
+        assert @missing == Fake.get_fees(bad, [])
+        assert @missing == Fake.get_trade_history(bad, [])
+        assert @missing == Fake.get_trade_volume(bad)
+        assert @missing == Fake.place_order(bad, request)
+        assert @missing == Fake.preview_order(bad, request)
+        assert @missing == Fake.cancel_order(bad, "fake-order-1")
+        assert @missing == Fake.get_order(bad, "fake-order-1")
+        assert @missing == Fake.get_orders(bad)
+        assert @missing == Fake.replace_order(bad, "fake-order-1", edit)
+        assert @missing == Fake.preview_replace(bad, "fake-order-1", edit)
+        assert @missing == Fake.close_position(bad, "BTC-USD")
+        assert @missing == Fake.list_payment_methods(bad)
+        assert @missing == Fake.get_payment_method(bad, "pm-1")
+      end
+    end
+
+    test "every credentialed call, with the credential in opts (the facade's default is %{})" do
+      for opts <- [[], [credentials: nil], [credentials: %{}]] do
+        assert @missing == Fake.get_positions(opts)
+        assert @missing == Fake.list_portfolios(opts)
+        assert @missing == Fake.get_roles(opts)
+        assert @missing == Fake.create_account([name: "n"] ++ opts)
+        assert @missing == Fake.rename_account("pf-1", "n", opts)
+        assert @missing == Fake.quote_conversion("USD", "USDC", Decimal.new("1"), opts)
+
+        assert @missing ==
+                 Fake.transfer_internal("USD", Decimal.new("1"), [from: "a", to: "b"], opts)
+      end
+    end
+
+    test "a conversion commit or read checks its accounts, then the credential, then the id" do
+      assert {:error, :from_and_to_required} = Fake.commit_conversion("t-1", [])
+      assert @missing == Fake.commit_conversion("t-1", from: "USD", to: "USDC")
+      assert @missing == Fake.get_conversion("t-1", from: "USD", to: "USDC")
+
+      opts = [from: "USD", to: "USDC", credentials: @credentials]
+      assert {:refused, :not_listed} = Fake.commit_conversion("t-1", opts)
+    end
+
+    test "the argument checks come first where the real function runs them first" do
+      assert {:error, :name_required} = Fake.create_account([])
+
+      assert {:error, :missing_portfolio} =
+               Fake.transfer_internal("USD", Decimal.new("1"), [], [])
+    end
+
+    test "get_top_of_book reads %{} as no credential, as the real path does" do
+      assert @missing == Fake.get_top_of_book("BTC-USD", credentials: %{})
+    end
+
+    test "test_connection: none is reachability, a key that cannot sign is refused" do
+      assert {:ok, %{"reachable" => true}} = Fake.test_connection(%{}, [])
+      assert @missing == Fake.test_connection(%{api_key: "k"}, [])
+      assert {:ok, %{"can_view" => true}} = Fake.test_connection(@credentials, [])
+    end
+
+    test "public market data needs none" do
+      assert {:ok, _quote} = Fake.get_price("BTC-USD")
+      assert {:ok, _book} = Fake.get_order_book("BTC-USD")
+    end
+  end
+
+  describe "orders are validated by the real checks, in the real order" do
+    test "an order with no symbol or side is an error, not a KeyError" do
+      assert {:error, {:missing_field, :symbol}} =
+               Fake.place_order(@credentials, %{side: :buy, quantity: Decimal.new("1")})
+
+      assert {:error, {:missing_field, :side}} =
+               Fake.place_order(@credentials, %{symbol: "BTC-USD", quantity: Decimal.new("1")})
+    end
+
+    test "a limit order with no price is refused, as is a market order with no size" do
+      limit = %{symbol: "BTC-USD", side: :buy, quantity: Decimal.new("1")}
+      assert {:error, :missing_limit_price} = Fake.place_order(@credentials, limit)
+      assert {:error, :missing_limit_price} = Fake.preview_order(@credentials, limit)
+
+      market = %{symbol: "BTC-USD", side: :buy, order_type: :market, time_in_force: :ioc}
+      assert {:error, :missing_order_size} = Fake.place_order(@credentials, market)
+    end
+
+    test "a request the real path refuses is refused before the credential is looked at" do
+      assert {:error, {:missing_field, :symbol}} = Fake.place_order(%{}, %{side: :buy})
+    end
+
+    test "the placed order carries Decimals, as the real return does" do
+      request = %{symbol: "BTC-USD", side: :buy, quantity: "0.5", price: 40_000.5}
+
+      assert {:ok, order} = Fake.place_order(@credentials, request)
+      assert Decimal.equal?(order.quantity, Decimal.new("0.5"))
+      assert Decimal.equal?(order.price, Decimal.new("40000.5"))
+    end
+
+    test "a replace read-back shows both edited fields" do
+      edit = %{price: Decimal.new("41000"), quantity: Decimal.new("0.75")}
+
+      assert {:ok, order} = Fake.replace_order(@credentials, "fake-order-1", edit)
+      assert Decimal.equal?(order.price, Decimal.new("41000"))
+      assert Decimal.equal?(order.quantity, Decimal.new("0.75"))
+    end
+
+    test "an unknown order is the venue's 404, {:refused, :not_listed}" do
+      assert {:refused, :not_listed} = Fake.get_order(@credentials, "no-such-order")
+    end
+
+    test ":status and :symbol narrow the list instead of being ignored" do
+      assert {:ok, [_open]} = Fake.get_orders(@credentials, status: :open, symbol: "BTC-USD")
+      assert {:ok, []} = Fake.get_orders(@credentials, status: :filled)
+      assert {:ok, []} = Fake.get_orders(@credentials, symbol: "ETH-USD")
+    end
+
+    test "fills narrow on :symbol, :order_id and the time window" do
+      assert {:ok, [_fill]} = Fake.get_trade_history(@credentials, symbol: "BTC-USD")
+      assert {:ok, []} = Fake.get_trade_history(@credentials, symbol: "ETH-USD")
+      assert {:ok, []} = Fake.get_trade_history(@credentials, order_id: "other")
+      assert {:ok, []} = Fake.get_trade_history(@credentials, start: ~U[2026-09-01 00:00:00Z])
+      assert {:ok, []} = Fake.get_trade_history(@credentials, end: ~U[2026-08-01 00:00:00Z])
+    end
+  end
+
+  describe "candles are validated before the symbol, as the real path validates them" do
+    test "an unsupported timeframe wins over an unlisted symbol" do
+      assert {:error, {:unsupported_timeframe, "12h"}} =
+               Fake.get_historical_prices("NOPE-USD", "12h")
+    end
+
+    test "an over-wide window wins over an unlisted symbol" do
+      finish = ~U[2026-08-28 12:00:00Z]
+      start = DateTime.add(finish, -60 * 400, :second)
+
+      assert {:error, {:range_too_wide, requested: 400, max: 350}} =
+               Fake.get_historical_prices("NOPE-USD", "1m", start: start, end: finish)
+    end
+
+    test "a window with only :end set defaults its start as the real path does" do
+      assert {:ok, [_bar]} =
+               Fake.get_historical_prices("BTC-USD", "1h", end: ~U[2026-08-28 12:00:00Z])
+    end
+  end
+
+  describe "the book" do
+    test "a limit of zero is an empty book, not the two levels of a descending 1..0" do
+      assert {:ok, %Types.OrderBook{bids: [], asks: []}} =
+               Fake.get_order_book("BTC-USD", limit: 0)
+    end
+  end
 
   describe "it answers from memory with the same shapes as the real venue" do
     test "get_price returns a Quote with a fixed timestamp" do
@@ -123,7 +283,7 @@ defmodule DpExchange.Coinbase.FakeTest do
       # nil in the fake because it is nil in production: the venue never states the side of
       # a closing order, and a fake that filled in :sell would teach a consumer to rely on
       # a field that is not there.
-      assert {:ok, %Types.Order{} = order} = Fake.close_position(%{}, "BTC-USD")
+      assert {:ok, %Types.Order{} = order} = Fake.close_position(@credentials, "BTC-USD")
 
       assert order.side == nil
       assert order.status == :pending
@@ -132,7 +292,7 @@ defmodule DpExchange.Coinbase.FakeTest do
 
     test "preview_replace prices price and size changes" do
       assert {:ok, preview} =
-               Fake.preview_replace(%{}, "abc", %{
+               Fake.preview_replace(@credentials, "abc", %{
                  price: Decimal.new("41000"),
                  quantity: Decimal.new("0.5")
                })
@@ -143,12 +303,12 @@ defmodule DpExchange.Coinbase.FakeTest do
 
     test "preview_replace refuses an edit the venue refuses" do
       assert {:error, {:unsupported_order_edit, [:side]}} =
-               Fake.preview_replace(%{}, "abc", %{side: :sell})
+               Fake.preview_replace(@credentials, "abc", %{side: :sell})
     end
 
     test "preview_replace refuses price alone — EditOrderRequest requires size too" do
       assert {:error, :missing_required_edit_field} =
-               Fake.preview_replace(%{}, "abc", %{price: Decimal.new("41000")})
+               Fake.preview_replace(@credentials, "abc", %{price: Decimal.new("41000")})
     end
   end
 
@@ -156,7 +316,7 @@ defmodule DpExchange.Coinbase.FakeTest do
     test "the fake's held amount is not zero, so available is not the total" do
       # A consumer reading available_balance as the total fails here rather than in
       # production, which is the only reason a fake has numbers at all.
-      assert {:ok, balances} = Fake.get_balances(%{}, [])
+      assert {:ok, balances} = Fake.get_balances(@credentials, [])
       btc = Enum.find(balances, &(&1.currency == "BTC"))
 
       refute Decimal.equal?(btc.hold, Decimal.new("0"))
@@ -166,13 +326,13 @@ defmodule DpExchange.Coinbase.FakeTest do
 
     test "a balance is stamped when it was asked for" do
       before = DateTime.utc_now()
-      assert {:ok, [balance | _rest]} = Fake.get_balances(%{}, [])
+      assert {:ok, [balance | _rest]} = Fake.get_balances(@credentials, [])
 
       assert DateTime.compare(balance.timestamp, before) != :lt
     end
 
     test "accounts carry what a balance cannot — the uuid and the platform" do
-      assert {:ok, [account]} = Fake.get_accounts(%{}, [])
+      assert {:ok, [account]} = Fake.get_accounts(@credentials, [])
 
       assert account["uuid"]
       assert account["platform"] == "ACCOUNT_PLATFORM_CONSUMER"
@@ -180,12 +340,12 @@ defmodule DpExchange.Coinbase.FakeTest do
 
     test "a uuid the fake does not hold is refused, not an empty account" do
       # `{:ok, []}` would read as "this account has nothing in it".
-      assert {:refused, :not_found} = Fake.get_accounts(%{}, uuid: "nope")
+      assert {:refused, :not_listed} = Fake.get_accounts(@credentials, uuid: "nope")
     end
 
     test "the fake's own uuid reads back" do
       assert {:ok, [account]} =
-               Fake.get_accounts(%{}, uuid: "8bfc20d7-f7c6-4422-bf07-8243ca4169fe")
+               Fake.get_accounts(@credentials, uuid: "8bfc20d7-f7c6-4422-bf07-8243ca4169fe")
 
       assert account["currency"] == "BTC"
     end
@@ -195,17 +355,17 @@ defmodule DpExchange.Coinbase.FakeTest do
     test "an adjusted fill is excluded by default" do
       # A REVERSAL is not a trade that happened, and Fill has no field to say so. A fake
       # that returned both under one type would teach a consumer to sum them.
-      assert {:ok, [only]} = Fake.get_trade_history(%{}, [])
+      assert {:ok, [only]} = Fake.get_trade_history(@credentials, [])
       assert only.trade_id == "t-1"
     end
 
     test "asking for them widens the answer" do
-      assert {:ok, both} = Fake.get_trade_history(%{}, trade_types: ["FILL", "REVERSAL"])
+      assert {:ok, both} = Fake.get_trade_history(@credentials, trade_types: ["FILL", "REVERSAL"])
       assert length(both) == 2
     end
 
     test "the fee currency is nil, as it is in production" do
-      assert {:ok, [fill]} = Fake.get_trade_history(%{}, [])
+      assert {:ok, [fill]} = Fake.get_trade_history(@credentials, [])
       assert fill.fee_currency == nil
       assert fill.liquidity == :taker
     end

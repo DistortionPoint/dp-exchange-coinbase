@@ -178,12 +178,13 @@ defmodule DpExchange.Coinbase.AdminTest do
 
   describe "the fake and the facade" do
     test "the fake's key cannot transfer, as a real one often cannot" do
-      assert {:ok, %{"can_transfer" => false, "can_trade" => true}} = Fake.get_roles()
+      assert {:ok, %{"can_transfer" => false, "can_trade" => true}} =
+               Fake.get_roles(credentials: @credentials)
     end
 
     test "the fake splits test_connection the same way" do
       assert {:ok, %{"time" => _time}} = Fake.test_connection(nil, [])
-      assert {:ok, %{"can_view" => true}} = Fake.test_connection(%{api_key: "k"}, [])
+      assert {:ok, %{"can_view" => true}} = Fake.test_connection(@credentials, [])
     end
 
     test "the facade delegates all three" do

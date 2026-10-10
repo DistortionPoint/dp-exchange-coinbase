@@ -416,7 +416,7 @@ defmodule DpExchange.Coinbase.Rest do
 
       uuid ->
         case request(:get, "/accounts/#{uuid}", credentials, opts) do
-          {:ok, %{body: %{"account" => account}}} -> {:ok, [account]}
+          {:ok, %{body: %{"account" => account}}} when is_map(account) -> {:ok, [account]}
           {:ok, _unexpected} -> {:error, :unexpected_response_shape}
           {:error, reason} -> classify(reason)
         end
@@ -530,10 +530,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec transfer_internal(map(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def transfer_internal(credentials, asset, amount, opts) do
-    from = Keyword.get(opts, :from)
-    to = Keyword.get(opts, :to)
-
-    with :ok <- both_portfolios(from, to) do
+    with {:ok, from, to} <- transfer_portfolios(opts) do
       body = %{
         "funds" => %{"value" => Decimal.to_string(amount, :normal), "currency" => asset},
         "source_portfolio_uuid" => from,
@@ -547,9 +544,6 @@ defmodule DpExchange.Coinbase.Rest do
       end
     end
   end
-
-  defp both_portfolios(from, to) when is_binary(from) and is_binary(to), do: :ok
-  defp both_portfolios(_from, _to), do: {:error, :missing_portfolio}
 
   # --- key permissions and server time ------------------------------------
 
@@ -798,7 +792,9 @@ defmodule DpExchange.Coinbase.Rest do
 
     case request(:get, "/portfolios/#{portfolio_uuid}", credentials, opts, params) do
       {:ok, %{body: %{"breakdown" => breakdown}}} when is_map(breakdown) -> {:ok, breakdown}
-      {:ok, %{body: %{} = body}} -> {:ok, body}
+      # `GetPortfolioBreakdownResponse` always carries `breakdown`. Any other object used to be
+      # handed back as the breakdown (`{}` read as a portfolio holding nothing); it is an
+      # unreadable answer, not a portfolio.
       {:ok, _unexpected} -> {:error, :unexpected_response_shape}
       {:error, reason} -> classify(reason)
     end
@@ -865,13 +861,6 @@ defmodule DpExchange.Coinbase.Rest do
       {:ok, %{body: %{} = result}} -> {:ok, result}
       {:ok, _unexpected} -> {:error, :unexpected_response_shape}
       {:error, reason} -> classify(reason)
-    end
-  end
-
-  defp required_name(opts) do
-    case Keyword.get(opts, :name) do
-      name when is_binary(name) -> {:ok, name}
-      _missing -> {:error, :name_required}
     end
   end
 
@@ -952,13 +941,6 @@ defmodule DpExchange.Coinbase.Rest do
              convert_trade(request(:get, "/convert/trade/#{trade_id}", credentials, opts, params)) do
         to_conversion(trade, from, to)
       end
-    end
-  end
-
-  defp convert_accounts(opts) do
-    case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
-      {from, to} when is_binary(from) and is_binary(to) -> {:ok, from, to}
-      _missing -> {:error, :from_and_to_required}
     end
   end
 
@@ -1632,6 +1614,100 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  # --- validators shared with the fake ---------------------------------------
+  #
+  # `DpExchange.Coinbase.Fake` must refuse exactly what the real path refuses, in the same
+  # order and with the same error shapes. Re-stating these rules there let the two drift
+  # (a fake that accepted an order with no price, or a candle window the venue would
+  # refuse), so the fake calls these instead. Each is the very check the real function runs
+  # before it builds a request.
+
+  @doc """
+  Whether `credentials` can sign a request — the same test the real private paths apply
+  before any request is built.
+
+  `nil`, `%{}`, and any map without a binary `:api_key` and `:api_secret` are
+  `{:error, {:missing_credentials, :coinbase}}`, as `Auth.jwt/2` answers them. This does not
+  decode the secret: a key that is present but malformed fails later, at signing.
+  """
+  @spec validate_credentials(term()) :: :ok | {:error, {:missing_credentials, :coinbase}}
+  def validate_credentials(credentials) do
+    case normalise_credentials(credentials) do
+      %{api_key: key, api_secret: secret} when is_binary(key) and is_binary(secret) -> :ok
+      _unusable -> {:error, {:missing_credentials, :coinbase}}
+    end
+  end
+
+  @doc """
+  The local checks `place_order/3` and `preview_order/3` run on a request before sending:
+  identity (symbol, side, quantity), then the sparse order-type and time-in-force table,
+  then each leaf's required and refused fields.
+  """
+  @spec validate_order_request(map()) :: :ok | {:error, term()}
+  def validate_order_request(request) do
+    with {:ok, _symbol, _side} <- order_identity(request),
+         {:ok, _configuration} <- order_configuration(request) do
+      :ok
+    end
+  end
+
+  @doc """
+  The local checks `replace_order/4` and `preview_replace/4` run on `changes`: only `:price`
+  and `:quantity`, and both.
+  """
+  @spec validate_order_edit(map()) :: :ok | {:error, term()}
+  def validate_order_edit(changes), do: editable_changes(changes)
+
+  @doc """
+  The local checks `get_historical_prices/4` runs before any request: a timeframe Coinbase
+  serves, and a window of at most `max_candles/0` candles.
+  """
+  @spec validate_candle_request(String.t(), keyword()) :: :ok | {:error, term()}
+  def validate_candle_request(timeframe, range) do
+    with {:ok, enum} <- granularity_enum(timeframe),
+         {:ok, _params} <- candle_params(timeframe, range, enum) do
+      :ok
+    end
+  end
+
+  @doc """
+  The two account names the conversion commit and read require in `opts[:from]` and
+  `opts[:to]`, or `{:error, :from_and_to_required}`.
+  """
+  @spec convert_accounts(keyword()) ::
+          {:ok, String.t(), String.t()} | {:error, :from_and_to_required}
+  def convert_accounts(opts) do
+    case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
+      {from, to} when is_binary(from) and is_binary(to) -> {:ok, from, to}
+      _missing -> {:error, :from_and_to_required}
+    end
+  end
+
+  @doc """
+  The two portfolio uuids `transfer_internal/4` requires in `opts[:from]` and `opts[:to]`,
+  or `{:error, :missing_portfolio}`.
+  """
+  @spec transfer_portfolios(keyword()) ::
+          {:ok, String.t(), String.t()} | {:error, :missing_portfolio}
+  def transfer_portfolios(opts) do
+    case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
+      {from, to} when is_binary(from) and is_binary(to) -> {:ok, from, to}
+      _missing -> {:error, :missing_portfolio}
+    end
+  end
+
+  @doc """
+  The portfolio name `create_portfolio/2` requires in `opts[:name]`, or
+  `{:error, :name_required}`.
+  """
+  @spec required_name(keyword()) :: {:ok, String.t()} | {:error, :name_required}
+  def required_name(opts) do
+    case Keyword.get(opts, :name) do
+      name when is_binary(name) -> {:ok, name}
+      _missing -> {:error, :name_required}
+    end
+  end
+
   # --- internal ----------------------------------------------------------
 
   defp granularity_enum(timeframe) do
@@ -1765,8 +1841,17 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp query(params) when params == %{}, do: ""
 
+  # A list value is the spec's `explode: true` array — `order_status`, `product_ids` — sent
+  # as one repeated key per element. `URI.encode_query/1` raises `ArgumentError` on a list,
+  # so `get_orders(status: [:open, :pending])` crashed in the caller's process.
   defp query(params) do
-    "?" <> URI.encode_query(params)
+    "?" <>
+      (params
+       |> Enum.flat_map(fn
+         {key, values} when is_list(values) -> Enum.map(values, &{key, &1})
+         pair -> [pair]
+       end)
+       |> URI.encode_query())
   end
 
   # A 404 from this venue means the product is not listed — a permanent answer, and the
@@ -2611,6 +2696,11 @@ defmodule DpExchange.Coinbase.Rest do
   # boolean is put through unchanged and Jason encodes it as JSON `true`/`false`.
   defp put_unless_nil(map, key, value) when is_boolean(value), do: Map.put(map, key, value)
 
+  # A list is an `explode: true` array, kept a list so `query/1` sends one key per element.
+  # `to_string/1` concatenated it: `["OPEN", "PENDING"]` went out as `OPENPENDING`.
+  defp put_unless_nil(map, key, values) when is_list(values),
+    do: Map.put(map, key, Enum.map(values, &to_string/1))
+
   defp put_unless_nil(map, key, value), do: Map.put(map, key, to_string(value))
 
   # `end_time` is documented as an RFC3339 timestamp
@@ -2874,7 +2964,12 @@ defmodule DpExchange.Coinbase.Rest do
   Orders, most recent first.
 
   `:status` and `:symbol` in `opts` filter at the venue rather than here — a client-side
-  filter over one page would silently drop matching orders that were on the next one.
+  filter over one page would silently drop matching orders that were on the next one. Each
+  takes one value or a list (`status: [:open, :pending]`), sent as the spec's repeated
+  `order_status` / `product_ids` keys.
+
+  `:limit` is the venue's **page size**, not a cap on the result: the walk below collects
+  every page, so a caller wanting at most N orders takes them from the list.
 
   **This follows the venue's cursor to the end**, bounded by `@max_order_pages`.
 
@@ -2939,12 +3034,16 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp order_status_param(nil), do: nil
 
+  defp order_status_param(statuses) when is_list(statuses),
+    do: Enum.map(statuses, &order_status_param/1)
+
   defp order_status_param(status) when is_atom(status),
     do: status |> to_string() |> String.upcase()
 
   defp order_status_param(status) when is_binary(status), do: String.upcase(status)
 
   defp venue_symbol(nil), do: nil
+  defp venue_symbol(symbols) when is_list(symbols), do: Enum.map(symbols, &venue_symbol/1)
   defp venue_symbol(symbol), do: SymbolFormat.to_exchange_symbol(symbol)
 
   # The venue's status vocabulary, mapped to the contract's. `OrderExecutionStatus`'s full
@@ -2978,6 +3077,8 @@ defmodule DpExchange.Coinbase.Rest do
   }
 
   defp to_order(order) do
+    leaf = order_leaf(order["order_configuration"])
+
     %Types.Order{
       id: order["order_id"],
       symbol: order |> Map.get("product_id") |> canonical_or_nil(),
@@ -2988,7 +3089,12 @@ defmodule DpExchange.Coinbase.Rest do
       # partially-filled order's remaining size read as zero on every read after placement.
       # The venue echoes what was actually requested in `order_configuration`, the same
       # place `closing_configuration/1` below already reads it from for a closing order.
-      quantity: quantity_from_configuration(order["order_configuration"]),
+      quantity: decimal(leaf["base_size"]),
+      # The limit and stop prices the order was placed with, from the same echoed leaf. They
+      # were never read, so every order read back had `price: nil` while `place_order/3`'s
+      # own return and the fake both carried one. Absent on a market leaf, where `nil` is true.
+      price: decimal(leaf["limit_price"]),
+      stop_price: decimal(leaf["stop_price"]),
       filled_quantity: decimal(order["filled_size"]),
       average_price:
         average_price(decimal(order["average_filled_price"]), decimal(order["filled_size"])),
@@ -3013,12 +3119,16 @@ defmodule DpExchange.Coinbase.Rest do
   # A quote-sized market order's leaf carries `quote_size`, not `base_size`, and there is
   # no rate here to convert one to the other — `nil`, not a guess, same as
   # `closing_configuration/1` below for the same shape.
-  defp quantity_from_configuration(%{} = configuration) when map_size(configuration) == 1 do
-    [{_name, leaf}] = Map.to_list(configuration)
-    decimal(is_map(leaf) && leaf["base_size"])
+  #
+  # The single leaf of `order_configuration`, or an empty map when there is none to read.
+  defp order_leaf(%{} = configuration) when map_size(configuration) == 1 do
+    case Map.values(configuration) do
+      [%{} = leaf] -> leaf
+      _not_a_leaf -> %{}
+    end
   end
 
-  defp quantity_from_configuration(_absent), do: nil
+  defp order_leaf(_absent), do: %{}
 
   # Only a string is a product id. Anything else used to reach
   # `SymbolFormat.to_canonical_symbol/1` and raise out of `get_order/3`, `get_orders/2` and

@@ -20,6 +20,44 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_orders/2` raised on a list of statuses or symbols.** The spec declares
+  `order_status` and `product_ids` as `explode: true` arrays, but `URI.encode_query/1`
+  raises `ArgumentError` on a list value, so `status: [:open, :pending]` crashed in the
+  caller's process. Lists are now sent as repeated keys. Its doc now also states that
+  `:limit` is the venue's page size, not a cap on the walked result.
+
+- **`get_portfolio_breakdown/3` returned any object as the breakdown, and `get_accounts/2`
+  with `:uuid` returned `[nil]`.** A reply without a `breakdown` object (`{}`, an error body,
+  `"breakdown": null`) came back `{:ok, body}` — an empty portfolio, or an error read as one
+  — where the schema always carries `breakdown`; it is now
+  `{:error, :unexpected_response_shape}`. A single-account reply whose `account` was `null`
+  or not an object came back `{:ok, [nil]}`; it is now the same error.
+- **`get_order/3` and `get_orders/2` never read an order's prices.** `price` and
+  `stop_price` were left `nil` on every order read back, though the venue echoes the
+  `limit_price` and `stop_price` it placed in the `order_configuration` leaf (the one the
+  quantity is already read from). A limit order placed at 40000 read back as having no price,
+  while `place_order/3`'s own return and the fake carried one. A market leaf still has none.
+- **The fake accepted what the real path refuses.** It checked no credential at all, so a
+  consumer that forgot its credentials saw green tests and a production
+  `{:error, {:missing_credentials, :coinbase}}`. Every private fake call now refuses `nil`,
+  `%{}` and a map that cannot sign, after the same local argument checks, in the same order,
+  as the real function. The checks are `Rest`'s own, now public and documented
+  (`validate_credentials/1`, `validate_order_request/1`, `validate_order_edit/1`,
+  `validate_candle_request/2`, `convert_accounts/1`, `transfer_portfolios/1`,
+  `required_name/1`), not a second copy: an order with no symbol raised `KeyError`, a limit
+  order with no price was "placed", `get_top_of_book/2` treated `%{}` as a credential, and
+  `get_historical_prices/4` answered `:not_listed` for an unlisted symbol where the real path
+  first refuses the timeframe or window.
+- **The fake gave answers the real package cannot.** An unknown order or account was
+  `{:refused, :not_found}`; the venue's 404 is `{:refused, :not_listed}`. `get_orders/2` and
+  `get_trade_history/2` ignored their filters (`:status`, `:symbol`, `:order_id`, `:start`,
+  `:end`), handing a BTC-USD fill to a caller asking for ETH-USD's. `replace_order/4` read
+  back the original size, not the edited one. A placed or previewed order carried the
+  caller's raw value rather than the Decimal the real return carries. `get_order_book/2` with
+  `limit: 0` returned two levels (a descending `1..0`).
+
 ## [0.3.96] - 2026-10-10
 
 ### Fixed

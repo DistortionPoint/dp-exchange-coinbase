@@ -194,16 +194,23 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
     end
 
     test "the fake refuses a move with either end missing" do
-      assert {:error, :missing_portfolio} =
-               Fake.transfer_internal("USD", Decimal.new("1"), [to: "b"], [])
+      auth = [credentials: @credentials]
 
       assert {:error, :missing_portfolio} =
-               Fake.transfer_internal("USD", Decimal.new("1"), [from: "a"], [])
+               Fake.transfer_internal("USD", Decimal.new("1"), [to: "b"], auth)
+
+      assert {:error, :missing_portfolio} =
+               Fake.transfer_internal("USD", Decimal.new("1"), [from: "a"], auth)
     end
 
     test "the fake moves when both ends are named" do
       assert {:ok, result} =
-               Fake.transfer_internal("USD", Decimal.new("1"), [from: "a", to: "b"], [])
+               Fake.transfer_internal(
+                 "USD",
+                 Decimal.new("1"),
+                 [from: "a", to: "b"],
+                 credentials: @credentials
+               )
 
       assert result["source_portfolio_uuid"] == "a"
       assert result["target_portfolio_uuid"] == "b"
