@@ -65,6 +65,8 @@ defmodule DpExchange.Coinbase.Fake do
 
   # Process-dictionary key for the symbols subscribed WITH `:trades` — see `subscribe/2`.
   @trades_key {__MODULE__, :trades}
+  @order_book_key {__MODULE__, :order_book}
+  @conversions_key {__MODULE__, :conversions}
 
   @price %{
     "BTC-USD" => "78776.85",
@@ -99,26 +101,28 @@ defmodule DpExchange.Coinbase.Fake do
   def capabilities, do: DpExchange.Coinbase.capabilities()
 
   @impl true
-  def get_price(symbol, _opts \\ []) do
-    with_injection(symbol, fn ->
-      case Map.fetch(@price, symbol) do
-        {:ok, price} ->
-          {:ok,
-           %Types.Quote{
-             symbol: symbol,
-             price: Decimal.new(price),
-             volume: Decimal.new("1234.5"),
-             # As the real `get_price/2`: the latest trade's size, one print.
-             volume_window: :print,
-             venue_time: @at,
-             observed_at: @at,
-             provider: :coinbase
-           }}
+  def get_price(symbol, _opts \\ []), do: with_injection(symbol, fn -> fake_quote(symbol) end)
 
-        :error ->
-          {:refused, :not_listed}
-      end
-    end)
+  # Outside `with_injection/2`, so `subscribe/2` builds its push without consuming a failure
+  # a test queued for `get_price/2` (found 2026-10-10).
+  defp fake_quote(symbol) do
+    case Map.fetch(@price, symbol) do
+      {:ok, price} ->
+        {:ok,
+         %Types.Quote{
+           symbol: symbol,
+           price: Decimal.new(price),
+           volume: Decimal.new("1234.5"),
+           # As the real `get_price/2`: the latest trade's size, one print.
+           volume_window: :print,
+           venue_time: @at,
+           observed_at: @at,
+           provider: :coinbase
+         }}
+
+      :error ->
+        {:refused, :not_listed}
+    end
   end
 
   # **`get_top_of_book/2` is the one endpoint on this venue with no public form** — see
@@ -208,32 +212,33 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_order_book(symbol, opts \\ []) do
-    with_injection(symbol, fn ->
-      case Map.fetch(@price, symbol) do
-        {:ok, price} ->
-          mid = Decimal.new(price)
-          limit = Config.opt(opts, :limit, 3)
+  def get_order_book(symbol, opts \\ []),
+    do: with_injection(symbol, fn -> fake_order_book(symbol, opts) end)
 
-          {:ok,
-           %Types.OrderBook{
-             symbol: symbol,
-             # Descending bids, ascending asks — the venue's own ordering, and the sizes
-             # differ per level so a caller reading only the top learns it is reading a book.
-             bids: book_side(mid, limit, :sub),
-             asks: book_side(mid, limit, :add),
-             venue_time: @at,
-             observed_at: @at,
-             # The venue publishes no sequence on this endpoint, so neither does the fake: a
-             # caller must not learn to detect stream gaps from a REST book.
-             sequence: nil,
-             provider: :coinbase
-           }}
+  defp fake_order_book(symbol, opts) do
+    case Map.fetch(@price, symbol) do
+      {:ok, price} ->
+        mid = Decimal.new(price)
+        limit = Config.opt(opts, :limit, 3)
 
-        :error ->
-          {:refused, :not_listed}
-      end
-    end)
+        {:ok,
+         %Types.OrderBook{
+           symbol: symbol,
+           # Descending bids, ascending asks — the venue's own ordering, and the sizes
+           # differ per level so a caller reading only the top learns it is reading a book.
+           bids: book_side(mid, limit, :sub),
+           asks: book_side(mid, limit, :add),
+           venue_time: @at,
+           observed_at: @at,
+           # The venue publishes no sequence on this endpoint, so neither does the fake: a
+           # caller must not learn to detect stream gaps from a REST book.
+           sequence: nil,
+           provider: :coinbase
+         }}
+
+      :error ->
+        {:refused, :not_listed}
+    end
   end
 
   @impl true
@@ -487,7 +492,7 @@ defmodule DpExchange.Coinbase.Fake do
     channels = Config.opt(opts, :channels, [:quotes])
 
     for symbol <- symbols, symbol in @symbols do
-      case get_price(symbol, []) do
+      case fake_quote(symbol) do
         # The real stream's volume is `volume_24_h`, a rolling total, where `get_price/2`'s is
         # one print — so the pushed quote says what the real one says.
         {:ok, quote_struct} ->
@@ -499,10 +504,24 @@ defmodule DpExchange.Coinbase.Fake do
       end
 
       if :trades in channels, do: send(target, {:dp_exchange, :coinbase, trade_for(symbol)})
+
+      # The level2 channel opens with a snapshot, which this fake pushed none of, so a
+      # consumer's book handling had nothing to run against. Deltas are not modelled.
+      if :order_book in channels do
+        with {:ok, book} <- fake_order_book(symbol, []),
+             do: send(target, {:dp_exchange, :coinbase, book})
+      end
     end
 
     # Unioned, and only for symbols this call pushed a trade for: a symbol subscribed
     # earlier without `:trades` does not gain trade coverage from a later call for others.
+    if :order_book in channels do
+      Process.put(
+        @order_book_key,
+        MapSet.union(subscribed_books(), MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
+      )
+    end
+
     if :trades in channels do
       Process.put(
         @trades_key,
@@ -536,6 +555,7 @@ defmodule DpExchange.Coinbase.Fake do
     symbols = canonical_case(symbols)
     Process.put(__MODULE__, MapSet.difference(subscribed(), MapSet.new(symbols)))
     Process.put(@trades_key, MapSet.difference(subscribed_trades(), MapSet.new(symbols)))
+    Process.put(@order_book_key, MapSet.difference(subscribed_books(), MapSet.new(symbols)))
     :ok
   end
 
@@ -543,10 +563,24 @@ defmodule DpExchange.Coinbase.Fake do
   def update_symbols(symbols, _opts \\ []) do
     symbols = canonical_case(symbols)
     wanted = MapSet.new(Enum.filter(symbols, &(&1 in @symbols)))
+
+    # A symbol this adds is pushed for, as `subscribe/2` pushes, so `coverage/1` never
+    # answers `:stream` for one that delivered nothing. To the caller, with the default
+    # channel: the contract's callback takes neither a `to:` nor `:channels` (2026-10-10).
+    for symbol <- MapSet.difference(wanted, subscribed()) do
+      with {:ok, quote_struct} <- fake_quote(symbol),
+           do:
+             send(
+               self(),
+               {:dp_exchange, :coinbase, %{quote_struct | volume_window: :rolling_24h}}
+             )
+    end
+
     Process.put(__MODULE__, wanted)
     # Narrowed, never widened: `update_symbols/2` carries no `:channels`, so a symbol it
     # adds cannot be assumed to want trades.
     Process.put(@trades_key, MapSet.intersection(subscribed_trades(), wanted))
+    Process.put(@order_book_key, MapSet.intersection(subscribed_books(), wanted))
     :ok
   end
 
@@ -573,13 +607,10 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   @spec coverage_by_kind(keyword()) :: %{Capabilities.data_kind() => %{String.t() => atom()}}
   def coverage_by_kind(_opts \\ []) do
-    by_kind = %{quotes: Map.new(subscribed(), &{&1, :stream})}
-
-    trades = subscribed_trades()
-
-    if MapSet.size(trades) == 0,
-      do: by_kind,
-      else: Map.put(by_kind, :trades, Map.new(trades, &{&1, :stream}))
+    # A kind appears only once something of it was pushed, as before for `:trades`.
+    [quotes: subscribed(), trades: subscribed_trades(), order_book: subscribed_books()]
+    |> Enum.reject(fn {kind, symbols} -> kind != :quotes and MapSet.size(symbols) == 0 end)
+    |> Map.new(fn {kind, symbols} -> {kind, Map.new(symbols, &{&1, :stream})} end)
   end
 
   @impl true
@@ -596,6 +627,8 @@ defmodule DpExchange.Coinbase.Fake do
 
   # Kept apart from `subscribed/0`: a symbol can be subscribed for quotes without trades.
   defp subscribed_trades, do: Process.get(@trades_key, MapSet.new())
+
+  defp subscribed_books, do: Process.get(@order_book_key, MapSet.new())
 
   # One print, shaped as `Socket`'s decode of a `market_trades` `update` row: a real id, a
   # taker `side`, `broken: false` because the channel has no bust flag, and a fixed non-nil
@@ -802,6 +835,9 @@ defmodule DpExchange.Coinbase.Fake do
     with_injection(fn ->
       # `:quoted`, and no expiry — the two things a consumer must handle. A fake that returned
       # `:settled` would let one ship code that never commits.
+      # Remembered, so a commit or a read names a conversion this fake actually quoted.
+      Process.put(@conversions_key, Map.put(conversions(), "convert-1", :quoted))
+
       {:ok,
        %Types.Conversion{
          id: "convert-1",
@@ -824,7 +860,10 @@ defmodule DpExchange.Coinbase.Fake do
     with_injection(fn ->
       # Both accounts or nothing, as in the package: committing against accounts the caller
       # did not name converts between the wrong two balances.
-      with {:ok, from, to} <- fake_convert_accounts(opts) do
+      with {:ok, from, to} <- fake_convert_accounts(opts),
+           {:ok, _status} <- fake_conversion(id) do
+        Process.put(@conversions_key, Map.put(conversions(), id, :committed))
+
         {:ok,
          %Types.Conversion{
            id: id,
@@ -846,11 +885,13 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def get_conversion(id, opts \\ []) do
     with_injection(fn ->
-      with {:ok, from, to} <- fake_convert_accounts(opts) do
+      with {:ok, from, to} <- fake_convert_accounts(opts),
+           {:ok, known} <- fake_conversion(id) do
         {:ok,
          %Types.Conversion{
            id: id,
-           status: :settled,
+           # A quote read back is still a quote; a committed one has settled here.
+           status: if(known == :committed, do: :settled, else: known),
            from_asset: from,
            to_asset: to,
            from_amount: nil,
@@ -864,6 +905,18 @@ defmodule DpExchange.Coinbase.Fake do
       end
     end)
   end
+
+  # **An id this fake never quoted is the venue's 404**, `{:refused, :not_listed}` from
+  # `Rest`'s `classify/1`. Every id used to commit and read back `:settled`, so a consumer's
+  # test could commit a conversion it never quoted and pass (found 2026-10-10).
+  defp fake_conversion(id) do
+    case Map.fetch(conversions(), id) do
+      {:ok, status} -> {:ok, status}
+      :error -> {:refused, :not_listed}
+    end
+  end
+
+  defp conversions, do: Process.get(@conversions_key, %{})
 
   defp fake_convert_accounts(opts) do
     case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do

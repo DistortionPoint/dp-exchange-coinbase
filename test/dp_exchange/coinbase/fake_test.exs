@@ -337,4 +337,30 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert Map.has_key?(DpExchange.Coinbase.Fake.coverage(opts), "BTC-USD")
     end
   end
+
+  describe "streaming parity, found 2026-10-10" do
+    test ":order_book pushes a snapshot and is covered under that kind" do
+      :ok = Fake.subscribe(["BTC-USD"], to: self(), channels: [:quotes, :order_book])
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{symbol: "BTC-USD"}}
+      assert %{order_book: %{"BTC-USD" => :stream}} = Fake.coverage_by_kind()
+
+      :ok = Fake.unsubscribe(["BTC-USD"])
+      refute Map.has_key?(Fake.coverage_by_kind(), :order_book)
+    end
+
+    test "update_symbols pushes for a symbol it adds" do
+      :ok = Fake.update_symbols(["ETH-USD"])
+
+      assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "ETH-USD"}}
+      assert Fake.coverage() == %{"ETH-USD" => :stream}
+    end
+
+    test "subscribe does not consume a failure queued for get_price" do
+      DpExchange.Core.FakeInjection.queue_failures(:coinbase, [{:error, :queued}])
+      :ok = Fake.subscribe(["BTC-USD"], to: self())
+
+      assert {:error, :queued} = Fake.get_price("BTC-USD")
+    end
+  end
 end

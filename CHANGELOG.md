@@ -20,6 +20,19 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Fake` conversions were stateless.** Any id committed, and read back `:settled`, so a
+  consumer's test could commit a conversion it never quoted. An id the fake did not quote is
+  now `{:refused, :not_listed}`, the venue's 404. A quoted one reads back `:quoted` until it
+  is committed.
+- **`Fake.subscribe/2` consumed failures queued for `get_price/2`**, because it built its
+  push through the injected `get_price/2`. It now builds the push directly.
+- **`Fake` pushed nothing for `:order_book`.** It now pushes an `OrderBook` snapshot, as
+  the level2 channel opens with one, and reports it under `coverage_by_kind/1`.
+- **`Fake.update_symbols/2` counted an added symbol as covered with nothing pushed.** It now
+  pushes for each symbol it adds.
+
 ## [0.3.93] - 2026-10-10
 
 ### Fixed

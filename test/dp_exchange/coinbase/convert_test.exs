@@ -298,16 +298,19 @@ defmodule DpExchange.Coinbase.ConvertTest do
     test "the fake quotes without an expiry and refuses a commit missing an account" do
       alias DpExchange.Coinbase.Fake
 
-      assert {:ok, %{status: :quoted, expires_at: nil}} =
+      assert {:ok, %{id: id, status: :quoted, expires_at: nil}} =
                Fake.quote_conversion("USD", "USDC", Decimal.new("1"))
 
       assert {:error, :from_and_to_required} = Fake.commit_conversion("t-1")
       assert {:error, :from_and_to_required} = Fake.get_conversion("t-1")
 
-      assert {:ok, %{status: :committed}} =
-               Fake.commit_conversion("t-1", from: "USD", to: "USDC")
+      # Only an id it quoted: anything else is the venue's 404.
+      assert {:refused, :not_listed} = Fake.commit_conversion("t-1", from: "USD", to: "USDC")
+      assert {:refused, :not_listed} = Fake.get_conversion("t-1", from: "USD", to: "USDC")
 
-      assert {:ok, %{status: :settled}} = Fake.get_conversion("t-1", from: "USD", to: "USDC")
+      assert {:ok, %{status: :quoted}} = Fake.get_conversion(id, from: "USD", to: "USDC")
+      assert {:ok, %{status: :committed}} = Fake.commit_conversion(id, from: "USD", to: "USDC")
+      assert {:ok, %{status: :settled}} = Fake.get_conversion(id, from: "USD", to: "USDC")
     end
 
     test "the facade delegates all three" do
