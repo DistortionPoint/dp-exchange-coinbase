@@ -2185,19 +2185,32 @@ defmodule DpExchange.Coinbase.Feed do
   # replaces: `unsubscribe_step/3` short-circuits on an empty list without sending
   # anything. For a shard carrying a stranded release, this is what actually retries it —
   # see the moduledoc's "a stranded unsubscribe is not silently forgotten" section.
+  #
+  # **The message's `pending` and `symbols` are a snapshot, and are NOT trusted when it
+  # fires.** `handle_info(:resubscribe, _)` schedules this at `position * shard_spacing_ms`,
+  # so a shard late in the order fires up to many seconds after the snapshot was read. An
+  # `unsubscribe/2` landing in between was undone: the stale `symbols` still named the
+  # symbol, so it was subscribed again at the venue, never unsubscribed, and `coverage/1`
+  # reported it. Found 2026-10-10 by reading the scheduling against `finalize_shard/4`.
+  # The shard's membership and its stranded releases are read from `state` here, at fire
+  # time (`state.shards[key].symbols` is set to `wanted` by `finalize_shard/4` on every
+  # reconcile), and a shard that is gone, or now holds a different socket, is skipped. The
+  # reconcile then runs inline rather than through another `send_after`, which would
+  # reopen the same window. The snapshot fields are kept only so the message shape is
+  # stable for its two senders.
   def handle_info(
-        {:resubscribe_shard, key, socket, channel, pending, symbols, credentials},
+        {:resubscribe_shard, key, socket, channel, _stale_pending, _stale_symbols, credentials},
         state
       ) do
-    if Process.alive?(socket) do
-      Process.send_after(
-        self(),
-        {:channel_reconcile, key, socket, channel, pending, symbols, credentials},
-        0
-      )
-    end
+    case Map.get(state.shards, key) do
+      %{socket: ^socket, symbols: symbols} ->
+        pending = Map.get(state.pending_unsubscribes, key, [])
 
-    {:noreply, state}
+        attempt_channel_reconcile(key, socket, channel, pending, symbols, credentials, 1, state)
+
+      _gone_or_replaced ->
+        {:noreply, state}
+    end
   end
 
   # The other half of `init/1`'s `Process.flag(:trap_exit, true)`. Every shard's socket
@@ -3315,10 +3328,10 @@ defmodule DpExchange.Coinbase.Feed do
   # survive the filter and both receive a copy below.
   defp attribution_targets(payload, state) do
     delivered = delivered_symbol(payload)
-    equivalent = Map.get(state.alias_map, delivered)
+    equivalent = state.alias_map |> Map.get(delivered) |> List.wrap()
 
     targets =
-      [delivered, equivalent]
+      [delivered | equivalent]
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
       |> Enum.filter(&MapSet.member?(state.wanted, &1))

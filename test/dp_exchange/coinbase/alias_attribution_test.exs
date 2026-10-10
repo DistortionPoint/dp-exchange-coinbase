@@ -173,6 +173,28 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       refute_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USD"}}
     end
 
+    test "a frame under a target aliased by several sources reaches every wanted source" do
+      # `alias_to` is a list: one product can be the target of many aliases. A single-valued
+      # map kept only the last source, so the other subscriber's frames were lost.
+      many_to_one = %{
+        "XLM-USD" => ["XLM-EURC", "XLM-USDC"],
+        "XLM-USDC" => ["XLM-USD"],
+        "XLM-EURC" => ["XLM-USD"]
+      }
+
+      feed = start_aliased_feed(fn -> {:ok, many_to_one} end)
+
+      Feed.subscribe(feed, ~w(XLM-USDC XLM-EURC), to: self())
+      wait_until(fn -> :sys.get_state(feed).alias_map_status == :ok end)
+
+      send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
+      :sys.get_state(feed)
+
+      assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USDC"}}
+      assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-EURC"}}
+      refute_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "XLM-USD"}}
+    end
+
     test "coverage/1 lists what the caller requested, never what the venue delivered under" do
       feed = start_aliased_feed(fn -> {:ok, @alias_map} end)
 

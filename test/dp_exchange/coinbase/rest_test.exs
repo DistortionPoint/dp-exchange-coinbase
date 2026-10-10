@@ -622,8 +622,8 @@ defmodule DpExchange.Coinbase.RestTest do
       assert {:ok, map} =
                Rest.get_alias_map(plug: responding(@aliased_products), retry_attempts: 0)
 
-      assert map["XLM-USDC"] == "XLM-USD"
-      assert map["XLM-USD"] == "XLM-USDC"
+      assert map["XLM-USDC"] == ["XLM-USD"]
+      assert map["XLM-USD"] == ["XLM-USDC"]
     end
 
     test "an unaliased product contributes no entry — not an identity mapping to itself" do

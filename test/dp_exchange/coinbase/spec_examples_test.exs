@@ -294,8 +294,8 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert aliases["XLM-USDC"] == "XLM-USD"
-      assert aliases["XLM-USD"] == "XLM-USDC"
+      assert aliases["XLM-USDC"] == ["XLM-USD"]
+      assert aliases["XLM-USD"] == ["XLM-USDC"]
     end
   end
 

@@ -20,6 +20,34 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A staggered `:resubscribe_shard` undid an unsubscribe.** It carried the shard's symbols
+  as read when the tick scheduled it, up to `position * shard_spacing_ms` earlier. An
+  `unsubscribe/2` in between was re-subscribed at the venue and never released, and
+  `coverage/1` reported it. Membership and stranded releases are now read from state when
+  the message fires, and a gone or replaced shard is skipped.
+- **Alias attribution lost every source but one.** `Rest.get_alias_map/1` was single-valued
+  while the venue's `alias_to` is a list. Values are now sorted lists, and `Feed` delivers a
+  frame to every wanted member. A map of single strings from an injected
+  `:alias_map_source` still works.
+- **`credentials: nil` on a private endpoint sent an anonymous request.** It now answers
+  `{:error, {:missing_credentials, :coinbase}}` locally, as `%{}` did. Only `/market/…` paths
+  and the public `/time` go out unsigned.
+- **`credentials: %{}` broke public market-data calls.** `Supervisor` counted it as none,
+  `Rest` path selection as a credential. `Rest` now treats `%{}` as `nil`.
+- **`cancel_order/3` raised `CaseClauseError`** on a row with `success: false` and no
+  `failure_reason`, or a non-boolean `success`. It answers
+  `{:error, :unexpected_response_shape}`.
+- **`replace_order/4` reported an applied edit as failed** when the read-back failed. It
+  answers `{:error, {:edit_accepted_refetch_failed, order_id, reason}}`.
+- **`get_trade_history/2` reported a possibly-quote size as base.** A fill with
+  `size_in_quote: true` fails with `{:error, {:unsupported_fill_size_unit, :quote}}`.
+
+### Changed
+
+- `Rest.get_alias_map/1` returns `%{String.t() => [String.t()]}`, not a single string per key.
+
 ## [0.3.94] - 2026-10-10
 
 ### Fixed

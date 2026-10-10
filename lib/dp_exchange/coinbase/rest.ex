@@ -100,7 +100,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, Types.Quote.t()} | {:error, term()} | {:refused, term()}
   def get_price(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
-    credentials = Keyword.get(opts, :credentials)
+    credentials = opts_credentials(opts)
 
     path =
       if credentials,
@@ -128,7 +128,7 @@ defmodule DpExchange.Coinbase.Rest do
       # The venue publishes the same candles twice: `/market/products/…` unauthenticated
       # and `/products/…` for a credential. Reading the public one while holding a
       # credential would silently forgo whatever the authenticated view adds.
-      credentials = Keyword.get(opts, :credentials)
+      credentials = opts_credentials(opts)
 
       path =
         if credentials,
@@ -215,6 +215,14 @@ defmodule DpExchange.Coinbase.Rest do
   `alias` and inserting both directions here is complete: nothing `alias_to` would add is
   missing, and reading only one field is one fewer place for the two to disagree.
 
+  ## Values are lists: aliasing is many-to-one
+
+  `alias_to` is an **array** because one product can be the alias target of several. The
+  map was single-valued, so each later row overwrote the earlier one's entry and the target
+  could be attributed back to only one source; a caller subscribed under the other lost its
+  frames (found 2026-10-10 by reading `alias_to`'s type against `Map.put/3`). Every value
+  is now the sorted, de-duplicated list of every name that shares the market.
+
   ## `{:error, _}` is a real possibility, and callers must not guess through it
 
   This is a bulk catalogue read like `get_symbols/1`, subject to the same failures — see
@@ -222,10 +230,10 @@ defmodule DpExchange.Coinbase.Rest do
   id, same as before this map existed, plus a notice that attribution is degraded and
   why. Never a fabricated mapping.
   """
-  @spec get_alias_map(keyword()) :: {:ok, %{String.t() => String.t()}} | {:error, term()}
+  @spec get_alias_map(keyword()) :: {:ok, %{String.t() => [String.t()]}} | {:error, term()}
   def get_alias_map(opts) do
     with {:ok, products} <- fetch_products(opts) do
-      {:ok, Enum.reduce(products, %{}, &add_alias_pair/2)}
+      {:ok, products |> Enum.reduce(%{}, &add_alias_pair/2) |> sort_alias_values()}
     end
   end
 
@@ -235,11 +243,14 @@ defmodule DpExchange.Coinbase.Rest do
     aliased = SymbolFormat.to_canonical_symbol(alias_id)
 
     acc
-    |> Map.put(canonical, aliased)
-    |> Map.put(aliased, canonical)
+    |> Map.update(canonical, [aliased], &[aliased | &1])
+    |> Map.update(aliased, [canonical], &[canonical | &1])
   end
 
   defp add_alias_pair(_product, acc), do: acc
+
+  defp sort_alias_values(map),
+    do: Map.new(map, fn {name, targets} -> {name, targets |> Enum.uniq() |> Enum.sort()} end)
 
   # Public and private again: the venue publishes the catalogue at both paths, and a
   # caller holding a credential should see the authenticated view. Shared by
@@ -269,7 +280,7 @@ defmodule DpExchange.Coinbase.Rest do
   # `list_instruments/1` and `get_alias_map/1`. Walked here the same bounded way
   # `all_accounts/5` above walks `/accounts`.
   defp fetch_products(opts) do
-    credentials = Keyword.get(opts, :credentials)
+    credentials = opts_credentials(opts)
     path = if credentials, do: "/products", else: "/market/products"
     all_products(credentials, path, opts, nil, [], 0)
   end
@@ -1411,6 +1422,17 @@ defmodule DpExchange.Coinbase.Rest do
   refuses; refusing to return adjusted fills at all would hide corrections the venue made.
 
   The response pages on `cursor`, and this follows it to `@max_fill_pages`.
+
+  ## A fill sized in quote currency is refused, not reported as a base quantity
+
+  `Fill.size_in_quote` is `true` when the order was placed in quote currency
+  (docs/reference/coinbase/openapi/at-spec.yaml:7309-7312), and the schema does not say
+  `size` is then converted to base units. `Types.Fill.quantity` is a base-asset amount, so
+  reporting a possibly-quote `size` there is a plausible number with the wrong meaning. A
+  row with `size_in_quote: true` fails the whole history with
+  `{:error, {:unsupported_fill_size_unit, :quote}}`, as any other row this package cannot
+  read faithfully does; a gap or a mislabelled quantity in a fill history is worse than
+  an error.
   """
   @spec get_trade_history(map(), keyword()) ::
           {:ok, [Types.Fill.t()]} | {:error, term()} | {:refused, term()}
@@ -1496,6 +1518,12 @@ defmodule DpExchange.Coinbase.Rest do
   # `parse_time/1` already guarded the timestamp for exactly this reason. These two are the
   # same argument applied to the other two fields that carry the execution itself.
   defp to_fill(row) when not is_map(row), do: {:error, :unexpected_response_shape}
+
+  # `size_in_quote: true` means `size` may be quote currency, and `Fill.quantity` is base.
+  # Found 2026-10-10 by reading the `Fill` schema against this reader, which never looked at
+  # the flag. Refused, never converted: converting needs a price the row may not state at
+  # the moment the size was set.
+  defp to_fill(%{"size_in_quote" => true}), do: {:error, {:unsupported_fill_size_unit, :quote}}
 
   defp to_fill(row) do
     with {:ok, timestamp} <- parse_time(row["trade_time"]),
@@ -1592,7 +1620,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_product(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
-    credentials = Keyword.get(opts, :credentials)
+    credentials = opts_credentials(opts)
 
     path =
       if credentials, do: "/products/#{native}", else: "/market/products/#{native}"
@@ -1647,19 +1675,39 @@ defmodule DpExchange.Coinbase.Rest do
   # The `nil` branch is a different case and is not a failure: Coinbase serves market
   # data anonymously, so a call made deliberately without credentials takes the public
   # path with no headers at all.
-  defp request(method, path, credentials, opts, params \\ %{}),
-    do:
-      send_request(
-        method,
-        path,
-        request_headers(method, @api_path <> path, credentials),
-        opts,
-        params
-      )
+  #
+  # **Anonymous is for the public paths only.** `credentials: nil` used to mean "send no
+  # headers" for every path, so `get_balances/2`, `get_orders/2`, `get_trade_history/2` and
+  # every other private read, handed an explicit `nil`, went out as an anonymous request for
+  # the venue to reject as an opaque 401 — while the `%{}` default for the same call
+  # refused locally. Found 2026-10-10 by reading `request_headers/4`. Only a `/market/…`
+  # path or `/time` (the spec's public `get-server-time`, which `test_connection(nil)`
+  # reads) may go out unsigned; any other path without credentials that can sign answers
+  # `{:error, {:missing_credentials, :coinbase}}` before a request is built. `%{}` is
+  # normalised to `nil` first so the two spellings of "none" agree.
+  defp request(method, path, credentials, opts, params \\ %{}) do
+    case request_headers(method, @api_path <> path, path, normalise_credentials(credentials)) do
+      {:error, _reason} = refusal -> refusal
+      headers -> send_request(method, path, headers, opts, params)
+    end
+  end
 
-  defp request_headers(_method, _path, nil), do: []
+  defp request_headers(_method, _full_path, "/market/" <> _rest, nil), do: []
+  defp request_headers(_method, _full_path, "/time", nil), do: []
 
-  defp request_headers(method, path, credentials), do: signer(method, path, credentials)
+  defp request_headers(_method, _full_path, _path, nil),
+    do: {:error, {:missing_credentials, :coinbase}}
+
+  defp request_headers(method, full_path, _path, credentials),
+    do: signer(method, full_path, credentials)
+
+  # `Supervisor.authenticated?/1` already counts `%{}` as no credential; path selection here
+  # did not, so a public market-data call carrying `%{}` took the signed path and failed
+  # signing. Found 2026-10-10 by reading both. One definition of "none" for both.
+  defp opts_credentials(opts), do: opts |> Keyword.get(:credentials) |> normalise_credentials()
+
+  defp normalise_credentials(credentials) when credentials == %{}, do: nil
+  defp normalise_credentials(credentials), do: credentials
 
   # Signed per attempt, not once per call. `Core.HttpClient` retries a timeout or a 5xx up to
   # three times, each bounded at 30 seconds, with backoff between — about 127 seconds in all,
@@ -1829,7 +1877,7 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp do_get_trades(symbol, limit, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
-    credentials = Keyword.get(opts, :credentials)
+    credentials = opts_credentials(opts)
 
     path =
       if credentials,
@@ -1964,7 +2012,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, Types.TopOfBook.t()} | {:error, term()} | {:refused, term()}
   def get_top_of_book(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
-    credentials = Keyword.get(opts, :credentials)
+    credentials = opts_credentials(opts)
 
     if is_nil(credentials) do
       {:error, {:missing_credentials, :coinbase}}
@@ -2050,7 +2098,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, Types.OrderBook.t()} | {:error, term()} | {:refused, term()}
   def get_order_book(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
-    credentials = Keyword.get(opts, :credentials)
+    credentials = opts_credentials(opts)
 
     params =
       %{"product_id" => native}
@@ -2791,10 +2839,15 @@ defmodule DpExchange.Coinbase.Rest do
     # A row that is not an object cannot be about this order; it used to raise here.
     case Enum.find(results, &(is_map(&1) and &1["order_id"] == order_id)) do
       %{"success" => true} -> {:ok, :cancelled}
-      %{"failure_reason" => reason} -> {:refused, {:cancel_rejected, reason}}
+      %{"success" => false, "failure_reason" => reason} -> {:refused, {:cancel_rejected, reason}}
       # The venue answered about orders, and none of them was the one asked about. That is
       # not a cancelled order and it is not an error from the transport either.
       nil -> {:error, :order_not_in_response}
+      # A row for this order that is neither a success nor a stated failure: `success: false`
+      # with no `failure_reason`, or a non-boolean `success`. This used to raise
+      # `CaseClauseError` in the caller's process (found 2026-10-10 by reading the clauses).
+      # Neither cancelled nor refused for a stated reason, so nothing is claimed.
+      _malformed -> {:error, :unexpected_response_shape}
     end
   end
 
@@ -3230,6 +3283,10 @@ defmodule DpExchange.Coinbase.Rest do
   the fail-closed answer; `preview_replace/4` refuses the identical way.
 
   A `200` carrying `success: false` is a refusal, as everywhere else on this venue.
+
+  **`{:error, {:edit_accepted_refetch_failed, order_id, reason}}` means the edit WAS
+  applied.** The venue accepted it, then the read-back of the order failed with `reason`.
+  Do not retry the edit; read the order with `get_order/3` to learn its state.
   """
   @spec replace_order(map(), String.t(), map(), keyword()) ::
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
@@ -3281,7 +3338,16 @@ defmodule DpExchange.Coinbase.Rest do
     #
     # So the order is read back. It costs a second call and returns the venue's own view,
     # including whatever it did with the edit that the caller did not ask for.
-    get_order(credentials, order_id, opts)
+    #
+    # **The edit is already applied when that read fails.** A bare `{:error, _}` here told the
+    # caller an edit that took effect had failed, and a caller retrying it edits twice or
+    # cancels the order believing it unchanged. Found 2026-10-10 by reading this clause. The
+    # refetch failure is wrapped, naming the order, so it cannot be mistaken for a failed edit.
+    case get_order(credentials, order_id, opts) do
+      {:ok, _order} = ok -> ok
+      {:error, reason} -> {:error, {:edit_accepted_refetch_failed, order_id, reason}}
+      {:refused, reason} -> {:error, {:edit_accepted_refetch_failed, order_id, reason}}
+    end
   end
 
   defp edit_result(%{"success" => false} = response, _order_id, _credentials, _opts) do

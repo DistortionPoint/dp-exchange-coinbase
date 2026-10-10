@@ -29,6 +29,15 @@ of two ways, and which one it is depends on what the endpoint gives it:
   venue honours. Before 0.3.49 they were retried, so a timed-out move could move the funds
   twice. A transport error on one of these means **the outcome is unknown**: read the
   portfolio, sweep, conversion or order back before issuing it again.
+- **`{:error, {:edit_accepted_refetch_failed, order_id, reason}}` from `replace_order/4`
+  means the edit WAS applied.** The read-back of the order failed afterwards. Do not edit
+  again; read the order with `get_order/3`.
+- **No credentials means no private call.** `nil` and `%{}` both mean none: a private
+  endpoint answers `{:error, {:missing_credentials, :coinbase}}` locally, and a public
+  market-data call carrying `%{}` takes the unsigned `/market` path.
+- **A fill with `size_in_quote: true` fails `get_trade_history/2`** with
+  `{:error, {:unsupported_fill_size_unit, :quote}}`: `Fill.quantity` is base currency and
+  the venue does not say the size was converted.
 
 ## BREAKING — `Quote` and `OrderBook` no longer carry `:timestamp`
 

@@ -1461,6 +1461,43 @@ defmodule DpExchange.Coinbase.ShardingTest do
     end
   end
 
+  describe "a staggered :resubscribe_shard does not trust its own snapshot" do
+    test "an unsubscribe landing between scheduling and firing is not undone" do
+      # `:resubscribe` schedules `:resubscribe_shard` at position * shard_spacing_ms with the
+      # shard's membership as read then. Here the snapshot still names B-USD, which has
+      # since been unsubscribed; firing must read the shard from state, not from the message.
+      socket = frame_reporting_socket(self())
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | wanted: MapSet.new(["A-USD"]),
+            shards: %{{"ticker", 0} => %{socket: socket, symbols: ["A-USD"]}}
+        }
+      end)
+
+      send(
+        feed,
+        {:resubscribe_shard, {"ticker", 0}, socket, "ticker", [], ["A-USD", "B-USD"], nil}
+      )
+
+      assert_receive {:frame, "subscribe", ids}, 5_000
+      assert ids == ["A-USD"]
+      refute_receive {:frame, _type, _ids}, 100
+    end
+
+    test "a shard that has gone since the snapshot is skipped" do
+      socket = frame_reporting_socket(self())
+      feed = start_feed()
+
+      send(feed, {:resubscribe_shard, {"ticker", 0}, socket, "ticker", [], ["A-USD"], nil})
+
+      :sys.get_state(feed)
+      refute_receive {:frame, _type, _ids}, 100
+    end
+  end
+
   describe "a stranded unsubscribe is retried, not silently forgotten" do
     # The coordinator traced a real gap in the fix above: `reconcile_shard_in_place/7`
     # recorded `state.shards[key].symbols = wanted` unconditionally, so a permanently
