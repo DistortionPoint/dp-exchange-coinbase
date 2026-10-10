@@ -25,8 +25,8 @@ of two ways, and which one it is depends on what the endpoint gives it:
   package makes, not a second call you make yourself.
 - **Portfolio moves, futures sweeps, conversion commits, order edits and portfolio
   creates are sent once**: `transfer_internal/4`, `schedule_futures_sweep/2`,
-  `commit_conversion/3`, `replace_order/4` and `create_portfolio/2`. None has a key the
-  venue honours. Before 0.3.49 they were retried, so a timed-out move could move the funds
+  `commit_conversion/2`, `replace_order/4` and `create_account/1` (a portfolio create).
+  None has a key the venue honours. Before 0.3.49 they were retried, so a timed-out move could move the funds
   twice. A transport error on one of these means **the outcome is unknown**: read the
   portfolio, sweep, conversion or order back before issuing it again.
 - **`{:error, {:edit_accepted_refetch_failed, order_id, reason}}` from `replace_order/4`
@@ -43,7 +43,7 @@ of two ways, and which one it is depends on what the endpoint gives it:
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. Requires `dp_exchange_core ~> 0.2.1`.
+`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.50`.
 
 ```elixir
 # before
@@ -471,7 +471,7 @@ way it did when both channels shared one 100-per-socket grouping.
 **A shard whose socket never opened at all is retried on this same cadence, and it says
 so.** A transient connect failure on a shard beyond the first (a brief DNS blip, a refused
 connection) used to have no automatic recovery — nothing re-asked the venue for it until
-you called `subscribe/3` or `update_symbols/2` again yourself, which may never happen if
+you called `subscribe/2` or `update_symbols/2` again yourself, which may never happen if
 your scope is stable after boot. It is now retried on every unconditional tick alongside
 already-open shards' own resubscribes, and `subscribe_notices/1` receives a
 `:coverage_change` notice the moment the attempt fails — the same kind a channel that

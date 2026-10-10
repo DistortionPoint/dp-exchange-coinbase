@@ -1195,8 +1195,10 @@ defmodule DpExchange.Coinbase.SocketTest do
         ],
         fn event, measurements, metadata, _config ->
           # Scoped by provider: `:telemetry` handlers are global to the VM, so an unscoped
-          # one also receives every other concurrently-running test's events.
-          if metadata.provider == :coinbase do
+          # one also receives every other concurrently-running test's events. Scoped to the
+          # emitting process too: these tests call the callbacks in-process, so a handler
+          # firing in any other process belongs to a different async test.
+          if metadata.provider == :coinbase and self() == test_pid do
             send(test_pid, {:telemetry, event, measurements, metadata})
           end
         end,

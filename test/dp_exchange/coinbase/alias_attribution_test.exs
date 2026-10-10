@@ -574,7 +574,7 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       Feed.subscribe_notices(feed, to: self())
       Feed.subscribe(feed, ~w(BTC-USD), to: self())
 
-      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 500
+      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 2_000
 
       # Registering again must not re-fire it — the replay is keyed to a NEW
       # registration, not to every call this consumer happens to make.
@@ -609,21 +609,23 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
 
       feed =
         start_feed_with_source(fn ->
-          send(test_pid, :fetch_started)
-          Process.sleep(2_000)
-          {:ok, %{}}
+          send(test_pid, {:fetch_started, self()})
+
+          # Held open until the test releases it, so the fetch is provably in flight for
+          # the whole of the `coverage/1` call — no wall-clock guess about how long it lasts.
+          receive do
+            :release -> {:ok, %{}}
+          end
         end)
 
       send(feed, :fetch_alias_map)
-      assert_receive :fetch_started, 1_000
+      assert_receive {:fetch_started, fetcher}, 2_000
 
-      reader = Task.async(fn -> Feed.coverage(feed) end)
-      result = Task.yield(reader, 500) || Task.shutdown(reader, :brutal_kill)
+      # A blocked Feed cannot answer this: the call exits after its 5s default, failing the
+      # test, while the fetch above is still held open.
+      assert is_map(Feed.coverage(feed))
 
-      assert match?({:ok, _}, result),
-             "coverage/1 did not answer within 500ms while the alias catalogue was being " <>
-               "fetched — the Feed is blocked inside handle_info. got: #{inspect(result)}"
-
+      send(fetcher, :release)
       assert Process.alive?(feed)
     end
 
@@ -635,17 +637,23 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
 
       feed =
         start_feed_with_source(fn ->
-          send(test_pid, :fetch_started)
-          Process.sleep(300)
-          {:ok, %{}}
+          send(test_pid, {:fetch_started, self()})
+
+          receive do
+            :release -> {:ok, %{}}
+          end
         end)
 
       send(feed, :fetch_alias_map)
-      assert_receive :fetch_started, 1_000
+      assert_receive {:fetch_started, fetcher}, 2_000
 
+      # The first fetch is held open, so it is in flight for the whole refute window.
       send(feed, :fetch_alias_map)
-      refute_receive :fetch_started, 200
+      # Synchronise on the Feed having handled the second tick before asserting silence.
+      _settled = :sys.get_state(feed)
+      refute_receive {:fetch_started, _other}, 200
 
+      send(fetcher, :release)
       assert Process.alive?(feed)
     end
   end

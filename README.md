@@ -5,7 +5,7 @@
 > This package has **never run in production.** It is published early and openly so it
 > can be used and reported on, not because it is finished.
 >
-> - **The API may change without a major version.** Pin three-part (`~> 0.2.0`).
+> - **The API may change without a major version.** Pin three-part (`~> 0.3.0`).
 > - **Verification is uneven, and the gaps are on the expensive side.** The conformance
 >   suite passes against a fake, and against Coinbase's live public endpoints.
 >   **Order placement and authenticated flows are thinly covered.** No test in this repo
@@ -21,7 +21,7 @@ same facade every venue in the family exposes.
 
 88 callbacks, of which **49 are declared `:experimental`** and 39 `:unsupported`. None is `:proven` — that requires a consumer trading live, and this package has never run in production (D15).
 
-Asset classes: **crypto**. Streamed kinds: **quotes, order book** — everything else pulls only.
+Asset classes: **crypto**. Streamed kinds: **quotes, order book, trades** (`:trades` is opt-in) — everything else pulls only.
 
 Of the 39 unsupported endpoints, **37 are the venue's own absence**, not this package's backlog — see `venue_does_not_serve/0` and `docs/reference/coinbase/negative-claims.md`, which records the source and date behind every one.
 
@@ -30,7 +30,7 @@ Of the 39 unsupported endpoints, **37 are the venue's own absence**, not this pa
 ```elixir
 def deps do
   [
-    {:dp_exchange_coinbase, "~> 0.2.0"}
+    {:dp_exchange_coinbase, "~> 0.3.0"}
   ]
 end
 ```

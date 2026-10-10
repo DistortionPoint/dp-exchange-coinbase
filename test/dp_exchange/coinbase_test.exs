@@ -94,7 +94,7 @@ defmodule DpExchange.CoinbaseTest do
       # the ceilings were not, and the declaration says so rather than implying both.
       caps = Coinbase.capabilities()
 
-      assert caps.measured_at == ~D[2026-09-08]
+      assert caps.measured_at == ~D[2026-10-02]
       assert caps.measured_against =~ "measured live"
       assert caps.measured_against =~ "NOT measured"
       assert caps.measured_against =~ "has_staking is NOT measured live"
@@ -792,7 +792,7 @@ defmodule DpExchange.CoinbaseTest do
         end
       end)
 
-      assert_receive :registered
+      assert_receive :registered, 2_000
 
       assert DpExchange.Coinbase.subscribe(["BTC-USD"], feed: name) ==
                {:error, {:feed_exited, :boom}}

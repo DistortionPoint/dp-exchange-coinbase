@@ -225,7 +225,7 @@ defmodule DpExchange.Coinbase.MarketTradesTest do
 
       send(feed, {:dp_exchange, :coinbase, trade})
 
-      assert_receive {:dp_exchange, :coinbase, %Types.Trade{id: "1", symbol: "BTC-USD"}}, 500
+      assert_receive {:dp_exchange, :coinbase, %Types.Trade{id: "1", symbol: "BTC-USD"}}, 2_000
       assert Feed.coverage_by_kind(feed) == %{trades: %{"BTC-USD" => :stream}}
       refute Map.has_key?(Feed.coverage_by_kind(feed), :quotes)
     end

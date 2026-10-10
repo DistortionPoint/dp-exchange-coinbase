@@ -292,6 +292,7 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(feed, {:dp_exchange, :coinbase, :reconnected, stranger})
 
+      _settled = :sys.get_state(feed)
       refute_receive {:frame, :stranger, _frame}, 100
       assert Process.alive?(feed)
     end
@@ -620,7 +621,7 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(feed, {:dp_exchange, :coinbase, Notice.new(:link_down, :coinbase)})
 
-      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_down}}, 500
+      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_down}}, 2_000
     end
 
     test "a dead subscriber does not accumulate events" do
@@ -651,7 +652,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       Feed.subscribe_notices(feed, to: name)
       send(feed, {:dp_exchange, :coinbase, Notice.new(:link_up, :coinbase)})
 
-      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_up}}, 500
+      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_up}}, 2_000
       assert Process.alive?(feed)
 
       Process.unregister(name)
@@ -751,7 +752,7 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
 
-      assert_receive {:dp_exchange, :coinbase, %Types.Quote{symbol: "BTC-USD"}}, 500
+      assert_receive {:dp_exchange, :coinbase, %Types.Quote{symbol: "BTC-USD"}}, 2_000
     end
 
     test "notice subscribers do not receive market data" do

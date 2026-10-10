@@ -342,7 +342,7 @@ defmodule DpExchange.Coinbase do
       # developer.webull.com found a per-endpoint rate-limit table that had existed for
       # weeks, and the ceiling this family had declared there was five times too permissive.
       # "Could not be located" is a statement about the searcher, not the vendor.
-      measured_at: ~D[2026-09-08],
+      measured_at: ~D[2026-10-02],
       measured_against:
         "granularities and the 350-candle boundary measured live against " <>
           "api.coinbase.com/api/v3/brokerage, 2026-08-28; ceilings NOT measured and NOT " <>
@@ -582,7 +582,8 @@ defmodule DpExchange.Coinbase do
   `t:DpExchange.Core.Capabilities.data_kind/0` instead of collapsed across it. The kind
   comes from which struct arrived — `%DpExchange.Core.Types.Quote{}` is `:quotes`,
   `%DpExchange.Core.Types.OrderBook{}` and `%DpExchange.Core.Types.OrderBookDelta{}` are
-  both `:order_book` — never from this venue's own channel names (`level2`, `ticker`),
+  both `:order_book`, and `%DpExchange.Core.Types.Trade{}` is `:trades` (opt-in channel) — never
+  from this venue's own channel names (`level2`, `ticker`, `market_trades`),
   which never cross the facade.
 
   Optional on `c:DpExchange.Core.Venue.coverage_by_kind/1` and implemented here because

@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`capabilities().measured_at` was older than the measurements `measured_against` cites.**
+  It read `2026-09-08` while `measured_against` records the 2026-09-09 documentation search
+  and the 2026-10-02 live observation of the `:trades` stream. It now reads `2026-10-02`,
+  the latest measurement the field describes.
+- **Documentation said things the code no longer does.** The README advertised only
+  `quotes, order book` as streamed kinds (`:trades` is declared and opt-in) and told
+  consumers to pin `~> 0.2.0`, which cannot resolve any 0.3.x release. `usage-rules.md`
+  named `commit_conversion/3` and `create_portfolio/2` as facade calls (the facade exposes
+  `commit_conversion/2` and `create_account/1`), cited a `subscribe/3` that is not a facade
+  call, and gave `dp_exchange_core ~> 0.2.1` as the requirement (it is `~> 0.3.50`).
+  `coverage_by_kind/1`'s `@doc` omitted that a `Trade` counts as `:trades`.
+
 ## [0.3.97] - 2026-10-10
 
 ### Fixed
