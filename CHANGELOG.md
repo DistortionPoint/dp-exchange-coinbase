@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.97] - 2026-10-10
+
 ### Fixed
 
 - **`get_orders/2` raised on a list of statuses or symbols.** The spec declares
