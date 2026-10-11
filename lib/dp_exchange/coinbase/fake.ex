@@ -86,6 +86,16 @@ defmodule DpExchange.Coinbase.Fake do
   # anything about freshness, and stamping now is the substitution this family refuses.
   @at ~U[2026-08-28 12:00:00Z]
 
+  # Portfolio and preview ids as the venue issues them: UUIDs (`PortfolioResponse.uuid`,
+  # `get_roles`' `portfolio_uuid` and `preview_id` all carry UUID examples in
+  # `docs/reference/coinbase/openapi/at-spec.yaml`). The fake used `pf-1`, `pf-new` and
+  # `fake-preview-1`, which no consumer validating a venue uuid would accept. The default
+  # portfolio is the one `get_roles/1` reports the key attached to, so the two agree.
+  @default_portfolio_id "3f2a9c1e-7b64-4d08-9e15-a0c2b7d4f681"
+  @retired_portfolio_id "c9d41e72-05af-4b3c-8a96-1e7f20b5d3a4"
+  @new_portfolio_id "0e6b8d25-9c3a-4f71-b2d8-5a41c7e90f36"
+  @preview_id "b40bbff9-17ce-4726-8b64-9de7ae57ad26"
+
   @impl true
   def child_spec(opts),
     do: %{id: Keyword.get(opts, :name, __MODULE__), start: {__MODULE__, :start_link, [opts]}}
@@ -985,14 +995,14 @@ defmodule DpExchange.Coinbase.Fake do
       {:ok,
        [
          %Types.Portfolio{
-           id: "pf-1",
+           id: @default_portfolio_id,
            name: "Default",
            type: "DEFAULT",
            deleted: false,
            provider: :coinbase
          },
          %Types.Portfolio{
-           id: "pf-2",
+           id: @retired_portfolio_id,
            name: "Retired",
            type: "CONSUMER",
            deleted: true,
@@ -1064,7 +1074,7 @@ defmodule DpExchange.Coinbase.Fake do
            :ok <- Rest.validate_credentials(opts_credentials(opts)) do
         {:ok,
          %Types.Portfolio{
-           id: "pf-new",
+           id: @new_portfolio_id,
            name: name,
            type: "CONSUMER",
            deleted: false,
@@ -1098,7 +1108,7 @@ defmodule DpExchange.Coinbase.Fake do
          "can_view" => true,
          "can_trade" => true,
          "can_transfer" => false,
-         "portfolio_uuid" => "pf-1",
+         "portfolio_uuid" => @default_portfolio_id,
          "portfolio_type" => "DEFAULT"
        }}
     end)
@@ -1115,21 +1125,53 @@ defmodule DpExchange.Coinbase.Fake do
       # each refused by the real path.
       with :ok <- Rest.validate_order_request(request),
            :ok <- Rest.validate_credentials(credentials) do
-        {:ok,
-         %Types.Order{
-           id: "fake-order-1",
-           symbol: Map.fetch!(request, :symbol),
-           side: Map.fetch!(request, :side),
-           order_type: Map.get(request, :order_type, :limit),
-           time_in_force: Map.get(request, :time_in_force, :gtc),
-           # Decimals, as the real return: it casts the caller's value, string or float.
-           quantity: cast_decimal(Map.get(request, :quantity)),
-           price: cast_decimal(Map.get(request, :price)),
-           status: :pending,
-           provider: :coinbase
-         }}
+        placed = %Types.Order{
+          id: next_order_id(),
+          symbol: Map.fetch!(request, :symbol),
+          side: Map.fetch!(request, :side),
+          order_type: Map.get(request, :order_type, :limit),
+          time_in_force: Map.get(request, :time_in_force, :gtc),
+          # Decimals, as the real return: it casts the caller's value, string or float.
+          quantity: cast_decimal(Map.get(request, :quantity)),
+          price: cast_decimal(Map.get(request, :price)),
+          status: :pending,
+          provider: :coinbase
+        }
+
+        # Remembered (per process) as the working order a later read finds: placed, not
+        # filled. `get_order/3`, `get_orders/2` and `cancel_order/3` answer from this, so a
+        # place -> read -> cancel -> read test sees the order it placed, as on the venue.
+        remember_order(%{placed | status: :open, filled_quantity: Decimal.new("0")})
+        {:ok, placed}
       end
     end)
+  end
+
+  # A new id per placement. The fake issued the literal `fake-order-1` for every order, so
+  # two placements were one order, and read back a BTC-USD buy whatever had been placed.
+  @order_id_prefix "d2c4f6a8-1b3e-4c5d-8f70-"
+  @orders_key {__MODULE__, :orders}
+
+  defp next_order_id do
+    count = map_size(orders()) + 1
+    @order_id_prefix <> (count |> Integer.to_string(16) |> String.pad_leading(12, "0"))
+  end
+
+  defp orders, do: Process.get(@orders_key, %{})
+
+  defp remember_order(%Types.Order{id: id} = order) do
+    Process.put(@orders_key, Map.put(orders(), id, order))
+    order
+  end
+
+  # An order this process placed, else the one canned order that exists before anything is
+  # placed. Anything else is an id the fake never issued.
+  defp find_order(order_id) do
+    case Map.fetch(orders(), order_id) do
+      {:ok, _order} = found -> found
+      :error when order_id == "fake-order-1" -> {:ok, fake_order()}
+      :error -> :error
+    end
   end
 
   defp cast_decimal(nil), do: nil
@@ -1151,22 +1193,34 @@ defmodule DpExchange.Coinbase.Fake do
     with_credentials(credentials, fn ->
       # The fake refuses the same way the venue does: an order that is not open cannot be
       # cancelled, and saying :ok would let a consumer's retry logic go untested.
-      case order_id do
-        "fake-order-1" -> {:ok, :cancelled}
-        "already-filled" -> {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_FAILURE_REASON"}}
-        _unknown -> {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}}
-      end
+      cancel_found(find_order(order_id), order_id)
     end)
   end
+
+  # Marked cancelled, so the next read says so. An order already cancelled or filled is not
+  # open, and the venue refuses it as it refuses `already-filled`.
+  defp cancel_found({:ok, %Types.Order{status: :open} = order}, _order_id) do
+    remember_order(%{order | status: :cancelled})
+    {:ok, :cancelled}
+  end
+
+  defp cancel_found({:ok, _closed}, _order_id),
+    do: {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_FAILURE_REASON"}}
+
+  defp cancel_found(:error, "already-filled"),
+    do: {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_FAILURE_REASON"}}
+
+  defp cancel_found(:error, _unknown),
+    do: {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}}
 
   @impl true
   def get_order(credentials, order_id, _opts \\ []) do
     with_credentials(credentials, fn ->
-      case order_id do
-        "fake-order-1" -> {:ok, fake_order()}
+      case find_order(order_id) do
+        {:ok, order} -> {:ok, order}
         # The venue's 404, which `Rest` classifies `{:refused, :not_listed}`. This said
         # `:not_found`, a reason the real package can never return.
-        _unknown -> {:refused, :not_listed}
+        :error -> {:refused, :not_listed}
       end
     end)
   end
@@ -1177,13 +1231,18 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def get_orders(credentials, opts \\ []) do
     with_credentials(credentials, fn ->
-      orders =
-        Enum.filter([fake_order()], fn order ->
+      # The canned order, unless it was cancelled here and so is stored, then what this
+      # process placed in id order.
+      canned = if Map.has_key?(orders(), "fake-order-1"), do: [], else: [fake_order()]
+      placed = orders() |> Map.values() |> Enum.sort_by(& &1.id)
+
+      matching =
+        Enum.filter(canned ++ placed, fn order ->
           status_matches?(Keyword.get(opts, :status), order.status) and
             matches?(canonical_symbol(Keyword.get(opts, :symbol)), order.symbol)
         end)
 
-      {:ok, orders}
+      {:ok, matching}
     end)
   end
 
@@ -1223,7 +1282,7 @@ defmodule DpExchange.Coinbase.Fake do
            best_ask: Decimal.new("40010"),
            slippage: Decimal.new("0.001"),
            warning: nil,
-           preview_id: "fake-preview-1"
+           preview_id: @preview_id
          }}
       end
     end)
@@ -1242,13 +1301,23 @@ defmodule DpExchange.Coinbase.Fake do
         # Read back, as the real package does: the venue's edit response carries no order.
         # Both edited fields show in it — the size was left at the original, so the read-back
         # of an edit disagreed with the edit it followed.
-        {:ok,
-         %{
-           fake_order()
-           | id: order_id,
-             price: cast_decimal(Map.get(changes, :price)),
-             quantity: cast_decimal(Map.get(changes, :quantity))
-         }}
+        # Of the order this process placed when it is one, so an edit keeps its symbol and
+        # side; the canned order otherwise.
+        base =
+          case find_order(order_id) do
+            {:ok, order} -> order
+            :error -> fake_order()
+          end
+
+        edited = %{
+          base
+          | id: order_id,
+            price: cast_decimal(Map.get(changes, :price)),
+            quantity: cast_decimal(Map.get(changes, :quantity))
+        }
+
+        if Map.has_key?(orders(), order_id), do: remember_order(edited)
+        {:ok, edited}
       end
     end)
   end

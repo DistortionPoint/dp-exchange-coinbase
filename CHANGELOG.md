@@ -20,6 +20,38 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The fake read back and cancelled a canned order, not the one that was placed.**
+  `place_order/3` issued `fake-order-1` for every placement, `get_order/3` returned a BTC-USD
+  buy for it whatever had been placed, and `cancel_order/3` left every later read `:open`.
+  `place_order/3` now issues a new id per order and remembers the order (per process);
+  `get_order/3`, `get_orders/2` and `replace_order/4` answer from it with its own symbol,
+  side, type, size and price, and `cancel_order/3` marks it cancelled, so the next read says
+  so and a second cancel is refused. An id the fake never issued is still the venue's 404
+  (`{:refused, :not_listed}`) on a read and `UNKNOWN_CANCEL_ORDER` on a cancel. The canned
+  `fake-order-1` still answers before anything is placed.
+- **A deferred shard open no longer depends on the plan forgetting it.** `Feed`'s placement
+  planned from `state.shards` alone, so a pending open (a crashed shard's reopen, or a boot
+  open that had not fired) was invisible to the next plan. Its symbols were re-placed into
+  other shards' gaps and under a fresh overflow index while the pending open still fired under
+  its old index with its old symbols: the same symbols scheduled to open twice, or sitting in a
+  gap nothing reconciled, until the next explicit call. Placement now counts a pending open as
+  a shard, so an index is stable until its shard is empty. The `:resubscribe` tick also
+  reconciles an open shard whose gap the plan filled and cancels a pending open the plan no
+  longer has. A deferred open intersects its symbols with what is wanted when it fires, and a
+  crashed shard reopens only on its still-wanted symbols, and not at all if none remain.
+
+- **The fake issued portfolio and preview ids in a shape the venue never produces.**
+  `list_portfolios/1`, `create_account/1`, `get_roles/1` and `preview_order/3` answered
+  `pf-1`, `pf-2`, `pf-new` and `fake-preview-1`; the spec's portfolio `uuid` and
+  `preview_id` are UUIDs (`docs/reference/coinbase/openapi/at-spec.yaml`), so a consumer
+  validating a portfolio uuid passed against the venue and failed against the fake. They
+  are now fixed UUIDs, and `get_roles/1` reports the portfolio `list_portfolios/1` lists
+  first. The order and conversion ids (`fake-order-1`, `convert-1`) are unchanged: the spec
+  documents them as opaque strings and `Rest` accepts any non-empty one, so place, get and
+  cancel already round-tripped.
+
 ## [0.3.101] - 2026-10-11
 
 ### Fixed

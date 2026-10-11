@@ -674,6 +674,13 @@ is a real implementation of the facade that answers from memory, models Coinbase
 refusals — unlisted symbols, `12h`, the 350 boundary — and passes the same conformance
 suite as the real adapter.
 
+**The fake remembers the orders it placed, per process.** `place_order/3` issues a new id
+each time; `get_order/3` and `get_orders/2` return that order with its own symbol, side,
+size and price, `cancel_order/3` marks it cancelled so the next read says `:cancelled`, and
+an id the fake never issued answers as the venue does (`{:refused, :not_listed}` on a read,
+`{:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}}` on a cancel). Before anything is
+placed, `fake-order-1` is a canned open BTC-USD order.
+
 **`get_top_of_book/2` errors without `opts[:credentials]`, in the fake too** — the one
 call this venue genuinely requires them for (see above). A test calling it with none gets
 `{:error, {:missing_credentials, :coinbase}}` against both the fake and the real client,

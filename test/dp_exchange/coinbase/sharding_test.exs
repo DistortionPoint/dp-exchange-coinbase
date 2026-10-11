@@ -1309,6 +1309,156 @@ defmodule DpExchange.Coinbase.ShardingTest do
     end
   end
 
+  describe "a deferred open owns its index — placement counts pending opens as shards" do
+    # A key in `state.pending_opens` has no socket but already owns an index and symbols. The
+    # plan used to look at `state.shards` alone, so a crash-reopen, or a boot open that had not
+    # fired, was invisible to the next plan: its symbols were re-placed into other shards' gaps
+    # and under a fresh overflow index while the pending open still fired under the old one.
+    # The state is seeded directly, with a ten-minute timer standing in for the pending
+    # message, because a crash-reopen is scheduled for `0` and cannot be caught pending.
+    defp seed_plan(feed, open, pending, wanted) do
+      :sys.replace_state(feed, fn state ->
+        deferred =
+          Map.new(pending, fn {key, symbols} ->
+            timer = Process.send_after(self(), :never_delivered_in_this_test, 600_000)
+            {key, %{ref: make_ref(), timer: timer, symbols: symbols}}
+          end)
+
+        %{state | wanted: MapSet.new(wanted), shards: open, pending_opens: deferred}
+      end)
+    end
+
+    defp open_shard_entry(symbols), do: %{socket: fake_socket(), symbols: symbols}
+
+    test "the resubscribe tick does not plan a pending open's symbols under a second key" do
+      # Shard 1 is a crash-reopen still pending with B001-B100; shard 0 has ten free places.
+      # The plan ignored the pending key, put B001-B010 in shard 0's gap and the rest under a
+      # new key 3, so the same symbols were then scheduled to open twice.
+      feed = start_staggered_feed()
+      a = symbols_named("A", 90)
+      b = symbols_named("B", 100)
+      c = symbols_named("C", 50)
+
+      seed_plan(
+        feed,
+        %{{"ticker", 0} => open_shard_entry(a), {"ticker", 2} => open_shard_entry(c)},
+        %{{"ticker", 1} => b},
+        a ++ b ++ c
+      )
+
+      send(feed, :resubscribe)
+      state = :sys.get_state(feed)
+
+      assert Map.keys(state.pending_opens) == [{"ticker", 1}]
+      assert state.pending_opens[{"ticker", 1}].symbols == b
+      assert state.shards[{"ticker", 0}].symbols == a
+    end
+
+    test "a reshard fills a gap with the new symbol and leaves the pending open's symbols" do
+      # Shard 0 has ten free places and shard 1 is pending with B001-B020. The plan moved
+      # B001-B010 into shard 0 and left shard 1 the remainder plus the new symbol, so a
+      # pending shard's contents changed because an unrelated symbol arrived.
+      feed = start_staggered_feed()
+      a = symbols_named("A", 90)
+      b = symbols_named("B", 20)
+
+      seed_plan(feed, %{{"ticker", 0} => open_shard_entry(a)}, %{{"ticker", 1} => b}, a ++ b)
+
+      assert :ok = Feed.update_symbols(feed, a ++ b ++ ["Z-USD"])
+
+      state = :sys.get_state(feed)
+      assert state.pending_opens[{"ticker", 1}].symbols == b
+      assert state.shards[{"ticker", 0}].symbols == a ++ ["Z-USD"]
+    end
+
+    test "the resubscribe tick reconciles a symbol the plan put into an open shard's gap" do
+      # Shard 1 failed to open and nothing is pending for it. Its symbols are unplaced, so the
+      # plan puts ten of them in shard 0's gap and the rest under key 1. The tick opened the
+      # missing key only, leaving those ten in no shard until the next explicit call.
+      feed = start_staggered_feed()
+      a = symbols_named("A", 90)
+      b = symbols_named("B", 20)
+
+      seed_plan(feed, %{{"ticker", 0} => open_shard_entry(a)}, %{}, a ++ b)
+
+      send(feed, :resubscribe)
+      state = :sys.get_state(feed)
+
+      assert state.shards[{"ticker", 0}].symbols == a ++ Enum.take(b, 10)
+      assert state.pending_opens[{"ticker", 1}].symbols == Enum.drop(b, 10)
+    end
+
+    test "the resubscribe tick cancels a pending open whose symbols are no longer wanted" do
+      feed = start_staggered_feed()
+      a = symbols_named("A", 100)
+      b = symbols_named("B", 30)
+
+      seed_plan(feed, %{{"ticker", 0} => open_shard_entry(a)}, %{{"ticker", 1} => b}, a)
+
+      send(feed, :resubscribe)
+
+      assert :sys.get_state(feed).pending_opens == %{}
+    end
+
+    test "a deferred open fires with what is wanted now, not what it was scheduled with" do
+      feed = start_staggered_feed()
+      a = symbols_named("A", 40)
+      kept = Enum.take(a, 15)
+
+      seed_plan(feed, %{}, %{{"ticker", 0} => a}, kept)
+      %{{"ticker", 0} => %{ref: ref}} = :sys.get_state(feed).pending_opens
+
+      send(feed, {:open_shard, "ticker", 0, a, ref})
+
+      state = :sys.get_state(feed)
+      assert state.pending_opens == %{}
+      assert state.shards[{"ticker", 0}].symbols == kept
+    end
+
+    test "a deferred open whose symbols are all unwanted opens nothing" do
+      feed = start_staggered_feed()
+      a = symbols_named("A", 10)
+
+      seed_plan(feed, %{}, %{{"ticker", 0} => a}, [])
+      %{{"ticker", 0} => %{ref: ref}} = :sys.get_state(feed).pending_opens
+
+      send(feed, {:open_shard, "ticker", 0, a, ref})
+
+      state = :sys.get_state(feed)
+      assert state.pending_opens == %{}
+      assert state.shards == %{}
+    end
+
+    test "a crashed shard reopens on what is still wanted, not on what it last carried" do
+      feed = start_staggered_feed()
+      a = symbols_named("A", 40)
+      kept = Enum.take(a, 15)
+      socket = fake_socket()
+
+      seed_plan(feed, %{{"ticker", 0} => %{socket: socket, symbols: a}}, %{}, kept)
+      send(feed, {:EXIT, socket, :boom})
+
+      wait_until(fn ->
+        match?(%{{"ticker", 0} => %{symbols: ^kept}}, :sys.get_state(feed).shards)
+      end)
+    end
+
+    test "a crashed shard whose symbols are all unwanted does not reopen" do
+      # Deterministic without waiting: the reopen is scheduled for `0`, so if it were
+      # scheduled at all, either it is still pending or it already opened the shard.
+      feed = start_staggered_feed()
+      socket = fake_socket()
+
+      carried = symbols_named("A", 5)
+      seed_plan(feed, %{{"ticker", 0} => %{socket: socket, symbols: carried}}, %{}, [])
+      send(feed, {:EXIT, socket, :boom})
+
+      state = :sys.get_state(feed)
+      assert state.pending_opens == %{}
+      assert state.shards == %{}
+    end
+  end
+
   describe "level2 reconciles in place — unsubscribe before subscribe, no socket replacement" do
     # See `feed.ex`'s moduledoc, "unsubscribe before subscribe" section. `reconcile_shard/7`
     # used to open a brand-new socket whenever an already-open `level2` shard would GAIN a

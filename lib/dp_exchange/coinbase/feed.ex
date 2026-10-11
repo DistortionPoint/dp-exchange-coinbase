@@ -802,6 +802,29 @@ defmodule DpExchange.Coinbase.Feed do
   `reshard/1` whose plan no longer has the key cancels it. `retry_missing_shards/1` leaves a
   key alone while its open is pending.
 
+  ### A pending open owns its index
+
+  Replacing a pending open was only as good as the plan that fed it, and the plan looked at
+  `state.shards` alone. A deferred open has no socket yet, so it was invisible: a crashed
+  shard's reopen (scheduled for `0`, under its old index, with the symbols it last carried)
+  or a boot open that had not fired was re-planned around. The next plan put its symbols into
+  other shards' gaps and any remainder under a fresh overflow index, while the pending open
+  still fired under the old index. The same symbols were then scheduled to open twice, or sat
+  in a gap that nothing reconciled, until the next `reshard/1`. `retry_missing_shards/1` had
+  the same blind spot and, on a symbol the plan put into an open shard's gap, opened only the
+  missing keys.
+
+  Placement now counts a pending open as a shard. It keeps its still-wanted symbols, a new
+  symbol may fill its gap, and its index is not handed out again, so an index is stable from
+  the plan that first assigns it until its shard is empty, open or not. Beyond that:
+
+    * The `:resubscribe` tick reconciles an open shard the plan changed (a symbol placed in its
+      gap) and cancels a pending open the plan no longer has, as `reshard/1` does.
+    * A deferred open intersects its symbols with `state.wanted` when it fires, and opens
+      nothing if none remain.
+    * A crashed shard reopens on the still-wanted part of what it carried, and not at all if
+      none of it is wanted.
+
   ## One caller's bad symbol cannot cost every caller's subscription
 
   `subscribe/3`, `unsubscribe/2` and `update_symbols/2` take a list of non-empty strings and
@@ -1425,14 +1448,39 @@ defmodule DpExchange.Coinbase.Feed do
   # already carries, new symbols (sorted, so the plan is deterministic) fill gaps in index
   # order, and only what does not fit opens new shards past the last. A shard left empty
   # drops out, and `reshard/1`'s vanishing-key path unsubscribes it.
+  #
+  # **A deferred open is a shard for placement purposes.** A key in `state.pending_opens` has
+  # no socket yet but already owns an index and a symbol list, and the plan treats it exactly
+  # like an open shard: it keeps its still-wanted symbols, new symbols may fill its gap, and
+  # its index is not handed out again. Planning from `state.shards` alone, as this once did,
+  # left a crash-reopen (`isolate_crashed_shard/5`) or a not-yet-fired boot open invisible:
+  # the next plan re-placed its symbols into other shards' gaps and under a fresh overflow
+  # index, while the pending open still fired under its old index with its old symbols. The
+  # same symbols then sat on two shards, or in a gap that was never reconciled, until the
+  # next `reshard/1`. An index is therefore stable from the plan that first assigns it until
+  # its shard is empty, whether or not its socket is open yet.
   defp planned_shards(state, channel, wanted_list) do
     size = shard_size(channel, state.level2_pairs_per_socket)
     wanted = MapSet.new(wanted_list)
 
-    kept =
+    open =
       for {{^channel, index}, %{symbols: symbols}} <- state.shards, into: %{} do
-        {index, Enum.filter(symbols, &MapSet.member?(wanted, &1))}
+        {index, symbols}
       end
+
+    deferred =
+      for {{^channel, index}, %{symbols: symbols}} <- state.pending_opens,
+          not Map.has_key?(open, index),
+          into: %{} do
+        {index, symbols}
+      end
+
+    kept =
+      open
+      |> Map.merge(deferred)
+      |> Map.new(fn {index, symbols} ->
+        {index, Enum.filter(symbols, &MapSet.member?(wanted, &1))}
+      end)
 
     placed = kept |> Map.values() |> Enum.concat() |> MapSet.new()
     fresh = wanted_list |> Enum.reject(&MapSet.member?(placed, &1)) |> Enum.sort()
@@ -2105,15 +2153,22 @@ defmodule DpExchange.Coinbase.Feed do
   # open for its key: a later `reshard/1` that recomputed the shard replaced it with one
   # carrying current symbols, and one for a key nobody wants any more was cancelled. A copy
   # already in the mailbox when that happened is recognised here by its `ref`.
+  #
+  # The symbols are intersected with `state.wanted` at fire time. The plan keeps a pending
+  # open current (`planned_shards/3` counts it as a shard), so this normally changes nothing;
+  # it is the last guard for an open scheduled from a recorded list that has since lost
+  # symbols, and an open whose symbols are all gone opens nothing at all.
   def handle_info({:open_shard, channel, index, symbols, ref}, state) do
     key = {channel, index}
 
     case Map.get(state.pending_opens, key) do
       %{ref: ^ref} ->
-        handle_info(
-          {:open_shard, channel, index, symbols},
-          %{state | pending_opens: Map.delete(state.pending_opens, key)}
-        )
+        state = %{state | pending_opens: Map.delete(state.pending_opens, key)}
+
+        case Enum.filter(symbols, &MapSet.member?(state.wanted, &1)) do
+          [] -> {:noreply, state}
+          live -> handle_info({:open_shard, channel, index, live}, state)
+        end
 
       _replaced_or_cancelled ->
         {:noreply, state}
@@ -2418,38 +2473,60 @@ defmodule DpExchange.Coinbase.Feed do
     end
   end
 
-  # Re-attempts opening any shard `state.wanted` implies (for either channel) that is not
-  # currently a key in `state.shards` — see `handle_info(:resubscribe, _)` for why this
-  # exists: a shard whose socket never opened has no other automatic recovery path.
-  # Computed the same way `reshard/1` computes `new_shards`, so the keys agree with
-  # whatever a fresh `subscribe/3` or `update_symbols/2` call would also compute for the
-  # same `wanted` set.
+  # Re-attempts any shard `state.wanted` implies (for either channel) that is not currently a
+  # key in `state.shards` — see `handle_info(:resubscribe, _)` for why this exists: a shard
+  # whose socket never opened has no other automatic recovery path. Computed the same way
+  # `reshard/1` computes `new_shards`, so the keys agree with whatever a fresh `subscribe/3`
+  # or `update_symbols/2` call would also compute for the same `wanted` set.
+  #
+  # Two things beyond opening a missing key:
+  #
+  #   * A plan that put a symbol into an OPEN shard's gap (its own shard failed to open, so
+  #     the symbol was unplaced and `planned_shards/3` found it a home) is a changed shard,
+  #     and is reconciled like `reshard/1` reconciles one. Opening only the missing keys left
+  #     that symbol recorded nowhere until the next explicit call.
+  #   * A pending open for a key the plan no longer has is cancelled, as `reshard/1` does.
   #
   # Staggered starting one `shard_spacing_ms` past every already-open shard's own
   # resubscribe slot (`map_size(state.shards)` of them, scheduled just above), so a retry
   # here never lands in the same instant as an open shard's unconditional resubscribe.
   defp retry_missing_shards(state) do
-    existing = Map.keys(state.shards)
     base = map_size(state.shards)
     wanted_list = MapSet.to_list(state.wanted)
 
-    state
-    |> active_channels()
-    |> Enum.flat_map(fn channel ->
+    planned =
       state
-      |> planned_shards(channel, wanted_list)
-      |> Enum.map(fn {index, symbols} -> {{channel, index}, symbols} end)
-    end)
-    # A key whose open is already scheduled is not re-scheduled: its own message is on its
-    # way, and a replacement here would push it out to `(base + position)` spacings from now.
-    |> Enum.reject(fn {key, _symbols} ->
-      key in existing or Map.has_key?(state.pending_opens, key)
-    end)
-    |> Enum.sort_by(fn {key, _symbols} -> key end, &shard_key_order/2)
+      |> active_channels()
+      |> Enum.flat_map(fn channel ->
+        state
+        |> planned_shards(channel, wanted_list)
+        |> Enum.map(fn {index, symbols} -> {{channel, index}, symbols} end)
+      end)
+      |> Map.new()
+
+    state = cancel_unplanned_opens(state, Map.keys(planned))
+
+    planned
+    |> Enum.filter(fn {key, symbols} -> retry_needed?(state, key, symbols) end)
+    |> Enum.map(fn {key, _symbols} -> key end)
+    |> Enum.sort(&shard_key_order/2)
     |> Enum.with_index()
-    |> Enum.reduce(state, fn {{key, symbols}, position}, acc ->
-      schedule_open(acc, key, symbols, (base + position) * state.shard_spacing_ms)
+    |> Enum.reduce(state, fn {key, position}, acc ->
+      delay = (base + position) * state.shard_spacing_ms
+      {_result, acc} = touch_shard(acc, key, planned, sync: false, delay: delay)
+      acc
     end)
+  end
+
+  # An open shard is retried only when the plan differs from what it carries. A missing one
+  # is retried unless its open is already pending with exactly these symbols: its own message
+  # is on its way, and a replacement would push it out to `(base + position)` spacings from now.
+  defp retry_needed?(state, key, symbols) do
+    case {Map.get(state.shards, key), Map.get(state.pending_opens, key)} do
+      {%{symbols: current}, _pending} -> current != symbols
+      {nil, %{symbols: pending}} -> pending != symbols
+      {nil, nil} -> true
+    end
   end
 
   # Recomputes each active channel's shards from `state.wanted` and reconciles: a shard
@@ -3211,7 +3288,14 @@ defmodule DpExchange.Coinbase.Feed do
     # shard whose FIRST open never happened at all (see `retry_missing_shards/1`'s own
     # moduledoc reference); a shard that was open and delivering a moment ago should not
     # wait up to `resubscribe_interval_ms` (60s by default) to try again.
-    schedule_open(state, key, symbols, 0)
+    # Only what is still wanted: a shard being retired (its symbols unwanted, release not yet
+    # confirmed) must not come back to life as an open on symbols nobody asked for. The
+    # pending open keeps its index claim in `planned_shards/3`, so a reshard that lands
+    # before it fires re-plans around it instead of duplicating its symbols elsewhere.
+    case Enum.filter(symbols, &MapSet.member?(state.wanted, &1)) do
+      [] -> state
+      live -> schedule_open(state, key, live, 0)
+    end
   end
 
   # Mirrors `payload_kind/1`'s struct-to-kind mapping, from the other direction: a

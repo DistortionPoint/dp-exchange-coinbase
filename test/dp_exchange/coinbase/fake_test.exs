@@ -498,6 +498,102 @@ defmodule DpExchange.Coinbase.FakeTest do
     end
   end
 
+  describe "issued portfolio and preview ids are the venue's UUIDs and round-trip" do
+    @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
+    test "list_portfolios -> get_roles -> rename_account agree on UUID portfolio ids" do
+      opts = [credentials: @credentials]
+
+      assert {:ok, [default, retired]} = Fake.list_portfolios(opts)
+      assert default.id =~ @uuid
+      assert retired.id =~ @uuid
+      refute default.id == retired.id
+
+      # The portfolio the key is attached to is one the listing names.
+      assert {:ok, %{"portfolio_uuid" => attached}} = Fake.get_roles(opts)
+      assert attached == default.id
+
+      assert {:ok, renamed} = Fake.rename_account(default.id, "Renamed", opts)
+      assert renamed.id == default.id
+    end
+
+    test "create_account issues a UUID portfolio id that rename_account accepts" do
+      assert {:ok, created} = Fake.create_account(credentials: @credentials, name: "Fresh")
+      assert created.id =~ @uuid
+
+      assert {:ok, renamed} =
+               Fake.rename_account(created.id, "Again", credentials: @credentials)
+
+      assert renamed.id == created.id
+    end
+
+    test "preview_order issues a UUID preview id, as the venue's preview_id" do
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: Decimal.new("0.5"),
+        price: Decimal.new("40000")
+      }
+
+      assert {:ok, %{preview_id: preview_id}} = Fake.preview_order(@credentials, request)
+      assert preview_id =~ @uuid
+    end
+  end
+
+  describe "an order the fake placed is the order it reads back and cancels" do
+    defp eth_sell do
+      %{
+        symbol: "ETH-USD",
+        side: :sell,
+        quantity: Decimal.new("2"),
+        price: Decimal.new("3000")
+      }
+    end
+
+    test "place -> get -> list -> cancel -> get -> cancel again" do
+      assert {:ok, placed} = Fake.place_order(@credentials, eth_sell())
+      refute placed.id == "fake-order-1"
+
+      assert {:ok, read} = Fake.get_order(@credentials, placed.id)
+      assert read.id == placed.id
+      assert read.symbol == "ETH-USD"
+      assert read.side == :sell
+      assert Decimal.equal?(read.quantity, Decimal.new("2"))
+      assert Decimal.equal?(read.price, Decimal.new("3000"))
+      assert read.status == :open
+
+      assert {:ok, [listed]} = Fake.get_orders(@credentials, symbol: "ETH-USD")
+      assert listed.id == placed.id
+
+      assert {:ok, :cancelled} = Fake.cancel_order(@credentials, placed.id)
+      assert {:ok, %{status: :cancelled}} = Fake.get_order(@credentials, placed.id)
+
+      assert {:refused, {:cancel_rejected, _reason}} =
+               Fake.cancel_order(@credentials, placed.id)
+    end
+
+    test "two placements are two orders" do
+      assert {:ok, first} = Fake.place_order(@credentials, eth_sell())
+      assert {:ok, second} = Fake.place_order(@credentials, eth_sell())
+      refute first.id == second.id
+
+      assert {:ok, :cancelled} = Fake.cancel_order(@credentials, first.id)
+      assert {:ok, %{status: :open}} = Fake.get_order(@credentials, second.id)
+    end
+
+    test "an id the fake never issued answers as the venue's 404 and unknown cancel" do
+      assert {:refused, :not_listed} = Fake.get_order(@credentials, "never-issued")
+
+      assert {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}} =
+               Fake.cancel_order(@credentials, "never-issued")
+    end
+
+    test "cancelling the canned order is reflected in the next read" do
+      assert {:ok, :cancelled} = Fake.cancel_order(@credentials, "fake-order-1")
+      assert {:ok, %{status: :cancelled}} = Fake.get_order(@credentials, "fake-order-1")
+    end
+  end
+
   describe "streaming parity, found 2026-10-10" do
     test ":order_book pushes a snapshot and is covered under that kind" do
       :ok = Fake.subscribe(["BTC-USD"], to: self(), channels: [:quotes, :order_book])
