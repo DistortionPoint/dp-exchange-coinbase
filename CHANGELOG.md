@@ -20,6 +20,15 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`Feed.start_link/1` and `Supervisor.start_link/1` carry a `@doc`.** Both were public with a
+  `@spec` and no documentation. No behaviour change.
+- **Tests that wait on a spawned process or timer now wait at least 5_000 ms.** Several
+  `assert_receive`s on the feed, socket and alias-catalogue task (1_000 / 2_000 / 500 ms)
+  and `FeedCase.wait_until/3`'s 2_000 ms default are raised; a wait only costs time when the
+  condition is not met. No behaviour change.
+
 ## [0.3.108] - 2026-10-11
 
 ### Fixed

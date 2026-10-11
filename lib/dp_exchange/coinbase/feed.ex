@@ -1645,6 +1645,14 @@ defmodule DpExchange.Coinbase.Feed do
           "shard_spacing_ms must be a non-negative integer, got: #{inspect(value)}"
   end
 
+  @doc """
+  Starts the feed, registered under `opts[:name]` (default `DpExchange.Coinbase.Feed`).
+
+  A consumer normally gets this through `DpExchange.Coinbase.child_spec/1`, which starts the
+  feed under the venue supervisor next to its rate limiter. An unusable
+  `level2_pairs_per_socket`, `shard_spacing_ms` or `max_queue_len` fails the start with an
+  `ArgumentError` rather than being coerced.
+  """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))

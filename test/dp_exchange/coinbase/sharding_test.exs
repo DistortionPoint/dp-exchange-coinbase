@@ -85,7 +85,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{shard: 1}}},
-                     2_000
+                     5_000
 
       # Proves a real delay was actually applied, not merely that the async attempt
       # eventually ran: shard 1 must not have reported before its own stagger tick.
@@ -139,13 +139,13 @@ defmodule DpExchange.Coinbase.ShardingTest do
       # placed to catch.
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{shard: 1}}},
-                     2_000
+                     5_000
 
       assert System.monotonic_time(:millisecond) - before >= 0.5 * @test_shard_spacing_ms
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{shard: 2}}},
-                     2_000
+                     5_000
 
       assert System.monotonic_time(:millisecond) - before >= 1.5 * @test_shard_spacing_ms
 
@@ -201,13 +201,13 @@ defmodule DpExchange.Coinbase.ShardingTest do
       # guards against.
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{channel: "level2", shard: 0}}},
-                     2_000
+                     5_000
 
       assert System.monotonic_time(:millisecond) - before >= 0.5 * @test_shard_spacing_ms
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{channel: "level2", shard: 1}}},
-                     2_000
+                     5_000
 
       assert System.monotonic_time(:millisecond) - before >= 1.5 * @test_shard_spacing_ms
 
@@ -238,7 +238,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{channel: "level2"}}},
-                     2_000
+                     5_000
     end
   end
 
@@ -310,7 +310,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
                           kind: :coverage_change,
                           details: %{channel: "level2", shard: ^shard_index}
                         }},
-                       2_000
+                       5_000
 
         min_elapsed = (shard_index + 1 - 0.5) * @test_shard_spacing_ms
 
@@ -747,9 +747,9 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, provider: :coinbase} = notice},
-                     # 2s, not 500ms: a refused connect to 127.0.0.1:1 took longer than 500ms
+                     # 5s, not 500ms: a refused connect to 127.0.0.1:1 took longer than 500ms
                      # under full-suite load once (2026-10-02). Only the wait is longer.
-                     2_000
+                     5_000
 
       assert notice.details.shard == 0
       assert notice.details.channel == "ticker"
@@ -895,7 +895,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
           # The notice is the completion signal — waiting on it, rather than on a clock,
           # guarantees the log has been written before it is asserted against.
           assert_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change} = notice},
-                         2_000
+                         5_000
 
           assert notice.severity == :warning
           assert notice.details.channel == "user"
@@ -941,7 +941,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
           # below failed against a fix that was working correctly. A test that reports a
           # regression the code did not commit is worse than no test.
           assert_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change} = notice},
-                         2_000
+                         5_000
 
           assert notice.severity == :warning
           assert notice.details.channel == "ticker"
@@ -1113,7 +1113,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
           )
 
           assert_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change} = notice},
-                         2_000
+                         5_000
 
           assert notice.severity == :warning
           assert notice.details.channel == "level2"

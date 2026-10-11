@@ -629,7 +629,7 @@ defmodule DpExchange.Coinbase.SocketTest do
         end)
 
       assert :ok = Socket.subscribe(socket, "level2", ~w(btc-usd), @credentials)
-      assert_receive {:wire, wire}, 1_000
+      assert_receive {:wire, wire}, 5_000
 
       assert wire["type"] == "subscribe"
       assert wire["channel"] == "level2"

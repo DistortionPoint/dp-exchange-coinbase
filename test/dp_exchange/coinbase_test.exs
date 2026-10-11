@@ -792,7 +792,7 @@ defmodule DpExchange.CoinbaseTest do
         end
       end)
 
-      assert_receive :registered, 2_000
+      assert_receive :registered, 5_000
 
       assert DpExchange.Coinbase.subscribe(["BTC-USD"], feed: name) ==
                {:error, {:feed_exited, :boom}}

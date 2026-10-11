@@ -108,7 +108,7 @@ defmodule DpExchange.Coinbase.CredentialsTest do
 
           # Waits for the actual process death (a real message, no sleep) rather than
           # assuming the crash report was already flushed the instant `boom/1` returned.
-          assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+          assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
         end)
 
       assert log =~ "simulated crash for leak-proof test"

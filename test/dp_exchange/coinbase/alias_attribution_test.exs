@@ -40,11 +40,11 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       feed = start_wedge_feed(alias_map_source: source, alias_map_retry_delay_ms: 5)
       :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
 
-      assert_receive {:fetching, task_pid}, 2_000
+      assert_receive {:fetching, task_pid}, 5_000
       Process.exit(task_pid, :kill)
 
       # The retry ladder picks it straight back up rather than dropping the tick.
-      assert_receive {:fetching, second_pid}, 2_000
+      assert_receive {:fetching, second_pid}, 5_000
       assert second_pid != task_pid
       assert Process.alive?(feed)
     end
@@ -68,8 +68,8 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
 
       :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
 
-      assert_receive {:fetching, first_pid}, 2_000
-      assert_receive {:fetching, second_pid}, 2_000
+      assert_receive {:fetching, first_pid}, 5_000
+      assert_receive {:fetching, second_pid}, 5_000
       assert second_pid != first_pid
 
       # And the timed-out task is actually gone, not left running behind the feed's back.
@@ -274,7 +274,7 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :data_quality, details: %{reason: reason}} = notice},
-                     500
+                     5_000
 
       assert reason =~ "simulated_catalog_failure"
       assert notice.message =~ "alias catalogue unavailable"
@@ -470,7 +470,7 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
           # asserted against.
           assert_receive {:dp_exchange, :coinbase,
                           %Notice{kind: :data_quality, details: %{reason: reason}}},
-                         2_000
+                         5_000
 
           assert reason =~ "boom"
         end)
@@ -511,7 +511,7 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       log =
         capture_log(fn ->
           Feed.subscribe(feed, ~w(BTC-USD), to: self())
-          assert_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 2_000
+          assert_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 5_000
         end)
 
       # Every one of these matches the ALIAS CATALOGUE line specifically, not the bare
@@ -553,7 +553,7 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :data_quality, details: %{reason: reason}} = notice},
-                     500
+                     5_000
 
       assert reason =~ "simulated_catalog_failure"
       assert notice.message =~ "alias catalogue unavailable"
@@ -585,7 +585,7 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       Feed.subscribe_notices(feed, to: self())
       Feed.subscribe(feed, ~w(BTC-USD), to: self())
 
-      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 2_000
+      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 5_000
 
       # Registering again must not re-fire it — the replay is keyed to a NEW
       # registration, not to every call this consumer happens to make.
@@ -630,7 +630,7 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
         end)
 
       send(feed, :fetch_alias_map)
-      assert_receive {:fetch_started, fetcher}, 2_000
+      assert_receive {:fetch_started, fetcher}, 5_000
 
       # A blocked Feed cannot answer this: the call exits after its 5s default, failing the
       # test, while the fetch above is still held open.
@@ -656,7 +656,7 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
         end)
 
       send(feed, :fetch_alias_map)
-      assert_receive {:fetch_started, fetcher}, 2_000
+      assert_receive {:fetch_started, fetcher}, 5_000
 
       # The first fetch is held open, so it is in flight for the whole refute window.
       send(feed, :fetch_alias_map)

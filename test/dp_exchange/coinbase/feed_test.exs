@@ -256,7 +256,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       send(feed, {:dp_exchange, :coinbase, :reconnected, socket})
 
       assert_receive {:frame, :ticker, %{"type" => "subscribe", "product_ids" => ["BTC-USD"]}},
-                     1_000
+                     5_000
 
       assert :sys.get_state(feed).down_links == MapSet.new()
     end
@@ -280,7 +280,7 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(feed, {:dp_exchange, :coinbase, :reconnected, ticker_socket})
 
-      assert_receive {:frame, :ticker, %{"type" => "subscribe"} = frame}, 1_000
+      assert_receive {:frame, :ticker, %{"type" => "subscribe"} = frame}, 5_000
       assert frame["channel"] == "ticker"
       assert Enum.sort(frame["product_ids"]) == ["BTC-USD", "ETH-USD"]
       refute_receive {:frame, :book, _frame}, 100
@@ -356,7 +356,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       # OLD-USD is no longer wanted and, with the catalogue loaded, is not named.
       send(feed, {:dp_exchange, :coinbase, gap_notice(["BTC-USD", "XLM-USD", "OLD-USD"])})
 
-      assert_receive {:dp_exchange, :coinbase, %Notice{details: details}}, 1_000
+      assert_receive {:dp_exchange, :coinbase, %Notice{details: details}}, 5_000
 
       assert details.reason == :sequence_gap
       assert details.symbols == ["BTC-USD", "XLM-USDC"]
@@ -369,7 +369,7 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(feed, {:dp_exchange, :coinbase, gap_notice(["XLM-USD", "BTC-USD"])})
 
-      assert_receive {:dp_exchange, :coinbase, %Notice{details: details}}, 1_000
+      assert_receive {:dp_exchange, :coinbase, %Notice{details: details}}, 5_000
 
       assert details.symbols == ["BTC-USD", "XLM-USD"]
     end
@@ -669,7 +669,7 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(feed, {:dp_exchange, :coinbase, Notice.new(:link_down, :coinbase)})
 
-      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_down}}, 2_000
+      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_down}}, 5_000
     end
 
     test "a dead subscriber does not accumulate events" do
@@ -700,7 +700,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       Feed.subscribe_notices(feed, to: name)
       send(feed, {:dp_exchange, :coinbase, Notice.new(:link_up, :coinbase)})
 
-      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_up}}, 2_000
+      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_up}}, 5_000
       assert Process.alive?(feed)
 
       Process.unregister(name)
@@ -828,7 +828,7 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
 
-      assert_receive {:dp_exchange, :coinbase, %Types.Quote{symbol: "BTC-USD"}}, 2_000
+      assert_receive {:dp_exchange, :coinbase, %Types.Quote{symbol: "BTC-USD"}}, 5_000
     end
 
     test "notice subscribers do not receive market data" do

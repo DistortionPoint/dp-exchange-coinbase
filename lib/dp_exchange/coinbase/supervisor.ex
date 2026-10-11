@@ -47,6 +47,10 @@ defmodule DpExchange.Coinbase.Supervisor do
   alias DpExchange.Coinbase.Feed
   alias DpExchange.Core.{Config, DefaultRateLimiter}
 
+  @doc """
+  Starts the venue supervisor, registered under `opts[:name]` (default
+  `DpExchange.Coinbase.Supervisor`), with a rate limiter and a feed as children.
+  """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
     Supervisor.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
