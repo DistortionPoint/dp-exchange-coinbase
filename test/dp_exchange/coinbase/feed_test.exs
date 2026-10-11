@@ -1041,6 +1041,32 @@ defmodule DpExchange.Coinbase.FeedTest do
       refute Map.has_key?(state.shards, key)
     end
 
+    test "a crash notice quotes the exit reason bounded, not the frame it carried" do
+      socket = fake_socket()
+      feed = start_feed()
+      key = {"ticker", 0}
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | shards: %{key => %{socket: socket, symbols: ["A-USD"]}},
+            wanted: MapSet.new(["A-USD"]),
+            # A second crash in a streak, so the reopen waits instead of dialling at once.
+            shard_crashes: %{key => {1, System.monotonic_time(:millisecond)}}
+        }
+      end)
+
+      # A failed function clause reports its arguments in the stacktrace: the venue frame.
+      frame = {:text, String.duplicate("x", 200_000)}
+      reason = {:function_clause, [{:socket_module, :handle_frame, [frame], []}]}
+      send(feed, {:EXIT, socket, reason})
+
+      assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_down} = notice}, 5_000
+      assert byte_size(notice.details.reason) < 4_096
+      assert byte_size(notice.message) < 4_096
+    end
+
     test "a deferred :open_shard message for a key someone else already reopened " <>
            "does not open a second socket and orphan one of them" do
       # Traced regression: `isolate_crashed_shard/5` deletes `state.shards[key]` and

@@ -83,6 +83,28 @@ defmodule DpExchange.Coinbase.SupervisorTest do
       end
     end
 
+    test "a supervisor started directly does not keep the raw secret in its state" do
+      # Started through `start_link/1` rather than `DpExchange.Coinbase.child_spec/1`, so
+      # the wrap in `child_spec/1` never ran. The supervisor stores its init argument and its
+      # `Feed` child's start call, and OTP prints both when it crashes.
+      canary = "CANARY-api-secret-do-not-print"
+      id = System.unique_integer([:positive])
+
+      opts = [
+        name: :"direct_venue_#{id}",
+        limiter: :"direct_limiter_#{id}",
+        feed: :"direct_feed_#{id}",
+        credentials: %{api_key: "CANARY-api-key", api_secret: canary}
+      ]
+
+      pid = start_supervised!(%{id: opts[:name], start: {VenueSupervisor, :start_link, [opts]}})
+
+      printed = inspect(:sys.get_state(pid), limit: :infinity, printable_limit: :infinity)
+
+      refute printed =~ canary
+      refute printed =~ "CANARY-api-key"
+    end
+
     # Pins the ceiling at exactly `ceiling`, without depending on elapsed time anywhere.
     #
     # Both earlier versions of this were races, and the second one is the instructive one.

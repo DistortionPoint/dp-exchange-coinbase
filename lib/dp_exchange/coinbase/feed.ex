@@ -2480,7 +2480,7 @@ defmodule DpExchange.Coinbase.Feed do
         # that never subscribed — both are "subscribed intent that did not become
         # delivery".
         Logger.warning(
-          "[Coinbase Feed] #{channel} shard #{index} did not open (#{inspect(reason)}) — " <>
+          "[Coinbase Feed] #{channel} shard #{index} did not open (#{quoted(reason)}) — " <>
             "its #{length(symbols)} symbol(s) stay on the internal poll only"
         )
 
@@ -3119,7 +3119,7 @@ defmodule DpExchange.Coinbase.Feed do
       true ->
         Logger.warning(
           "[Coinbase Feed] #{channel} unsubscribe for #{length(removed)} symbol(s) failed " <>
-            "(#{inspect(reason)}), attempt #{attempt}/#{@max_subscribe_retries + 1} — " <>
+            "(#{quoted(reason)}), attempt #{attempt}/#{@max_subscribe_retries + 1} — " <>
             "retrying in #{state.subscribe_retry_delay_ms}ms before subscribing " <>
             "#{length(added)} newly-added symbol(s)"
         )
@@ -3145,7 +3145,7 @@ defmodule DpExchange.Coinbase.Feed do
   defp strand_unsubscribe(state, key, channel, removed, added, reason, outlook) do
     Logger.warning(
       "[Coinbase Feed] #{channel} unsubscribe for #{length(removed)} symbol(s) could not " <>
-        "be confirmed sent (#{inspect(reason)}) — #{outlook}; withholding " <>
+        "be confirmed sent (#{quoted(reason)}) — #{outlook}; withholding " <>
         "#{length(added)} newly-added symbol(s) on this reconcile"
     )
 
@@ -3178,7 +3178,7 @@ defmodule DpExchange.Coinbase.Feed do
           channel: channel,
           removed_count: length(removed),
           added_count: length(added),
-          reason: inspect(reason)
+          reason: quoted(reason)
         }
       )
 
@@ -3230,7 +3230,7 @@ defmodule DpExchange.Coinbase.Feed do
       not transient_frame_failure?(reason) ->
         Logger.warning(
           "[Coinbase Feed] #{channel} subscribe for #{length(symbols)} symbol(s) failed " <>
-            "permanently (#{inspect(reason)}) — not retrying"
+            "permanently (#{quoted(reason)}) — not retrying"
         )
 
         notify_subscribe_failed(
@@ -3244,7 +3244,7 @@ defmodule DpExchange.Coinbase.Feed do
       attempt > @max_subscribe_retries ->
         Logger.warning(
           "[Coinbase Feed] #{channel} subscribe for #{length(symbols)} symbol(s) failed " <>
-            "after #{attempt} attempt(s) (#{inspect(reason)}) — giving up until the next " <>
+            "after #{attempt} attempt(s) (#{quoted(reason)}) — giving up until the next " <>
             "resubscribe cycle"
         )
 
@@ -3259,7 +3259,7 @@ defmodule DpExchange.Coinbase.Feed do
       true ->
         Logger.warning(
           "[Coinbase Feed] #{channel} subscribe for #{length(symbols)} symbol(s) failed " <>
-            "(#{inspect(reason)}), attempt #{attempt}/#{@max_subscribe_retries + 1} — " <>
+            "(#{quoted(reason)}), attempt #{attempt}/#{@max_subscribe_retries + 1} — " <>
             "retrying in #{state.subscribe_retry_delay_ms}ms"
         )
 
@@ -3282,7 +3282,7 @@ defmodule DpExchange.Coinbase.Feed do
       Notice.new(:coverage_change, :coinbase,
         severity: :warning,
         message: "#{channel} subscribe for #{length(symbols)} symbol(s) never took — #{outlook}",
-        details: %{channel: channel, symbol_count: length(symbols), reason: inspect(reason)}
+        details: %{channel: channel, symbol_count: length(symbols), reason: quoted(reason)}
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})
@@ -3306,7 +3306,7 @@ defmodule DpExchange.Coinbase.Feed do
           shard: index,
           channel: channel,
           symbol_count: length(symbols),
-          reason: inspect(reason)
+          reason: quoted(reason)
         }
       )
 
@@ -3434,22 +3434,32 @@ defmodule DpExchange.Coinbase.Feed do
   # notices elsewhere in this module report a subscribe attempt that never became
   # delivery, which is a different fact from a connection that WAS delivering and died.
   defp notify_shard_crashed(state, channel, index, symbols, reason) do
+    text = quoted(reason)
+
     notice =
       Notice.new(:link_down, :coinbase,
         severity: :warning,
         message:
-          "#{channel} shard #{index} (#{length(symbols)} symbol(s)) crashed (#{inspect(reason)}) " <>
+          "#{channel} shard #{index} (#{length(symbols)} symbol(s)) crashed (#{text}) " <>
             "— reopening now",
         details: %{
           shard: index,
           channel: channel,
           symbol_count: length(symbols),
-          reason: inspect(reason)
+          reason: text
         }
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})
   end
+
+  # A failure reason quoted into a log line or a notice, bounded. A socket that crashed
+  # exits with `{exception, stacktrace}`, and the first stack frame of a failed function
+  # clause carries the call's ARGUMENTS: the venue frame being handled (a `level2` snapshot is
+  # hundreds of kilobytes) and the socket's whole state. Bare `inspect/1` copied all of it into
+  # the message and `details.reason` of a notice sent to every notice subscriber, and into the
+  # log. Same limits as `Socket`'s disconnect reason.
+  defp quoted(reason), do: inspect(reason, limit: 50, printable_limit: 1_024)
 
   defp get_socket(%{injected_socket: socket} = state) when is_pid(socket) do
     {:ok, socket, %{state | injected_socket: nil}}
@@ -3609,7 +3619,7 @@ defmodule DpExchange.Coinbase.Feed do
     cond do
       not transient_alias_map_failure?(reason) ->
         Logger.warning(
-          "[Coinbase Feed] alias catalogue fetch failed permanently (#{inspect(reason)}) — " <>
+          "[Coinbase Feed] alias catalogue fetch failed permanently (#{quoted(reason)}) — " <>
             "not retrying; delivering under the venue's own product id until restarted"
         )
 
@@ -3618,7 +3628,7 @@ defmodule DpExchange.Coinbase.Feed do
       attempt > @max_alias_map_retries ->
         Logger.warning(
           "[Coinbase Feed] alias catalogue fetch failed after #{attempt} attempt(s) " <>
-            "(#{inspect(reason)}) — giving up; delivering under the venue's own product " <>
+            "(#{quoted(reason)}) — giving up; delivering under the venue's own product " <>
             "id until restarted"
         )
 
@@ -3626,7 +3636,7 @@ defmodule DpExchange.Coinbase.Feed do
 
       true ->
         Logger.warning(
-          "[Coinbase Feed] alias catalogue fetch failed (#{inspect(reason)}), attempt " <>
+          "[Coinbase Feed] alias catalogue fetch failed (#{quoted(reason)}), attempt " <>
             "#{attempt}/#{@max_alias_map_retries + 1} — retrying in " <>
             "#{state.alias_map_retry_delay_ms}ms"
         )
@@ -3645,7 +3655,7 @@ defmodule DpExchange.Coinbase.Feed do
   # empty one would switch attribution off for every aliased product at once.
   defp give_up_on_alias_map(%{alias_map_status: :ok} = state, reason) do
     Logger.warning(
-      "[Coinbase Feed] alias catalogue refresh failed (#{inspect(reason)}) — keeping the " <>
+      "[Coinbase Feed] alias catalogue refresh failed (#{quoted(reason)}) — keeping the " <>
         "map already loaded; next refresh in #{state.alias_map_refresh_ms}ms"
     )
 
@@ -3745,7 +3755,7 @@ defmodule DpExchange.Coinbase.Feed do
       message:
         "alias catalogue unavailable — delivering under the venue's own product id " <>
           "rather than the caller's requested symbol",
-      details: %{reason: inspect(reason)}
+      details: %{reason: quoted(reason)}
     )
   end
 

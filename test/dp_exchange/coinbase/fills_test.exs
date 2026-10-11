@@ -335,15 +335,37 @@ defmodule DpExchange.Coinbase.FillsTest do
       assert {:ok, []} = Rest.get_trade_history(@credentials, plug: plug, retry_attempts: 0)
     end
 
-    test "a server that always sends a cursor and rows is bounded" do
+    test "a server that always sends a new cursor and rows is bounded" do
+      # A cursor longer than the one just sent each time, so it is never the same page again.
       plug = fn conn ->
+        sent = Plug.Conn.fetch_query_params(conn).params["cursor"] || ""
+
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(%{"fills" => [fill()], "cursor" => "always"}))
+        |> Plug.Conn.resp(200, Jason.encode!(%{"fills" => [fill()], "cursor" => sent <> "n"}))
       end
 
       assert {:error, :too_many_fill_pages} =
                Rest.get_trade_history(@credentials, plug: plug, retry_attempts: 0)
+    end
+
+    test "a cursor offered back unchanged is refused at once, not walked to the bound" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, :requested)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"fills" => [fill()], "cursor" => "same"}))
+      end
+
+      assert {:error, :pagination_cursor_repeated} =
+               Rest.get_trade_history(@credentials, plug: plug, retry_attempts: 0)
+
+      assert_received :requested
+      assert_received :requested
+      refute_received :requested
     end
 
     test "a body with no fills key is unreadable" do

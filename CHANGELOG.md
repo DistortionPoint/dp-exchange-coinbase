@@ -20,6 +20,49 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Found by reading the load, security and leftovers paths of `lib/`.
+
+- **A venue that repeated a pagination cursor was walked to the page bound.** A page offering
+  back the cursor it was fetched with is the same page again; `get_balances/2`,
+  `get_accounts/2`, `get_orders/2`, `get_trade_history/2` and the product catalogue behind
+  `get_symbols/1`, `get_market_overview/1`, `list_instruments/1` and `get_alias_map/1` made
+  fifty identical requests before answering `too_many_*_pages`. They now answer
+  `{:error, :pagination_cursor_repeated}` on the second request. The four page-bound tests
+  now send a new cursor each time, so they still reach the bound.
+- **A 4xx `message` was copied into `{:refused, {:venue_error, status, message}}` whole.**
+  It is cut at 2,048 characters, as the unexpected-status text already was.
+- **The socket quoted venue values into notices unbounded.** `inspect/1` of an unexpected
+  `market_trades` event or the first unreadable book row ran over the whole value (a `level2`
+  frame is hundreds of kilobytes) before `report_quality/5` cut the result to 120 characters,
+  once per malformed frame; `{:invalid_decimal, field, value}` and
+  `{:unparseable_venue_timestamp, value}` carried the whole value into `details.reason`. All
+  are cut at the source (120 characters, `inspect` limit 20).
+- **`:out_of_order` notices were one per late frame.** They go through the unbounded notice
+  path, and a late message interleaved with in-order ones never reached the re-base
+  threshold, so every notice subscriber got one per late frame at the frame rate. At most one
+  a second per connection now; `details.suppressed` counts the withheld ones. The messages are
+  still ignored every time.
+- **A shard crash notice and several `Feed` log lines carried the exit reason whole.** A
+  crashed socket exits with its stacktrace, and a failed function clause lists its arguments
+  there: the venue frame and the socket's state. `details.reason` and the message of the
+  `:link_down` crash notice, and the reasons quoted into the subscribe, unsubscribe and
+  alias-catalogue log lines and notices, are bounded (`limit: 50`, `printable_limit: 1_024`).
+- **`Supervisor.start_link/1` stored a raw `:credentials` map.** Only
+  `DpExchange.Coinbase.child_spec/1` wrapped it, so starting `DpExchange.Coinbase.Supervisor`
+  directly left the key pair in the supervisor's state and in the `Start Call:` line of its
+  `Feed` child, which OTP prints when it crashes. It wraps (idempotently) in `start_link/1`
+  and `init/1`.
+- **`ssl_options: nil` turned certificate verification off for the socket.** `websockex`
+  reads `nil` as "none" and falls back to `verify_none`; `Socket.connection_opts/1` only
+  supplied the verified defaults when the key was absent. `nil` is now treated as absent. The
+  verified defaults had no test; they do now.
+
+Left as it is, deliberately: a `Rest` call made with a raw credentials map that raises in
+the caller's own process can still print it in that caller's crash report, since the map is the
+caller's. `DpExchange.Coinbase.Credentials.wrap/1` is public for a caller that wants it.
+
 ## [0.3.109] - 2026-10-11
 
 ### Fixed

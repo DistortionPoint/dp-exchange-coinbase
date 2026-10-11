@@ -44,20 +44,30 @@ defmodule DpExchange.Coinbase.Supervisor do
 
   use Supervisor
 
-  alias DpExchange.Coinbase.Feed
+  alias DpExchange.Coinbase.{Credentials, Feed}
   alias DpExchange.Core.{Config, DefaultRateLimiter}
 
   @doc """
   Starts the venue supervisor, registered under `opts[:name]` (default
   `DpExchange.Coinbase.Supervisor`), with a rate limiter and a feed as children.
+
+  A raw `:credentials` map is wrapped (see `DpExchange.Coinbase.Credentials`) before the
+  supervisor stores it, so a caller that starts this module directly rather than through
+  `DpExchange.Coinbase.child_spec/1` still does not leave the key pair in this supervisor's
+  state, or in the `Start Call:` line of its `Feed` child, which OTP prints on a crash.
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
+    opts = Credentials.wrap_opt(opts)
     Supervisor.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
   @impl true
   def init(opts) do
+    # Idempotent after `start_link/1`; it covers an `init/1` reached any other way, because
+    # the `Feed` child spec below is stored by this supervisor with `opts` in its start call.
+    opts = Credentials.wrap_opt(opts)
+
     # Both children take their names from `opts`, so a consumer running two of this venue
     # — two credentials, two scopes — keeps them apart. Hardcoding either name means the
     # second instance collides with the first, which is a failure at start rather than in

@@ -199,6 +199,8 @@ defmodule DpExchange.Coinbase.Socket do
   consumer's signal to re-read the book, exactly as `:link_up` already is. A number at or
   below the last raises one with `:out_of_order` and the message is ignored, as the venue
   advises: a stale delta applied after newer ones would corrupt any book built from them.
+  That notice is sent at most once a second per connection; `details.suppressed` counts the
+  late messages withheld since the previous one (every one is still ignored).
   `:sequence` on the book types stays `nil`, because this is not a book sequence. It
   numbers every message on the connection, across channels and products.
 
@@ -287,6 +289,7 @@ defmodule DpExchange.Coinbase.Socket do
   # Consecutive, one-apart "stale" messages that mean the baseline, not the messages, is
   # wrong. See `stale/4`.
   @stale_run_to_rebase 5
+  @out_of_order_window_ms 1_000
   @silence_check_every_ms 15_000
   @socket_recv_timeout_ms 3_000
 
@@ -432,7 +435,17 @@ defmodule DpExchange.Coinbase.Socket do
     opts
     |> Keyword.put_new(:socket_connect_timeout, @socket_connect_timeout_ms)
     |> Keyword.put_new(:socket_recv_timeout, @socket_recv_timeout_ms)
-    |> Keyword.put_new_lazy(:ssl_options, &verified_tls/0)
+    |> verified_unless_given()
+  end
+
+  # `ssl_options: nil` is how `websockex` spells "none", and it then falls back to
+  # `insecure: true` (`verify_none`). Only a non-nil list is the caller's own choice; `nil`
+  # is treated as absent so passing it cannot silently turn verification off.
+  defp verified_unless_given(opts) do
+    case Keyword.get(opts, :ssl_options) do
+      nil -> Keyword.put(opts, :ssl_options, verified_tls())
+      _caller_supplied -> opts
+    end
   end
 
   # **Certificate verification, which `websockex` does not do unless told to.** Its
@@ -524,7 +537,9 @@ defmodule DpExchange.Coinbase.Socket do
          silence_check: check
      }
      |> Map.put(:connected_at, now_ms())
-     |> Map.put(:reported_faults, MapSet.new())}
+     |> Map.put(:reported_faults, MapSet.new())
+     |> Map.put(:out_of_order_at, nil)
+     |> Map.put(:out_of_order_suppressed, 0)}
   end
 
   @impl true
@@ -919,7 +934,7 @@ defmodule DpExchange.Coinbase.Socket do
   # shape this module does not know. Reported rather than dropped: silence here reads as
   # a quiet market.
   defp decode_trade_event(event, state),
-    do: report_quality(state, :market_trades, inspect(event), :unexpected_event)
+    do: report_quality(state, :market_trades, brief(event), :unexpected_event)
 
   defp deliver_trade(%Types.Trade{} = built, state) do
     send(state.subscriber, {:dp_exchange, :coinbase, built})
@@ -927,7 +942,17 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   defp trade_subject(%{"product_id" => product}) when is_binary(product), do: product
-  defp trade_subject(other), do: inspect(other)
+  defp trade_subject(other), do: brief(other)
+
+  # A venue value quoted into a notice subject or reason, bounded BEFORE it is built. These
+  # went through bare `inspect/1`, which walks the whole term: a malformed `market_trades`
+  # event or an unreadable book row is as large as its frame (a `level2` snapshot is hundreds
+  # of kilobytes), and `report_quality/5` only cut the result to 120 characters afterwards,
+  # after the dedupe check it exists for. Under a burst of malformed frames that was the whole
+  # frame inspected, once per frame, inside the socket process. A binary is cut by
+  # characters; anything else is inspected with small limits.
+  defp brief(value) when is_binary(value), do: String.slice(value, 0, 120)
+  defp brief(value), do: inspect(value, limit: 20, printable_limit: 120)
 
   # `is_binary/1` on `product_id` for the reason `deliver_ticker/3` records: `SymbolFormat`
   # raises on anything else, and a raise in a frame handler takes the connection down.
@@ -1191,7 +1216,7 @@ defmodule DpExchange.Coinbase.Socket do
     report_quality(
       state,
       :level2,
-      inspect(first_row),
+      brief(first_row),
       :unreadable_price_level_or_quantity,
       %{bad_rows: count}
     )
@@ -1236,7 +1261,7 @@ defmodule DpExchange.Coinbase.Socket do
     end
   end
 
-  defp parse_time(other), do: {:error, {:unparseable_venue_timestamp, other}}
+  defp parse_time(other), do: {:error, {:unparseable_venue_timestamp, brief(other)}}
 
   defp decimal(nil), do: nil
 
@@ -1283,7 +1308,7 @@ defmodule DpExchange.Coinbase.Socket do
 
   defp required_decimal(value, field) do
     case decimal(value) do
-      nil -> {:error, {:invalid_decimal, field, value}}
+      nil -> {:error, {:invalid_decimal, field, brief(value)}}
       parsed -> {:ok, parsed}
     end
   end
@@ -1343,8 +1368,29 @@ defmodule DpExchange.Coinbase.Socket do
       report_sequence(state, :sequence_reset, %{last: last, got: seq})
       dispatch(decoded, %{state | last_seq: seq, stale_run: nil})
     else
-      report_sequence(state, :out_of_order, %{last: last, got: seq})
-      %{state | stale_run: {seq, run}}
+      %{report_out_of_order(state, last, seq) | stale_run: {seq, run}}
+    end
+  end
+
+  # **At most one `:out_of_order` notice per `@out_of_order_window_ms`.** Notices ride the one
+  # fan-out path that is never bounded, and a late message is not a rare event on a busy
+  # connection: a run of them that keeps being interrupted by an in-order message (so it never
+  # reaches `@stale_run_to_rebase`) sent every notice subscriber one notice per late frame, at
+  # the frame rate. The messages are still ignored every time; the next notice that is sent
+  # says in `details.suppressed` how many were withheld before it.
+  defp report_out_of_order(state, last, seq) do
+    now = now_ms()
+    previous = Map.get(state, :out_of_order_at)
+    suppressed = Map.get(state, :out_of_order_suppressed, 0)
+
+    if is_integer(previous) and now - previous < @out_of_order_window_ms do
+      Map.put(state, :out_of_order_suppressed, suppressed + 1)
+    else
+      report_sequence(state, :out_of_order, %{last: last, got: seq, suppressed: suppressed})
+
+      state
+      |> Map.put(:out_of_order_at, now)
+      |> Map.put(:out_of_order_suppressed, 0)
     end
   end
 

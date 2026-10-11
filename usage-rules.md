@@ -240,7 +240,7 @@ If you have better numbers, that field is where to correct them.
 - `{:refused, {:venue_error, status, message}}` — a `400`, `401` or `403`: the venue
   received the request and declined it, in its own words. Permanent **for the request as
   sent** — a caller whose key was rotated signs again with the new one, which is a
-  different request rather than a retry of this one.
+  different request rather than a retry of this one. The message is cut at 2,048 characters.
 - `{:error, {:unsupported_timeframe, tf}}` — a width it does not serve. Your mistake, not
   a transient one.
 - `{:error, {:missing_credentials, :coinbase}}` — this call needs a credential and was not
@@ -443,7 +443,9 @@ carrying it is still dropped. After a reconnect a fault that persists is reporte
 and the snapshot or delta it came in is dropped whole. Delivering the rest would hand you a
 book missing a level, or a delta leaving a removed level standing. A
 message older than one already delivered is dropped, as the venue advises,
-with `details.reason: :out_of_order`. If several such messages arrive in a row, counting up
+with `details.reason: :out_of_order` (at most one such notice a second per connection;
+`details.suppressed` counts the late messages withheld since the last one). If several such
+messages arrive in a row, counting up
 one at a time, the baseline this package held was wrong, not the messages. It adopts the
 venue's numbering, says so once with `details.reason: :sequence_reset`, and delivers
 again. Treat that like a gap: re-read the book.
@@ -979,7 +981,9 @@ nothing looks wrong, and what is missing is simply never seen.
 
 Each walk is bounded. A venue that keeps saying `has_next` answers
 `{:error, :too_many_account_pages}`, `{:error, :too_many_fill_pages}` or
-`{:error, :too_many_order_pages}` rather than looping inside your call. Those are errors
+`{:error, :too_many_order_pages}` rather than looping inside your call, and a page that
+offers back the cursor it was just fetched with is `{:error, :pagination_cursor_repeated}`
+at once (the same page again; also on the product catalogue). Those are errors
 about **this package's limit**, not statements about your account: retry with a narrower
 filter (`:symbol` or `:status` on orders; `:symbol`, `:order_id` or `:start`/`:end` on fills)
 rather than treating them as "no data". `get_orders/2` has no date option: the venue's

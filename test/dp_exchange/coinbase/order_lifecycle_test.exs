@@ -371,15 +371,35 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
 
     test "a server that always says has_next is bounded rather than looping" do
       plug = fn conn ->
+        sent = Plug.Conn.fetch_query_params(conn).params["cursor"] || ""
+
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
         |> Plug.Conn.resp(
           200,
-          Jason.encode!(%{"orders" => [order_json()], "has_next" => true, "cursor" => "always"})
+          Jason.encode!(%{
+            "orders" => [order_json()],
+            "has_next" => true,
+            "cursor" => sent <> "n"
+          })
         )
       end
 
       assert {:error, :too_many_order_pages} =
+               Rest.get_orders(@credentials, plug: plug, retry_attempts: 0)
+    end
+
+    test "a cursor offered back unchanged is refused at once, not walked to the bound" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{"orders" => [order_json()], "has_next" => true, "cursor" => "same"})
+        )
+      end
+
+      assert {:error, :pagination_cursor_repeated} =
                Rest.get_orders(@credentials, plug: plug, retry_attempts: 0)
     end
 

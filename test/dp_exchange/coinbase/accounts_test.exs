@@ -195,15 +195,31 @@ defmodule DpExchange.Coinbase.AccountsTest do
 
     test "a server that always says has_next is bounded, not an infinite loop" do
       plug = fn conn ->
+        sent = Plug.Conn.fetch_query_params(conn).params["cursor"] || ""
+
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
         |> Plug.Conn.resp(
           200,
-          Jason.encode!(%{"accounts" => [account()], "has_next" => true, "cursor" => "always"})
+          Jason.encode!(%{"accounts" => [account()], "has_next" => true, "cursor" => sent <> "n"})
         )
       end
 
       assert {:error, :too_many_account_pages} =
+               Rest.get_balances(@credentials, plug: plug, retry_attempts: 0)
+    end
+
+    test "a cursor offered back unchanged is refused at once, not walked to the bound" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{"accounts" => [account()], "has_next" => true, "cursor" => "same"})
+        )
+      end
+
+      assert {:error, :pagination_cursor_repeated} =
                Rest.get_balances(@credentials, plug: plug, retry_attempts: 0)
     end
 

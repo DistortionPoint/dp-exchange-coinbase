@@ -310,6 +310,11 @@ defmodule DpExchange.Coinbase.Rest do
           not is_map(pagination) or pagination["has_next"] != true ->
             {:ok, collected |> Enum.reverse() |> Enum.concat()}
 
+          # The cursor just sent, offered again, is the same page again: a walk that can only
+          # repeat itself until `@max_product_pages` ends it, fifty identical requests later.
+          is_binary(next_cursor) and next_cursor == cursor ->
+            {:error, :pagination_cursor_repeated}
+
           is_binary(next_cursor) and next_cursor != "" ->
             all_products(credentials, path, opts, next_cursor, collected, page + 1)
 
@@ -522,12 +527,19 @@ defmodule DpExchange.Coinbase.Rest do
   # way to ask for it. Stopping there returned the first page as though it were the whole
   # list: every row real, the rest silently missing — the truncated shape these walkers
   # exist to refuse. It is an error, not a short list.
-  defp next_cursor(%{"has_next" => true, "cursor" => cursor})
+  #
+  # The second argument is the cursor this page was fetched with. A page that offers it back
+  # is the same page again; following it could only repeat until the page bound ended the
+  # walk, so it is refused at once as `:pagination_cursor_repeated`.
+  defp next_cursor(%{"has_next" => true, "cursor" => cursor}, cursor) when is_binary(cursor),
+    do: {:error, :pagination_cursor_repeated}
+
+  defp next_cursor(%{"has_next" => true, "cursor" => cursor}, _sent)
        when is_binary(cursor) and cursor != "",
        do: {:next, cursor}
 
-  defp next_cursor(%{"has_next" => true}), do: {:error, :pagination_cursor_missing}
-  defp next_cursor(_body), do: :done
+  defp next_cursor(%{"has_next" => true}, _sent), do: {:error, :pagination_cursor_missing}
+  defp next_cursor(_body, _sent), do: :done
 
   defp all_accounts(_credentials, _opts, _cursor, _acc, page) when page >= @max_account_pages,
     do: {:error, :too_many_account_pages}
@@ -544,7 +556,7 @@ defmodule DpExchange.Coinbase.Rest do
 
         # `has_next` is the venue's word for it. An empty page with `has_next` still true
         # is the venue's business; the page counter is what stops this either way.
-        case next_cursor(body) do
+        case next_cursor(body, cursor) do
           {:next, next} -> all_accounts(credentials, opts, next, collected, page + 1)
           :done -> {:ok, collected |> Enum.reverse() |> Enum.concat()}
           {:error, _reason} = error -> error
@@ -1667,31 +1679,39 @@ defmodule DpExchange.Coinbase.Rest do
 
     case request(:get, "/orders/historical/fills", credentials, opts, params) do
       {:ok, %{body: %{"fills" => fills} = body}} when is_list(fills) ->
-        collected = [fills | acc]
-        next = body["cursor"]
-
-        cond do
-          # `GetFillsResponse.proof_token_required` says the data is withheld pending an EU
-          # SCA proof token (at-spec.yaml:7523-7540). A page with no fills AND that flag is
-          # "cannot see", not "none" — returning `[]` would report an empty history.
-          fills == [] and body["proof_token_required"] == true ->
-            {:refused, :proof_token_required}
-
-          # An empty cursor is the venue saying "no more". Re-sending it would ask for the
-          # same page forever, which the page bound would eventually stop — but stopping
-          # here is the correct reading, not a fallback.
-          is_binary(next) and next != "" and fills != [] ->
-            all_fills(credentials, opts, next, collected, page + 1)
-
-          true ->
-            {:ok, collected |> Enum.reverse() |> Enum.concat()}
-        end
+        next_fill_page(credentials, opts, {cursor, page}, [fills | acc], fills, body)
 
       {:ok, _unexpected} ->
         {:error, :unexpected_response_shape}
 
       {:error, reason} ->
         classify(reason)
+    end
+  end
+
+  # What one page of fills says about the next: stop, refuse, or walk on.
+  defp next_fill_page(credentials, opts, {cursor, page}, collected, fills, body) do
+    next = body["cursor"]
+
+    cond do
+      # `GetFillsResponse.proof_token_required` says the data is withheld pending an EU
+      # SCA proof token (at-spec.yaml:7523-7540). A page with no fills AND that flag is
+      # "cannot see", not "none" — returning `[]` would report an empty history.
+      fills == [] and body["proof_token_required"] == true ->
+        {:refused, :proof_token_required}
+
+      # An empty cursor is the venue saying "no more". Re-sending it would ask for the
+      # same page forever, which the page bound would eventually stop — but stopping
+      # here is the correct reading, not a fallback.
+      # The cursor just sent, offered again, is the same page again (see `next_cursor/2`).
+      is_binary(next) and next == cursor and fills != [] ->
+        {:error, :pagination_cursor_repeated}
+
+      is_binary(next) and next != "" and fills != [] ->
+        all_fills(credentials, opts, next, collected, page + 1)
+
+      true ->
+        {:ok, collected |> Enum.reverse() |> Enum.concat()}
     end
   end
 
@@ -2352,14 +2372,23 @@ defmodule DpExchange.Coinbase.Rest do
 
   # The venue's own words where it gave any, so a caller can see why it refused rather
   # than only that it did.
+  #
+  # Bounded to `@max_refusal_text` characters, as the unexpected-status text above is: a 4xx
+  # whose JSON `message` is a whole error page was copied unchanged into the return value
+  # (and from there into whatever a caller logs).
+  @max_refusal_text 2_048
+
   defp refusal(status, body) do
     case body do
-      %{"message" => message} when is_binary(message) -> {:venue_error, status, message}
-      %{"error_details" => detail} when is_binary(detail) -> {:venue_error, status, detail}
-      %{"error" => error} when is_binary(error) -> {:venue_error, status, error}
+      %{"message" => message} when is_binary(message) -> venue_error(status, message)
+      %{"error_details" => detail} when is_binary(detail) -> venue_error(status, detail)
+      %{"error" => error} when is_binary(error) -> venue_error(status, error)
       _other -> {:venue_error, status}
     end
   end
+
+  defp venue_error(status, text),
+    do: {:venue_error, status, String.slice(text, 0, @max_refusal_text)}
 
   # ONE shape, not two. The adapter this was ported from branched on whether credentials
   # were supplied, formatting `:public_ticker` as a flat `{"price": …}` object and
@@ -3817,7 +3846,7 @@ defmodule DpExchange.Coinbase.Rest do
         # which is what every response looked like before this walked at all. `has_next`
         # without a cursor is an error (see `next_cursor/1`), and so is an empty page that
         # says `proof_token_required`: the history is withheld, not empty.
-        with {:ok, step} <- order_step(body, orders) do
+        with {:ok, step} <- order_step(body, orders, cursor) do
           case step do
             {:next, next} -> all_orders(credentials, opts, next, collected, page + 1)
             :done -> {:ok, collected |> Enum.reverse() |> Enum.concat()}
@@ -3832,10 +3861,11 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  defp order_step(%{"proof_token_required" => true}, []), do: {:refused, :proof_token_required}
+  defp order_step(%{"proof_token_required" => true}, [], _cursor),
+    do: {:refused, :proof_token_required}
 
-  defp order_step(body, _orders) do
-    case next_cursor(body) do
+  defp order_step(body, _orders, cursor) do
+    case next_cursor(body, cursor) do
       {:error, _reason} = error -> error
       step -> {:ok, step}
     end

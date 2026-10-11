@@ -453,9 +453,11 @@ defmodule DpExchange.Coinbase.RestTest do
 
     test "a server that never stops saying has_next is bounded, not an infinite loop" do
       plug = fn conn ->
+        sent = Plug.Conn.fetch_query_params(conn).params["cursor"] || ""
+
         response = %{
           "products" => [%{"product_id" => "BTC-USD"}],
-          "pagination" => %{"has_next" => true, "next_cursor" => "always-more"}
+          "pagination" => %{"has_next" => true, "next_cursor" => sent <> "n"}
         }
 
         conn
@@ -464,6 +466,22 @@ defmodule DpExchange.Coinbase.RestTest do
       end
 
       assert {:error, :too_many_product_pages} =
+               Rest.get_symbols(plug: plug, retry_attempts: 0)
+    end
+
+    test "a cursor offered back unchanged is refused at once, not walked to the bound" do
+      plug = fn conn ->
+        response = %{
+          "products" => [%{"product_id" => "BTC-USD"}],
+          "pagination" => %{"has_next" => true, "next_cursor" => "same"}
+        }
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(response))
+      end
+
+      assert {:error, :pagination_cursor_repeated} =
                Rest.get_symbols(plug: plug, retry_attempts: 0)
     end
   end

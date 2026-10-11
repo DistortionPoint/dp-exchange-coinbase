@@ -117,6 +117,24 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert Keyword.fetch!(opts, :subscriber) == self()
       assert Keyword.fetch!(opts, :url) == "ws://example.invalid"
     end
+
+    test "the certificate is verified unless the caller says otherwise" do
+      for opts <- [Socket.connection_opts([]), Socket.connection_opts(ssl_options: nil)] do
+        tls = Keyword.fetch!(opts, :ssl_options)
+
+        assert Keyword.fetch!(tls, :verify) == :verify_peer
+        assert [_first | _rest] = Keyword.fetch!(tls, :cacerts)
+        assert Keyword.has_key?(tls, :customize_hostname_check)
+      end
+    end
+
+    test "a caller's own ssl_options replace the verified defaults entirely" do
+      own = [verify: :verify_none]
+
+      opts = Socket.connection_opts(ssl_options: own)
+
+      assert Keyword.fetch!(opts, :ssl_options) == own
+    end
   end
 
   describe "connection state becomes a notice, not a log line" do
@@ -276,6 +294,33 @@ defmodule DpExchange.Coinbase.SocketTest do
       refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
       assert_received {:dp_exchange, :coinbase, %Notice{details: %{reason: :out_of_order}}}
       assert after_stale.last_seq == 11
+    end
+
+    test "a burst of late messages raises one out_of_order notice, and counts the rest" do
+      # Interleaved with in-order messages, so the run never reaches the re-base threshold.
+      frames = [numbered(10), numbered(11), numbered(5), numbered(12), numbered(4)]
+      state = feed(frames, state())
+
+      notices =
+        for {:dp_exchange, :coinbase, %Notice{details: %{reason: :out_of_order}} = notice} <-
+              Enum.reverse(collect([])),
+            do: notice
+
+      assert [%Notice{details: %{suppressed: 0}}] = notices
+      assert state.out_of_order_suppressed == 1
+      assert state.last_seq == 12
+    end
+
+    test "an unparseable value in a notice reason is quoted bounded" do
+      long = String.duplicate("9", 100_000) <> "x"
+      row = %{"product_id" => "BTC-USD", "price" => long}
+      payload = Map.put(@ticker, "events", [%{"tickers" => [row]}])
+
+      assert {:ok, _state} = Socket.handle_frame({:text, Jason.encode!(payload)}, state())
+
+      assert_received {:dp_exchange, :coinbase, %Notice{details: %{reason: reason}}}
+      assert {:invalid_decimal, :price, quoted} = reason
+      assert String.length(quoted) <= 120
     end
 
     test "a new connection starts its own count, so a reconnect is not reported as a gap" do

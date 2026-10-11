@@ -174,6 +174,21 @@ defmodule DpExchange.Coinbase.AdminTest do
       assert {:refused, {:venue_error, 401, "unauthorized"}} =
                Rest.test_connection(@credentials, plug: plug, retry_attempts: 0)
     end
+
+    test "a refusal quotes the venue's text bounded" do
+      page = String.duplicate("<html>", 10_000)
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(403, Jason.encode!(%{"message" => page}))
+      end
+
+      assert {:refused, {:venue_error, 403, text}} =
+               Rest.test_connection(@credentials, plug: plug, retry_attempts: 0)
+
+      assert String.length(text) == 2_048
+    end
   end
 
   describe "the fake and the facade" do
