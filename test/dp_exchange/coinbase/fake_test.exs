@@ -378,7 +378,26 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert {:ok, trades} = Fake.get_trades("BTC-USD", limit: 10)
 
       assert length(trades) == 2
-      assert Enum.map(trades, & &1.side) == [:buy, :sell]
+      # Oldest first, as `Rest.get_trades/2` returns them.
+      assert Enum.map(trades, & &1.side) == [:sell, :buy]
+      assert trades == Enum.sort_by(trades, & &1.timestamp, DateTime)
+    end
+
+    test "limit bounds the tape to the newest prints, and must be a positive integer" do
+      assert {:ok, [%{id: "t-1"}]} = Fake.get_trades("BTC-USD", limit: 1)
+
+      for bad <- [0, -1, "5", 1.5] do
+        assert {:error, {:invalid_limit, ^bad}} = Fake.get_trades("BTC-USD", limit: bad)
+      end
+    end
+
+    test "a lower-case symbol is found, as Rest upper-cases it; a slash spelling is not" do
+      assert {:ok, [_one, _two]} = Fake.get_trades("btc-usd", limit: 10)
+      assert {:refused, :not_listed} = Fake.get_trades("BTC/USD", limit: 10)
+    end
+
+    test "an order book limit that is not a count is an error, not a crash" do
+      assert {:error, {:invalid_limit, "x"}} = Fake.get_order_book("BTC-USD", limit: "x")
     end
 
     test "an unlisted symbol is refused, not an empty tape" do

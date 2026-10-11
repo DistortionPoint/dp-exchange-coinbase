@@ -155,6 +155,52 @@ defmodule DpExchange.Coinbase.RestInputReviewTest do
     end
   end
 
+  test "list_instruments/1 tells a perpetual future from a dated one by contract_expiry_type" do
+    product = fn id, details ->
+      base = %{"product_id" => id, "product_type" => "FUTURE", "status" => "online"}
+      if details, do: Map.put(base, "future_product_details", details), else: base
+    end
+
+    body = %{
+      "products" => [
+        product.("BIP-20DEC30-CDE", %{"contract_expiry_type" => "PERPETUAL"}),
+        product.("BTC-27MAR26-CDE", %{"contract_expiry_type" => "EXPIRING"}),
+        product.("ETH-27MAR26-CDE", nil),
+        product.("SOL-27MAR26-CDE", %{"contract_expiry_type" => "UNKNOWN_CONTRACT_EXPIRY_TYPE"})
+      ]
+    }
+
+    assert {:ok, instruments} =
+             Rest.list_instruments(
+               credentials: @credentials,
+               plug: responding(body),
+               retry_attempts: 0
+             )
+
+    assert instruments |> Enum.map(& &1.instrument) == [:perp, :future, :unknown, :unknown]
+  end
+
+  test "get_top_of_book/2 refuses a quoted level it cannot read rather than reading no quote" do
+    for bad <- [
+          [%{"price" => "", "size" => "1"}],
+          [%{"price" => "NaN", "size" => "1"}],
+          [%{"price" => "1e999999999", "size" => "1"}],
+          [%{"price" => "100", "size" => "1e-999999999"}],
+          [%{"price" => "100"}],
+          ["x"],
+          "x"
+        ] do
+      body = %{"pricebooks" => [Map.put(book("BTC-USD", "100"), "bids", bad)]}
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_top_of_book("BTC-USD",
+                 credentials: @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+    end
+  end
+
   test "an order status filter outside the spec's enum is refused" do
     assert {:error, {:invalid_status, "bogus"}} =
              Rest.get_orders(@credentials, opts(status: "bogus"))

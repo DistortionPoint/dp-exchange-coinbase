@@ -1232,7 +1232,9 @@ defmodule DpExchange.Coinbase.Socket do
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
       {parsed, ""} ->
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
+        if Decimal.nan?(parsed) or Decimal.inf?(parsed) or absurd_exponent?(parsed),
+          do: nil,
+          else: parsed
 
       _unparsable ->
         nil
@@ -1240,6 +1242,14 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   defp decimal(_other), do: nil
+
+  # `"1e999999999"` parses fully and is finite, but `Decimal.compare/2` (which `sorted/2`
+  # runs on every snapshot) aligns two operands by multiplying one coefficient by
+  # `10 ** exponent_difference`: a ~415 MB integer for that string, built inside the socket
+  # process. No price or size this venue quotes comes near 64 places either side of the point
+  # (the finest increment in the committed specs is 1e-8), so a wider exponent is refused as
+  # unreadable rather than admitted as a number. Not measured against the live venue.
+  defp absurd_exponent?(%Decimal{exp: exp}), do: exp > 64 or exp < -64
 
   defp required_decimal(nil, field), do: {:error, {:missing_required_field, field}}
 

@@ -350,10 +350,20 @@ defmodule DpExchange.Coinbase.Rest do
       symbol: SymbolFormat.to_canonical_symbol(product["product_id"]),
       base: product["base_currency_id"],
       quote: product["quote_currency_id"],
-      instrument: Instrument.instrument_from(product["product_type"]),
+      instrument: Instrument.instrument_from(product["product_type"], expiry_kind(product)),
       status: product_status(product)
     )
   end
+
+  # `future_product_details.contract_expiry_type` (at-spec.yaml `ContractExpiryType`:
+  # `UNKNOWN_CONTRACT_EXPIRY_TYPE | EXPIRING | PERPETUAL`), lowercased for Core. Nil when the
+  # product carries no details or a non-string value: Core then answers `:unknown` for a
+  # FUTURE rather than calling a dated contract perpetual.
+  defp expiry_kind(%{"future_product_details" => %{"contract_expiry_type" => kind}})
+       when is_binary(kind),
+       do: String.downcase(kind)
+
+  defp expiry_kind(_product), do: nil
 
   # **`status: "online"` is not the whole answer** (issue #5). The venue also flags a product
   # that is online but not trading: `cancel_only` ("orders of the product can only be
@@ -2270,28 +2280,38 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp build_top_of_book(native, pricebook, observed_at) do
-    {bid, bid_size} = best_level(pricebook["bids"])
-    {ask, ask_size} = best_level(pricebook["asks"])
-
-    {:ok,
-     %Types.TopOfBook{
-       symbol: SymbolFormat.to_canonical_symbol(native),
-       bid: bid,
-       ask: ask,
-       bid_size: bid_size,
-       ask_size: ask_size,
-       venue_time: pricebook_time(pricebook),
-       observed_at: observed_at,
-       provider: :coinbase
-     }}
+    with {:ok, {bid, bid_size}} <- best_level(pricebook["bids"]),
+         {:ok, {ask, ask_size}} <- best_level(pricebook["asks"]) do
+      {:ok,
+       %Types.TopOfBook{
+         symbol: SymbolFormat.to_canonical_symbol(native),
+         bid: bid,
+         ask: ask,
+         bid_size: bid_size,
+         ask_size: ask_size,
+         venue_time: pricebook_time(pricebook),
+         observed_at: observed_at,
+         provider: :coinbase
+       }}
+    end
   end
 
   # An empty side is a real state — one side of a book can be empty — and `nil` says so.
   # Zero would claim someone is quoting nothing at a price of nothing.
-  defp best_level([%{"price" => price, "size" => size} | _rest]),
-    do: {decimal(price), decimal(size)}
+  #
+  # A level that is PRESENT and unreadable (`""`, a word, NaN, a missing size, a non-map) is
+  # not an empty side: it used to become `nil` here, so a side the venue did quote read as one
+  # nobody quotes. It is refused, as `get_order_book/2` already refuses the same level.
+  defp best_level(side) when side in [nil, []], do: {:ok, {nil, nil}}
 
-  defp best_level(_absent), do: {nil, nil}
+  defp best_level([%{"price" => price, "size" => size} | _rest]) do
+    case {decimal(price), decimal(size)} do
+      {%Decimal{} = parsed_price, %Decimal{} = parsed_size} -> {:ok, {parsed_price, parsed_size}}
+      _unreadable -> {:error, :unexpected_response_shape}
+    end
+  end
+
+  defp best_level(_unreadable), do: {:error, :unexpected_response_shape}
 
   defp pricebook_time(%{"time" => time}) do
     case parse_time(time) do
@@ -2541,7 +2561,9 @@ defmodule DpExchange.Coinbase.Rest do
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
       {parsed, ""} ->
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
+        if Decimal.nan?(parsed) or Decimal.inf?(parsed) or absurd_exponent?(parsed),
+          do: nil,
+          else: parsed
 
       _unparsable ->
         nil
@@ -2549,6 +2571,12 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp decimal(_other), do: nil
+
+  # `"1e999999999"` is finite and parses fully, but comparing or adding it builds a
+  # `10 ** 999_999_999` integer (~415 MB) in the caller's process. No amount this venue
+  # quotes needs more than 64 places either side of the point; wider is refused as unreadable.
+  # Not measured against the live venue.
+  defp absurd_exponent?(%Decimal{exp: exp}), do: exp > 64 or exp < -64
 
   # A garbage or missing value in a field this contract requires must not become a `nil`
   # carried into `@enforce_keys` — a struct's field list does not check that a value is

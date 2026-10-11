@@ -20,6 +20,34 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A finite number with an absurd exponent was admitted as a price.** `"1e999999999"` passed
+  the NaN/Infinity guard in `Socket` and `Rest`, and `Decimal.compare/2` (run on every
+  snapshot's sort) then builds `10 ** 999_999_999`, a ~415 MB integer, inside the socket or
+  caller process. A decimal whose exponent is beyond 64 places either side of the point is now
+  unreadable, as NaN is. The bound is a judgement, not a venue measurement.
+- **`get_top_of_book/2` read a quoted-but-unreadable level as an empty side.** A first bid or
+  ask whose price or size was `""`, NaN, missing or not a map became `nil`, which the contract
+  reads as "nobody quotes this side". It is now `{:error, :unexpected_response_shape}`, as
+  `get_order_book/2` already answered the same level. An absent or empty side stays `nil`.
+- **A dated future was labelled perpetual.** `list_instruments/1` mapped `product_type`
+  `FUTURE` to `:perp` whatever the contract. It now passes
+  `future_product_details.contract_expiry_type` (spec: `EXPIRING | PERPETUAL |
+  UNKNOWN_CONTRACT_EXPIRY_TYPE`) to `Instrument.instrument_from/2`: PERPETUAL is `:perp`,
+  EXPIRING is `:future`, a FUTURE with no details or an unknown type is `:unknown`. Needs the
+  Core release that adds `instrument_from/2` (`mix deps.update dp_exchange_core`).
+- **The fake's tape and top of book diverged from `Rest`.** `Fake.get_trades/2` returned
+  the newest print first (`Rest` sorts oldest first), ignored `limit` beyond presence, and
+  accepted `0`, `-1` and `"5"` (`Rest`: `{:error, {:invalid_limit, v}}`). It now matches all
+  three. `Fake.get_top_of_book/2` answered `nil` sizes, which reads as "nobody quotes"; it
+  carries sizes, as the endpoint does. `Fake.get_order_book/2` raised on a non-integer
+  `limit`; it answers `{:error, {:invalid_limit, v}}`. Its symbol lookups upper-case the
+  caller's spelling as `Rest` does, so `btc-usd` is found; `BTC/USD` is unlisted in both.
+- **A source returning neither `{:ok, map}` nor `{:error, _}` crashed `Feed`.** The alias
+  catalogue fetch now treats it as a permanent failure,
+  `{:invalid_alias_map_result, other}`, through the existing error path.
+
 ## [0.3.103] - 2026-10-11
 
 ### Fixed

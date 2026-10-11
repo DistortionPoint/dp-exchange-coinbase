@@ -123,7 +123,7 @@ defmodule DpExchange.Coinbase.Fake do
   # Outside `with_injection/2`, so `subscribe/2` builds its push without consuming a failure
   # a test queued for `get_price/2` (found 2026-10-10).
   defp fake_quote(symbol) do
-    case Map.fetch(@price, symbol) do
+    case Map.fetch(@price, native(symbol)) do
       {:ok, price} ->
         {:ok,
          %Types.Quote{
@@ -159,7 +159,7 @@ defmodule DpExchange.Coinbase.Fake do
       # `Rest`'s own test, so `%{}` — which the real path reads as no credential — refuses
       # here too. This checked only `nil`, and a consumer passing `%{}` got a book.
       with :ok <- Rest.validate_credentials(Keyword.get(opts, :credentials)) do
-        case Map.fetch(@price, symbol) do
+        case Map.fetch(@price, native(symbol)) do
           {:ok, price} ->
             {:ok,
              %Types.TopOfBook{
@@ -168,8 +168,10 @@ defmodule DpExchange.Coinbase.Fake do
                # test that passes only when they coincide is not testing the split.
                bid: Decimal.sub(Decimal.new(price), Decimal.new("0.40")),
                ask: Decimal.add(Decimal.new(price), Decimal.new("0.60")),
-               bid_size: nil,
-               ask_size: nil,
+               # `nil` would claim nobody is quoting either side; the real endpoint carries
+               # sizes (`best_level/1` in `Rest`), so the fake does too.
+               bid_size: Decimal.new("0.5"),
+               ask_size: Decimal.new("0.25"),
                venue_time: @at,
                observed_at: @at,
                provider: :coinbase
@@ -190,7 +192,7 @@ defmodule DpExchange.Coinbase.Fake do
       # check is `Rest`'s own — this used to re-state it and answered `:not_listed` first.
       # `12h`, which the shared vocabulary models and Coinbase does not serve, fails here.
       with :ok <- Rest.validate_candle_request(timeframe, range) do
-        if symbol in @symbols do
+        if native(symbol) in @symbols do
           # A bar, not a quote. The fake returned `get_price/2`'s `Quote` here, which agreed
           # with the real package's own defect — a suite reproducing the bug it is meant to
           # catch.
@@ -229,29 +231,34 @@ defmodule DpExchange.Coinbase.Fake do
     do: with_injection(symbol, fn -> fake_order_book(symbol, opts) end)
 
   defp fake_order_book(symbol, opts) do
-    case Map.fetch(@price, symbol) do
+    case Map.fetch(@price, native(symbol)) do
       {:ok, price} ->
         mid = Decimal.new(price)
-        limit = Config.opt(opts, :limit, 3)
 
-        {:ok,
-         %Types.OrderBook{
-           symbol: symbol,
-           # Descending bids, ascending asks — the venue's own ordering, and the sizes
-           # differ per level so a caller reading only the top learns it is reading a book.
-           bids: book_side(mid, limit, :sub),
-           asks: book_side(mid, limit, :add),
-           venue_time: @at,
-           observed_at: @at,
-           # The venue publishes no sequence on this endpoint, so neither does the fake: a
-           # caller must not learn to detect stream gaps from a REST book.
-           sequence: nil,
-           provider: :coinbase
-         }}
+        case Config.opt(opts, :limit, 3) do
+          limit when is_integer(limit) and limit >= 0 -> {:ok, fake_book(symbol, mid, limit)}
+          other -> {:error, {:invalid_limit, other}}
+        end
 
       :error ->
         {:refused, :not_listed}
     end
+  end
+
+  defp fake_book(symbol, mid, limit) do
+    %Types.OrderBook{
+      symbol: symbol,
+      # Descending bids, ascending asks — the venue's own ordering, and the sizes
+      # differ per level so a caller reading only the top learns it is reading a book.
+      bids: book_side(mid, limit, :sub),
+      asks: book_side(mid, limit, :add),
+      venue_time: @at,
+      observed_at: @at,
+      # The venue publishes no sequence on this endpoint, so neither does the fake: a
+      # caller must not learn to detect stream gaps from a REST book.
+      sequence: nil,
+      provider: :coinbase
+    }
   end
 
   @impl true
@@ -262,47 +269,56 @@ defmodule DpExchange.Coinbase.Fake do
       # (docs/reference/coinbase/openapi/at-spec.yaml:523-528) and documents no default. A
       # fake that answered anyway would let a consumer's suite go green on a call the real
       # venue refuses.
-      with :ok <- required_trades_limit(opts) do
-        get_trades_result(symbol)
+      with {:ok, limit} <- required_trades_limit(opts) do
+        get_trades_result(symbol, limit)
       end
     end)
   end
 
+  # `Rest.get_trades/2`'s own rule: absent is `:missing_limit`, and anything but a positive
+  # integer is `{:invalid_limit, value}`. This accepted `0`, `-1` and `"5"`.
   defp required_trades_limit(opts) do
     case Keyword.get(opts, :limit) do
       nil -> {:error, :missing_limit}
-      _limit -> :ok
+      limit when is_integer(limit) and limit > 0 -> {:ok, limit}
+      other -> {:error, {:invalid_limit, other}}
     end
   end
 
-  defp get_trades_result(symbol) do
-    case Map.fetch(@price, symbol) do
+  # Oldest first, as `Rest.get_trades/2` returns them (it sorts by the venue's own time), and
+  # at most `limit` of them, the newest. This returned the newest first, so a consumer reading
+  # `List.last/1` as "the latest print" passed here and failed against the venue.
+  defp get_trades_result(symbol, limit) do
+    case Map.fetch(@price, native(symbol)) do
       {:ok, price} ->
         # More than one print, because the whole point of the tape is that get_price/2
         # keeps only the newest and this does not.
         {:ok,
-         [
-           %Types.Trade{
-             id: "t-1",
-             symbol: symbol,
-             side: :buy,
-             price: Decimal.new(price),
-             quantity: Decimal.new("0.25"),
-             timestamp: @at,
-             broken: false,
-             provider: :coinbase
-           },
-           %Types.Trade{
-             id: "t-2",
-             symbol: symbol,
-             side: :sell,
-             price: Decimal.sub(Decimal.new(price), Decimal.new("1.50")),
-             quantity: Decimal.new("0.10"),
-             timestamp: DateTime.add(@at, -5, :second),
-             broken: false,
-             provider: :coinbase
-           }
-         ]}
+         Enum.take(
+           [
+             %Types.Trade{
+               id: "t-2",
+               symbol: symbol,
+               side: :sell,
+               price: Decimal.sub(Decimal.new(price), Decimal.new("1.50")),
+               quantity: Decimal.new("0.10"),
+               timestamp: DateTime.add(@at, -5, :second),
+               broken: false,
+               provider: :coinbase
+             },
+             %Types.Trade{
+               id: "t-1",
+               symbol: symbol,
+               side: :buy,
+               price: Decimal.new(price),
+               quantity: Decimal.new("0.25"),
+               timestamp: @at,
+               broken: false,
+               provider: :coinbase
+             }
+           ],
+           -limit
+         )}
 
       :error ->
         {:refused, :not_listed}
@@ -1465,6 +1481,13 @@ defmodule DpExchange.Coinbase.Fake do
   # Where the facade carries no credential argument, it reads `opts[:credentials]` and
   # defaults to `%{}` — which `Rest` treats as none.
   defp opts_credentials(opts), do: Keyword.get(opts, :credentials, %{})
+
+  # The spelling `Rest` sends: `SymbolFormat.to_exchange_symbol/1`, which upper-cases and
+  # nothing more. `btc-usd` is the product `BTC-USD`; `BTC/USD` is not a pair it can split
+  # and is refused by the venue as unlisted, so it is here too. A non-string is left as it
+  # is and matches nothing.
+  defp native(symbol) when is_binary(symbol), do: SymbolFormat.to_exchange_symbol(symbol)
+  defp native(symbol), do: symbol
 
   defp with_injection(symbol \\ nil, fun) do
     case FakeInjection.next_outcome(:coinbase, symbol) do

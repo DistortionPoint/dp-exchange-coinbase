@@ -99,6 +99,17 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       assert Process.alive?(feed)
     end
 
+    test "a source returning something that is neither ok nor error is a failed fetch" do
+      feed = start_wedge_feed(alias_map_source: fn -> :bogus end)
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      wait_until(fn -> :sys.get_state(feed).alias_map_status == :unavailable end)
+
+      state = :sys.get_state(feed)
+      assert state.alias_map_failure_reason == {:invalid_alias_map_result, :bogus}
+      assert Process.alive?(feed)
+    end
+
     test "a timer left over from a fetch that already answered is ignored" do
       # The timeout is armed per attempt and matched on the tracked ref, so one arriving for
       # a fetch that has since succeeded must not tear down whatever is running now.

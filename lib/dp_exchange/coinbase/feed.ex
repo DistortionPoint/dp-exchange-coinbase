@@ -3470,6 +3470,13 @@ defmodule DpExchange.Coinbase.Feed do
     handle_alias_map_fetch_failure(attempt, reason, state)
   end
 
+  # An injected `alias_map_source` may return anything. Neither `{:ok, map}` nor an error
+  # tuple is a failed fetch (permanent, so not retried), not a `FunctionClauseError` in the
+  # Feed.
+  defp apply_alias_map_result(other, attempt, state) do
+    handle_alias_map_fetch_failure(attempt, {:invalid_alias_map_result, other}, state)
+  end
+
   # Transient: the caller's own rate limiter made this fetch wait, and the wait itself ran
   # out before capacity freed up (`rate_limit_blocking: true` chooses `acquire/3`, whose
   # own bounded wait times out this way — see `Core.DefaultRateLimiter.acquire/3`) — the

@@ -56,6 +56,38 @@ defmodule DpExchange.Coinbase.NaNGuardTest do
       end
     end
 
+    for value <- ["1e999999999", "1E+65", "1e-65"] do
+      test "#{value} (a finite number no market quotes) is dropped, not compared" do
+        assert {:ok, _state} = frame(ticker(unquote(value)))
+
+        refute_receive {:dp_exchange, :coinbase, %Types.Quote{}}, 50
+      end
+    end
+
+    test "a book row with an absurd exponent refuses the whole snapshot" do
+      payload = %{
+        "channel" => "l2_data",
+        "events" => [
+          %{
+            "type" => "snapshot",
+            "product_id" => "BTC-USD",
+            "updates" => [
+              %{
+                "side" => "bid",
+                "price_level" => "1e999999999",
+                "new_quantity" => "1",
+                "event_time" => "2026-08-28T14:53:45.649112Z"
+              }
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, _state} = frame(payload)
+
+      refute_receive {:dp_exchange, :coinbase, %Types.OrderBook{}}, 50
+    end
+
     test "a real price still arrives, so the guard has not eaten the happy path" do
       assert {:ok, _state} = frame(ticker("79478.7"))
 
