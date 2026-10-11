@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.106] - 2026-10-11
+
 ### Fixed
 
 Found by reading `socket.ex`, `feed.ex`, `auth.ex`, `rest.ex`'s market-data readers and the
