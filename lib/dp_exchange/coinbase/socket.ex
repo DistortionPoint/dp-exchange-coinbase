@@ -755,15 +755,26 @@ defmodule DpExchange.Coinbase.Socket do
     # :order_book, :trades]`, so these channels are never subscribed — arriving means the venue
     # sent something this package did not ask for, which is worth noticing rather than
     # silently dropping.
-    notify(
-      state,
-      Notice.new(:data_quality, :coinbase,
-        message: "received an unsubscribed channel",
-        details: %{channel: channel}
-      )
-    )
+    #
+    # Once per channel per connection, through the same remembered set as `report_quality/5`:
+    # a venue that pushes `status` or `ticker_batch` unasked does so on every tick, and one
+    # notice per frame is the flood that set exists to prevent.
+    fault = {:unsubscribed_channel, channel, :received}
+    reported = Map.get(state, :reported_faults, MapSet.new())
 
-    state
+    if MapSet.member?(reported, fault) do
+      state
+    else
+      notify(
+        state,
+        Notice.new(:data_quality, :coinbase,
+          message: "received an unsubscribed channel",
+          details: %{channel: channel}
+        )
+      )
+
+      remember_fault(state, reported, fault)
+    end
   end
 
   defp dispatch(%{"type" => "error", "message" => message}, state) when is_binary(message) do

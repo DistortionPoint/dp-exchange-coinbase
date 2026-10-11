@@ -180,11 +180,11 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
 
     test "an atom-keyed idempotency_key in the body is the same field, sent once" do
       me = self()
-      good = opts(me, body: %{idempotency_key: "mine"})
+      good = opts(me, body: %{idempotency_key: "6f1d2a40-0000-4000-8000-000000000001"})
       assert {:ok, _result} = Prime.claim_rewards(@credentials, "pf-1", "w-9", good)
 
       assert_receive {:request, "POST", _path, raw, _headers}, 5_000
-      assert Jason.decode!(raw) == %{"idempotency_key" => "mine"}
+      assert Jason.decode!(raw) == %{"idempotency_key" => "6f1d2a40-0000-4000-8000-000000000001"}
     end
 
     test "the validator query is a POST that reads" do
@@ -287,11 +287,11 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
                  "pf-1",
                  "ETH",
                  Decimal.new("1"),
-                 opts(me, idempotency_key: "given-by-caller")
+                 opts(me, idempotency_key: "6f1d2a40-0000-4000-8000-000000000002")
                )
 
       assert_receive {:request, "POST", _path, raw, _headers}
-      assert Jason.decode!(raw)["idempotency_key"] == "given-by-caller"
+      assert Jason.decode!(raw)["idempotency_key"] == "6f1d2a40-0000-4000-8000-000000000002"
     end
 
     test "claim_rewards/4 now retries like the other staking writes, key or no key" do
@@ -739,12 +739,12 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
                  @credentials,
                  "pf-1",
                  "w-9",
-                 opts(me, body: %{"idempotency_key" => "caller-key"})
+                 opts(me, body: %{"idempotency_key" => "6f1d2a40-0000-4000-8000-000000000003"})
                )
 
       assert_receive {:request, "POST", _path, raw2, _headers}
       # A key already present in the caller's own body is kept, not overwritten.
-      assert Jason.decode!(raw2) == %{"idempotency_key" => "caller-key"}
+      assert Jason.decode!(raw2) == %{"idempotency_key" => "6f1d2a40-0000-4000-8000-000000000003"}
     end
 
     test "claim_rewards reads opts[:amount] into inputs.amount" do

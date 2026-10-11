@@ -20,6 +20,60 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Found by reading the order, edit, sweep, fill, Prime and user-channel code against
+`docs/reference/coinbase/openapi/at-spec.yaml` and `prime-spec.yaml`.
+
+- **Unknown order request keys were dropped without a word.** Every key of a `place_order/3`
+  or `preview_order/3` request is now read or refused by name:
+  `{:error, {:unsupported_order_field, key}}` for `reduce_only` (not in the schema),
+  `attached_order_configuration`, `prediction_metadata`, `equity_order_metadata`,
+  `cost_basis_method` (in the schema, not built here) and any other key. `retail_portfolio_id`,
+  `preview_id` (place only) and `sor_preference` are sent when valid
+  (`{:error, {:invalid_order_field, key, value}}` otherwise). Every key Core's conformance
+  request sends is accepted. `Rest.validate_order_request/2` takes `:place | :preview`.
+- **The fake did not apply `get_orders/2` / `get_trade_history/2` filter refusals.** It now
+  calls `Rest.validate_order_filters/1` and `Rest.validate_fill_filters/1` (public, the same
+  functions `Rest` runs) before the credential, and a `:symbol` list narrows instead of
+  raising.
+- **`Prime` accepted any non-empty string as an `idempotency_key`.** The spec says uuid; a
+  caller key (`:idempotency_key`, or inside a `claim_rewards/4` body) must be the canonical
+  8-4-4-4-12 hex form, otherwise `{:error, {:invalid_idempotency_key, value}}`. Generated keys
+  are v4 UUIDs and already satisfy it.
+- **A scheduled futures sweep took any `:usd_amount`.** The documented default for a missing
+  amount is to sweep every available excess dollar, and `""`, `"abc"`, `0` and negatives were
+  sent as given, so what the venue did with them was unmeasured on a call that moves the lot.
+  Only an absent amount means "all"; a present one must be finite and positive
+  (`{:error, {:invalid_amount, value}}`) and is sent in plain notation.
+- **`leverage` and `margin_type` on an order were dropped without a word.** `NewOrderRequest`
+  and `OrderPreviewRequest` carry both; `place_order/3` and `preview_order/3` ignored the
+  request's `:leverage` and `:margin_type`, so an order asked at 5x isolated was placed at the
+  venue's default 1.0 cross. They are now sent when named and refused when not in the schema
+  (`{:invalid_leverage, v}`, `{:invalid_margin_type, v}`). Unmeasured against the live venue.
+- **An absurdly scaled amount was admitted.** `%Decimal{coef: 1, exp: 999_999_999}` (or the
+  float `1.0e300`) passed the finite/positive check on order prices and sizes, edits,
+  `quote_conversion/5`, `transfer_internal/4` and every `Prime` stake, and was then rendered in
+  plain notation: a billion-character string built in the caller's process. The 64-place bound
+  already applied to parsed strings now applies to every amount that is sent.
+- **A request that was not a map raised.** `place_order/3`, `preview_order/3` and
+  `validate_order_request/1` with `nil` or a keyword list raised `BadMapError`;
+  `replace_order/4`, `preview_replace/4` and `validate_order_edit/1` the same for `changes`.
+  They answer `{:error, {:invalid_order_request, v}}` and `{:error, {:invalid_order_changes, v}}`.
+- **Order and fill filters raised or were sent unchecked.** `get_orders/2` and
+  `get_trade_history/2` called `SymbolFormat` on a non-string `:symbol` (`FunctionClauseError`),
+  accepted `""` and `[]` as a filter, and sent a `:limit` of `0`, `-5` or `"x"`; they now answer
+  `{:error, {:invalid_symbol, v}}` and `{:error, {:invalid_limit, v}}`. A `:symbol` list works
+  on fills as it already did on orders. `trade_types: "FILL"` raised after every page had been
+  fetched; it is `{:error, {:invalid_trade_types, v}}` before the first.
+- **`Prime` raised on an `extra` that was not a map, and on a claim body whose `inputs` was
+  not.** Both now answer `{:error, {:invalid_extra, v}}` / `{:error, {:invalid_inputs, v}}`
+  before anything is signed.
+- **An unsubscribed channel raised one notice per frame.** `Socket` reported `candles`,
+  `user`, `ticker_batch`, `status` and `futures_balance_summary` with a `:data_quality` notice
+  on every frame the venue pushed. It is once per channel per connection, through the set
+  that already de-duplicates decode faults.
+
 ## [0.3.104] - 2026-10-11
 
 ### Fixed

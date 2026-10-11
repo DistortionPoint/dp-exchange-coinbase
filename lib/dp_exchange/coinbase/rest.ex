@@ -977,9 +977,7 @@ defmodule DpExchange.Coinbase.Rest do
   # raised in `Decimal.to_string/2` inside the caller's process, and zero, a negative, NaN or
   # infinity was sent to the venue as given.
   defp positive_amount(%Decimal{} = amount) do
-    if Decimal.nan?(amount) or Decimal.inf?(amount) or not Decimal.positive?(amount),
-      do: {:error, {:invalid_amount, amount}},
-      else: :ok
+    if usable_positive?(amount), do: :ok, else: {:error, {:invalid_amount, amount}}
   end
 
   defp positive_amount(other), do: {:error, {:invalid_amount, other}}
@@ -1313,20 +1311,30 @@ defmodule DpExchange.Coinbase.Rest do
   @spec schedule_futures_sweep(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def schedule_futures_sweep(credentials, opts) do
-    body = put_unless_nil(%{}, "usd_amount", sweep_amount(Keyword.get(opts, :usd_amount)))
+    with {:ok, amount} <- sweep_amount(Keyword.get(opts, :usd_amount)) do
+      body = put_unless_nil(%{}, "usd_amount", amount)
 
-    case post_once("/cfm/sweeps/schedule", body, credentials, opts) do
-      {:ok, %{body: %{} = result}} -> {:ok, result}
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+      case post_once("/cfm/sweeps/schedule", body, credentials, opts) do
+        {:ok, %{body: %{} = result}} -> {:ok, result}
+        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
     end
   end
 
   # Full notation, never scientific — and a string, because that is what the venue's schema
-  # says `usd_amount` is.
-  defp sweep_amount(nil), do: nil
-  defp sweep_amount(%Decimal{} = amount), do: Decimal.to_string(amount, :normal)
-  defp sweep_amount(amount), do: to_string(amount)
+  # says `usd_amount` is. **Only an absent amount means "sweep everything".** A present one
+  # is held to the rule every other money field here is: finite and positive. `""`, `"abc"`,
+  # `0` and a negative went out as given, and what the venue does with them is unmeasured on
+  # a call whose documented default for a missing amount is to move the lot.
+  defp sweep_amount(nil), do: {:ok, nil}
+
+  defp sweep_amount(amount) do
+    case order_amount(amount) do
+      %Decimal{} = parsed -> {:ok, wire_number(parsed)}
+      nil -> {:error, {:invalid_amount, amount}}
+    end
+  end
 
   @doc """
   Cancels the pending sweep — `DELETE /cfm/sweeps`.
@@ -1524,7 +1532,8 @@ defmodule DpExchange.Coinbase.Rest do
   def get_trade_history(credentials, opts) do
     wanted = Config.opt(opts, :trade_types, ["FILL"])
 
-    with {:ok, rows} <- all_fills(credentials, opts, nil, [], 0),
+    with :ok <- validate_fill_filters(opts),
+         {:ok, rows} <- all_fills(credentials, opts, nil, [], 0),
          :ok <- typed_fills(rows) do
       rows
       # A row that is not an object is kept so `to_fill/1` can refuse it. Filtering it out
@@ -1546,6 +1555,14 @@ defmodule DpExchange.Coinbase.Rest do
 
   @max_fill_pages 50
 
+  # `trade_type in wanted` raised `Protocol.UndefinedError` for a `wanted` that is not a
+  # list (`trade_types: "FILL"`), after every page had been fetched.
+  defp valid_trade_types(wanted) do
+    if is_list(wanted) and Enum.all?(wanted, &is_binary/1),
+      do: :ok,
+      else: {:error, {:invalid_trade_types, wanted}}
+  end
+
   # A row that does not say what kind of fill it is cannot be sorted into "a trade that
   # happened" or "an adjustment". Filtering on `trade_type in wanted` dropped it without a
   # word (`nil` is in no list), a gap in a fill history that reads as complete. Refused
@@ -1563,7 +1580,7 @@ defmodule DpExchange.Coinbase.Rest do
     params =
       %{}
       |> put_unless_nil("order_ids", Keyword.get(opts, :order_id))
-      |> put_unless_nil("product_ids", exchange_symbol(Keyword.get(opts, :symbol)))
+      |> put_unless_nil("product_ids", venue_symbol(Keyword.get(opts, :symbol)))
       |> put_unless_nil("start_sequence_timestamp", timestamp_param(Keyword.get(opts, :start)))
       |> put_unless_nil("end_sequence_timestamp", timestamp_param(Keyword.get(opts, :end)))
       |> put_unless_nil("limit", Keyword.get(opts, :limit))
@@ -1598,9 +1615,6 @@ defmodule DpExchange.Coinbase.Rest do
         classify(reason)
     end
   end
-
-  defp exchange_symbol(nil), do: nil
-  defp exchange_symbol(symbol), do: SymbolFormat.to_exchange_symbol(symbol)
 
   defp timestamp_param(nil), do: nil
   defp timestamp_param(%DateTime{} = at), do: DateTime.to_iso8601(at)
@@ -1763,13 +1777,43 @@ defmodule DpExchange.Coinbase.Rest do
   @doc """
   The local checks `place_order/3` and `preview_order/3` run on a request before sending:
   identity (symbol, side, quantity), then the sparse order-type and time-in-force table,
-  then each leaf's required and refused fields.
+  then each leaf's required and refused fields, then the remaining keys: every key must be
+  one this package reads (`{:error, {:unsupported_order_field, key}}` otherwise).
+  `mode` is `:place` (the default) or `:preview`, which does not accept `:preview_id`.
   """
-  @spec validate_order_request(map()) :: :ok | {:error, term()}
-  def validate_order_request(request) do
+  @spec validate_order_request(term(), :place | :preview) :: :ok | {:error, term()}
+  def validate_order_request(request, mode \\ :place) do
     with {:ok, _symbol, _side} <- order_identity(request),
-         {:ok, _configuration} <- order_configuration(request) do
+         {:ok, _configuration} <- order_configuration(request),
+         {:ok, _margin} <- margin_fields(request, mode) do
       :ok
+    end
+  end
+
+  @doc """
+  The local checks `get_orders/2` runs on its options before any request: `:status` (one of
+  `OrderExecutionStatus`), `:symbol` (a non-empty string or a non-empty list of them) and
+  `:limit` (a positive integer). Errors: `{:invalid_status, v}`, `{:invalid_symbol, v}`,
+  `{:invalid_limit, v}`.
+  """
+  @spec validate_order_filters(keyword()) :: :ok | {:error, term()}
+  def validate_order_filters(opts) do
+    with :ok <- valid_statuses(Keyword.get(opts, :status)),
+         :ok <- valid_order_symbols(Keyword.get(opts, :symbol)) do
+      valid_page_size(Keyword.get(opts, :limit))
+    end
+  end
+
+  @doc """
+  The local checks `get_trade_history/2` runs on its options before any request:
+  `:trade_types` (a list of strings), `:symbol` and `:limit`, as `validate_order_filters/1`.
+  Errors: `{:invalid_trade_types, v}`, `{:invalid_symbol, v}`, `{:invalid_limit, v}`.
+  """
+  @spec validate_fill_filters(keyword()) :: :ok | {:error, term()}
+  def validate_fill_filters(opts) do
+    with :ok <- valid_trade_types(Config.opt(opts, :trade_types, ["FILL"])),
+         :ok <- valid_order_symbols(Keyword.get(opts, :symbol)) do
+      valid_page_size(Keyword.get(opts, :limit))
     end
   end
 
@@ -1777,7 +1821,7 @@ defmodule DpExchange.Coinbase.Rest do
   The local checks `replace_order/4` and `preview_replace/4` run on `changes`: only `:price`
   and `:quantity`, and both, each a finite positive number.
   """
-  @spec validate_order_edit(map()) :: :ok | {:error, term()}
+  @spec validate_order_edit(term()) :: :ok | {:error, term()}
   def validate_order_edit(changes) do
     with :ok <- editable_changes(changes),
          {:ok, _amounts} <- normalise_amounts([:price, :quantity], changes) do
@@ -2700,20 +2744,34 @@ defmodule DpExchange.Coinbase.Rest do
   `{:error, {:invalid_order_amount, field, value}}` unless they are finite and positive.
   They are always sent in plain (never scientific) notation. `:side` must be `:buy` or
   `:sell` (a string spelling is accepted); anything else is
-  `{:error, {:invalid_side, value}}` rather than being upcased and sent.
+  `{:error, {:invalid_side, value}}` rather than being upcased and sent. A request that is
+  not a map is `{:error, {:invalid_order_request, request}}`.
+
+  ## Perpetuals: `:leverage` and `:margin_type`
+
+  `NewOrderRequest` carries `leverage` (a string, "default is 1.0") and `margin_type`
+  (`CROSS` or `ISOLATED`, "default is CROSS") for INTX perpetuals
+  (docs/reference/coinbase/openapi/at-spec.yaml:8101-8140). They are sent only when the
+  request names them; they used to be dropped without a word, so an order asked at 5x was
+  placed at the venue's 1x. `:leverage` is a finite positive number
+  (`{:error, {:invalid_leverage, value}}`) and `:margin_type` is `:cross`, `:isolated` or
+  the venue's string (`{:error, {:invalid_margin_type, value}}`). Not measured against the
+  live venue.
   """
-  @spec place_order(map(), map(), keyword()) ::
+  @spec place_order(map(), term(), keyword()) ::
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
   def place_order(credentials, request, opts) do
     with {:ok, symbol, side} <- order_identity(request),
          {:ok, configuration} <- order_configuration(request),
+         {:ok, margin} <- margin_fields(request, :place),
          {:ok, client_order_id} <- client_order_id(Map.get(request, :client_order_id)) do
-      body = %{
-        "client_order_id" => client_order_id,
-        "product_id" => SymbolFormat.to_exchange_symbol(symbol),
-        "side" => side |> to_string() |> String.upcase(),
-        "order_configuration" => configuration
-      }
+      body =
+        Map.merge(margin, %{
+          "client_order_id" => client_order_id,
+          "product_id" => SymbolFormat.to_exchange_symbol(symbol),
+          "side" => side |> to_string() |> String.upcase(),
+          "order_configuration" => configuration
+        })
 
       case post_json("/orders", body, credentials, opts) do
         {:ok, %{body: response}} -> to_placed_order(response, request, side)
@@ -2728,6 +2786,93 @@ defmodule DpExchange.Coinbase.Rest do
   defp client_order_id(nil), do: {:ok, generate_client_order_id()}
   defp client_order_id(id) when is_binary(id) and id != "", do: {:ok, id}
   defp client_order_id(other), do: {:error, {:invalid_client_order_id, other}}
+
+  # `leverage` and `margin_type` of `NewOrderRequest` / `OrderPreviewRequest`, sent only when
+  # the request names them (the venue's defaults are 1.0 and CROSS). `nil` is "not named".
+  # Anything the venue's schema does not describe is refused rather than sent.
+  #
+  # **Every key of the request is either read or refused by name.** The keys below are the
+  # contract's (`Core.AdapterContract`'s default request sends symbol, side, order_type,
+  # time_in_force, quantity and price) and the ones `NewOrderRequest` defines that this
+  # package validates and sends. The rest of the schema (`attached_order_configuration`,
+  # `prediction_metadata`, `equity_order_metadata`, `cost_basis_method`) is not built here,
+  # and a key such as `reduce_only` is not in the schema at all: each was dropped silently
+  # and the order placed without it. `preview_id` exists on `NewOrderRequest` only.
+  @request_keys [
+    :symbol,
+    :side,
+    :order_type,
+    :time_in_force,
+    :quantity,
+    :quote_size,
+    :price,
+    :stop_price,
+    :stop_direction,
+    :post_only,
+    :end_time,
+    :client_order_id,
+    :leverage,
+    :margin_type,
+    :retail_portfolio_id,
+    :sor_preference
+  ]
+
+  @sor_preferences ["SOR_PREFERENCE_UNSPECIFIED", "SOR_ENABLED", "SOR_DISABLED"]
+
+  defp margin_fields(request, mode) do
+    allowed = if mode == :place, do: [:preview_id | @request_keys], else: @request_keys
+
+    with :ok <- known_request_keys(request, allowed),
+         {:ok, leverage} <- leverage_field(Map.get(request, :leverage)),
+         {:ok, margin_type} <- margin_type_field(Map.get(request, :margin_type)),
+         {:ok, portfolio} <- string_field(request, :retail_portfolio_id),
+         {:ok, preview_id} <- string_field(request, :preview_id),
+         {:ok, sor} <- sor_field(Map.get(request, :sor_preference)) do
+      body =
+        %{}
+        |> put_unless_nil("leverage", leverage)
+        |> put_unless_nil("margin_type", margin_type)
+        |> put_unless_nil("retail_portfolio_id", portfolio)
+        |> put_unless_nil("preview_id", preview_id)
+        |> put_unless_nil("sor_preference", sor)
+
+      {:ok, body}
+    end
+  end
+
+  defp known_request_keys(request, allowed) do
+    case Enum.find(Map.keys(request), &(&1 not in allowed)) do
+      nil -> :ok
+      key -> {:error, {:unsupported_order_field, key}}
+    end
+  end
+
+  defp string_field(request, key) do
+    case Map.get(request, key) do
+      nil -> {:ok, nil}
+      value when is_binary(value) and value != "" -> {:ok, value}
+      value -> {:error, {:invalid_order_field, key, value}}
+    end
+  end
+
+  defp sor_field(nil), do: {:ok, nil}
+  defp sor_field(value) when value in @sor_preferences, do: {:ok, value}
+  defp sor_field(value), do: {:error, {:invalid_order_field, :sor_preference, value}}
+
+  defp leverage_field(nil), do: {:ok, nil}
+
+  defp leverage_field(value) do
+    case order_amount(value) do
+      %Decimal{} = leverage -> {:ok, wire_number(leverage)}
+      nil -> {:error, {:invalid_leverage, value}}
+    end
+  end
+
+  defp margin_type_field(nil), do: {:ok, nil}
+  defp margin_type_field(:cross), do: {:ok, "CROSS"}
+  defp margin_type_field(:isolated), do: {:ok, "ISOLATED"}
+  defp margin_type_field(value) when value in ["CROSS", "ISOLATED"], do: {:ok, value}
+  defp margin_type_field(value), do: {:error, {:invalid_margin_type, value}}
 
   # The sparse cross-product, written out. A pair absent from this table is absent from the
   # venue, and `order_configuration/1` refuses rather than reaching for a neighbour.
@@ -2783,12 +2928,21 @@ defmodule DpExchange.Coinbase.Rest do
   defp order_amount(value) do
     case decimal(value) do
       %Decimal{} = amount ->
-        if not Decimal.nan?(amount) and not Decimal.inf?(amount) and Decimal.positive?(amount),
-          do: amount
+        if usable_positive?(amount), do: amount
 
       nil ->
         nil
     end
+  end
+
+  # Finite, positive and not absurdly scaled. `decimal/1` bounds a parsed string's exponent
+  # but passes a `%Decimal{}` or float through as given, and `wire_number/1` renders in plain
+  # notation: `%Decimal{coef: 1, exp: 999_999_999}` is a billion-character string built in
+  # the caller's process, and `1.0e300` is a 301-digit "price". Not measured against the
+  # live venue; see `absurd_exponent?/1`.
+  defp usable_positive?(%Decimal{} = amount) do
+    not Decimal.nan?(amount) and not Decimal.inf?(amount) and not absurd_exponent?(amount) and
+      Decimal.positive?(amount)
   end
 
   defp build_configuration(key, type, tif, request) do
@@ -2988,6 +3142,12 @@ defmodule DpExchange.Coinbase.Rest do
   # The fields every order names, and `:quantity` for every type but a market order (which
   # may be sized by `quote_size` instead — see `configuration_leaf/3`). `Map.fetch!/2` raised
   # `KeyError` in the caller's process for each of them, on a money-moving call.
+  #
+  # A request that is not a map (`nil`, a keyword list) raised `BadMapError` from the first
+  # `Map.get/2` below, in the caller's process, on a money-moving call.
+  defp order_identity(request) when not is_map(request),
+    do: {:error, {:invalid_order_request, request}}
+
   defp order_identity(request) do
     with {:ok, symbol} <- required_field(request, :symbol, {:missing_field, :symbol}),
          {:ok, side} <- required_field(request, :side, {:missing_field, :side}),
@@ -3280,7 +3440,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_orders(map(), keyword()) ::
           {:ok, [Types.Order.t()]} | {:error, term()} | {:refused, term()}
   def get_orders(credentials, opts) do
-    with :ok <- valid_statuses(Keyword.get(opts, :status)),
+    with :ok <- validate_order_filters(opts),
          {:ok, orders} <- all_orders(credentials, opts, nil, [], 0) do
       # A row that is not an object refuses the whole list. It used to raise out of
       # `to_order/1`; skipping it instead would hand back the truncated order list this
@@ -3374,6 +3534,25 @@ defmodule DpExchange.Coinbase.Rest do
     do: String.upcase(to_string(status)) in @status_filters
 
   defp known_status?(_other), do: false
+
+  # `SymbolFormat.to_exchange_symbol/1` has no clause for a non-binary, so `symbol: :btc` or
+  # `symbol: [nil]` raised `FunctionClauseError` in the caller's process, and `""` filtered
+  # nothing while looking like a filter. A filter is a non-empty string or a list of them.
+  defp valid_order_symbols(nil), do: :ok
+
+  defp valid_order_symbols(symbols) do
+    list = List.wrap(symbols)
+
+    if list != [] and Enum.all?(list, &(is_binary(&1) and &1 != "")),
+      do: :ok,
+      else: {:error, {:invalid_symbol, symbols}}
+  end
+
+  # The venue's page size. Sent as given before, so `limit: 0`, `-5` or `"x"` reached the
+  # venue, whose reading of them is unmeasured.
+  defp valid_page_size(nil), do: :ok
+  defp valid_page_size(limit) when is_integer(limit) and limit > 0, do: :ok
+  defp valid_page_size(limit), do: {:error, {:invalid_limit, limit}}
 
   defp venue_symbol(nil), do: nil
   defp venue_symbol(symbols) when is_list(symbols), do: Enum.map(symbols, &venue_symbol/1)
@@ -3527,16 +3706,18 @@ defmodule DpExchange.Coinbase.Rest do
   `warning` is passed through untouched and does **not** make this a refusal: a warning is
   the venue saying "this will execute, and you may not like how".
   """
-  @spec preview_order(map(), map(), keyword()) ::
+  @spec preview_order(map(), term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_order(credentials, request, opts) do
     with {:ok, symbol, side} <- order_identity(request),
-         {:ok, configuration} <- order_configuration(request) do
-      body = %{
-        "product_id" => SymbolFormat.to_exchange_symbol(symbol),
-        "side" => side |> to_string() |> String.upcase(),
-        "order_configuration" => configuration
-      }
+         {:ok, configuration} <- order_configuration(request),
+         {:ok, margin} <- margin_fields(request, :preview) do
+      body =
+        Map.merge(margin, %{
+          "product_id" => SymbolFormat.to_exchange_symbol(symbol),
+          "side" => side |> to_string() |> String.upcase(),
+          "order_configuration" => configuration
+        })
 
       case post_json("/orders/preview", body, credentials, opts) do
         {:ok, %{body: response}} -> preview_result(response)
@@ -3585,7 +3766,7 @@ defmodule DpExchange.Coinbase.Rest do
   carrying errors is the venue saying no; this returns `{:refused, …}` rather than an `:ok`
   a caller would read as a green light.
   """
-  @spec preview_replace(map(), String.t(), map(), keyword()) ::
+  @spec preview_replace(map(), String.t(), term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_replace(credentials, order_id, changes, opts) do
     with {:ok, body} <- edit_body(order_id, changes) do
@@ -3742,7 +3923,7 @@ defmodule DpExchange.Coinbase.Rest do
   applied.** The venue accepted it, then the read-back of the order failed with `reason`.
   Do not retry the edit; read the order with `get_order/3` to learn its state.
   """
-  @spec replace_order(map(), String.t(), map(), keyword()) ::
+  @spec replace_order(map(), String.t(), term(), keyword()) ::
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
   def replace_order(credentials, order_id, changes, opts) do
     with {:ok, body} <- edit_body(order_id, changes) do
@@ -3772,6 +3953,10 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp edit_order_id(order_id) when is_binary(order_id) and order_id != "", do: :ok
   defp edit_order_id(order_id), do: {:error, {:invalid_id, :order_id, order_id}}
+
+  # `Map.keys/1` raised `BadMapError` for `nil` or a keyword list, in the caller's process.
+  defp editable_changes(changes) when not is_map(changes),
+    do: {:error, {:invalid_order_changes, changes}}
 
   defp editable_changes(changes) do
     case Map.keys(changes) -- @editable do

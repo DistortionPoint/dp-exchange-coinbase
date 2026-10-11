@@ -722,7 +722,17 @@ that figure keeps its own name — along with `expiration_time`, which a future 
 
 **A sweep is scheduled, not settled.** `schedule_futures_sweep/2` queues a move out of the
 futures account; `list_futures_sweeps/2` reports the queue. **Omitting the amount sweeps
-every available excess dollar** — the venue's default, not this package's.
+every available excess dollar** — the venue's default, not this package's. Only an
+*absent* `:usd_amount` means that: a present one must be a finite positive number
+(`{:error, {:invalid_amount, value}}` otherwise), so `""`, `0` or a typo cannot turn into
+"sweep everything" at the venue.
+
+**Perpetual orders carry `:leverage` and `:margin_type` when you name them.**
+`place_order/3` and `preview_order/3` send `leverage` and `margin_type` (`:cross`,
+`:isolated` or the venue's `"CROSS"`/`"ISOLATED"`) only when the request has them; absent,
+the venue's defaults (1.0, CROSS) apply. A value outside the schema is
+`{:error, {:invalid_leverage, v}}` or `{:error, {:invalid_margin_type, v}}`. They used to be
+dropped silently.
 
 `INTRADAY_MARGIN_SETTING_UNSPECIFIED` is the venue declining to say. It is **not**
 `_STANDARD`, and this package will not map it to one.
@@ -753,9 +763,17 @@ either way. `opts[:extra]` fills in fields this package does not know; it **cann
 **What is refused before anything is signed.** `:portfolio_id` and `:wallet_id` are path
 segments and must be strings of letters, digits, `_` and `-`; anything else (including `""`
 and `nil` for a wallet) answers `{:error, {:invalid_portfolio_id, value}}` or
-`{:error, {:invalid_wallet_id, value}}`. A given `:idempotency_key` must be a non-empty
-string (`{:error, {:invalid_idempotency_key, value}}`): the venue answers a repeated key with
-the first response, so `""` made every later stake a copy of the first.
+`{:error, {:invalid_wallet_id, value}}`. A given `:idempotency_key` must be a UUID in the
+canonical 8-4-4-4-12 hex form, as the spec requires (`{:error, {:invalid_idempotency_key,
+value}}` otherwise): the venue answers a repeated key with the first response, so `""` made
+every later stake a copy of the first.
+
+**An order request key is read or refused by name.** `place_order/3` and `preview_order/3`
+accept the contract's keys plus `quote_size`, `stop_price`, `stop_direction`, `post_only`,
+`end_time`, `client_order_id`, `leverage`, `margin_type`, `retail_portfolio_id`,
+`sor_preference` and (place only) `preview_id`. Any other key, including `reduce_only` and
+the schema's unbuilt `attached_order_configuration`, is
+`{:error, {:unsupported_order_field, key}}`, never silently dropped.
 
 The other five are Coinbase-specific — no generic callback fits them, so they
 are plain functions on `DpExchange.Coinbase` instead:

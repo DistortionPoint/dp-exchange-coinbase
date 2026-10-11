@@ -104,6 +104,24 @@ defmodule DpExchange.Coinbase.BaselineTest do
       end
     end
 
+    test "an unsubscribed channel is reported once per connection, not once per frame" do
+      payload = Jason.encode!(%{"channel" => "status", "events" => []})
+
+      {:ok, first} = Socket.handle_frame({:text, payload}, state())
+      {:ok, second} = Socket.handle_frame({:text, payload}, first)
+      {:ok, _third} = Socket.handle_frame({:text, payload}, second)
+
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+      refute_received {:dp_exchange, :coinbase, %Notice{}}
+
+      # A different channel is a different fault.
+      other = Jason.encode!(%{"channel" => "user", "events" => []})
+      {:ok, _state} = Socket.handle_frame({:text, other}, second)
+
+      assert_received {:dp_exchange, :coinbase,
+                       %Notice{kind: :data_quality, details: %{channel: "user"}}}
+    end
+
     test "subscription confirmations are not data and not coverage" do
       # A confirmation is intent. Coverage reports what arrived, and conflating the two
       # is how a venue reported 325 symbols confirmed while 174 were delivering.

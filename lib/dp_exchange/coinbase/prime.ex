@@ -101,7 +101,8 @@ defmodule DpExchange.Coinbase.Prime do
     with :ok <- valid_portfolio(portfolio_id),
          :ok <- valid_asset(asset),
          :ok <- valid_amount(amount),
-         :ok <- valid_key(opts) do
+         :ok <- valid_key(opts),
+         :ok <- valid_extra(opts) do
       post(
         "/portfolios/#{portfolio_id}/staking/initiate",
         portfolio_stake_body(asset, amount, opts),
@@ -125,7 +126,8 @@ defmodule DpExchange.Coinbase.Prime do
     with :ok <- valid_portfolio(portfolio_id),
          :ok <- valid_asset(asset),
          :ok <- valid_amount(amount),
-         :ok <- valid_key(opts) do
+         :ok <- valid_key(opts),
+         :ok <- valid_extra(opts) do
       post(
         "/portfolios/#{portfolio_id}/staking/unstake",
         portfolio_stake_body(asset, amount, opts),
@@ -151,7 +153,8 @@ defmodule DpExchange.Coinbase.Prime do
   @spec query_transaction_validators(credentials(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def query_transaction_validators(credentials, portfolio_id, opts) do
-    with :ok <- valid_portfolio(portfolio_id) do
+    with :ok <- valid_portfolio(portfolio_id),
+         :ok <- valid_extra(opts) do
       case Config.opt(opts, :transaction_ids, nil) do
         ids when is_list(ids) and ids != [] ->
           post(
@@ -182,7 +185,8 @@ defmodule DpExchange.Coinbase.Prime do
   def stake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
     with :ok <- valid_scope(portfolio_id, wallet_id),
          :ok <- valid_amount(amount),
-         :ok <- valid_key(opts) do
+         :ok <- valid_key(opts),
+         :ok <- valid_extra(opts) do
       post(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/initiate",
         wallet_stake_body(amount, opts),
@@ -211,7 +215,8 @@ defmodule DpExchange.Coinbase.Prime do
   def unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
     with :ok <- valid_scope(portfolio_id, wallet_id),
          :ok <- valid_amount(amount),
-         :ok <- valid_key(opts) do
+         :ok <- valid_key(opts),
+         :ok <- valid_extra(opts) do
       post(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake",
         wallet_stake_body(amount, opts),
@@ -342,13 +347,21 @@ defmodule DpExchange.Coinbase.Prime do
   # `Decimal.to_string/2` on a float or `nil`, or `String.upcase/1` on a `nil` asset, raised
   # inside the caller's process. A zero, negative, NaN or infinite amount is no stake at all,
   # and the venue is not the place to find that out.
+  #
+  # An exponent beyond 64 places either side of the point is refused as well: `Decimal.to_string(
+  # %Decimal{coef: 1, exp: 999_999_999}, :normal)` builds a billion-character string in the
+  # caller's process before anything is signed. The bound is the one `Rest` applies to every
+  # amount it sends, a judgement and not a venue measurement.
   defp valid_amount(%Decimal{} = amount) do
-    if Decimal.inf?(amount) or Decimal.nan?(amount) or not Decimal.positive?(amount),
-      do: {:error, {:invalid_amount, amount}},
-      else: :ok
+    if usable?(amount), do: :ok, else: {:error, {:invalid_amount, amount}}
   end
 
   defp valid_amount(amount), do: {:error, {:invalid_amount, amount}}
+
+  defp usable?(%Decimal{exp: exp}) when exp > 64 or exp < -64, do: false
+
+  defp usable?(%Decimal{} = amount),
+    do: not Decimal.inf?(amount) and not Decimal.nan?(amount) and Decimal.positive?(amount)
 
   # `claim_rewards/4`'s amount is optional (absent claims the maximum), but a PRESENT one is
   # held to the same rule as every other write here. A float or integer used to raise
@@ -356,6 +369,16 @@ defmodule DpExchange.Coinbase.Prime do
   # negative `Decimal` was sent to the venue as given.
   defp valid_claim_amount(nil), do: :ok
   defp valid_claim_amount(amount), do: valid_amount(amount)
+
+  # `opts[:extra]` is a map of the venue's own fields. A string or a list of non-pairs raised
+  # `Protocol.UndefinedError` from `Map.new/2` inside the caller's process, after the amount
+  # had been validated and before anything was sent.
+  defp valid_extra(opts) do
+    case Config.opt(opts, :extra, %{}) do
+      extra when is_map(extra) -> :ok
+      other -> {:error, {:invalid_extra, other}}
+    end
+  end
 
   defp valid_asset(asset) when is_binary(asset) and asset != "", do: :ok
   defp valid_asset(asset), do: {:error, {:invalid_asset, asset}}
@@ -387,10 +410,21 @@ defmodule DpExchange.Coinbase.Prime do
   defp valid_key(opts) do
     case Keyword.get(opts, :idempotency_key) do
       nil -> :ok
-      key when is_binary(key) and key != "" -> :ok
-      other -> {:error, {:invalid_idempotency_key, other}}
+      key -> uuid_key(key)
     end
   end
+
+  # The spec calls the key "uuid required" (`prime-spec.yaml` 7248-7290). The canonical
+  # 8-4-4-4-12 hex form is checked and anything else refused: a key the venue may reject or
+  # read as another one is not worth sending on a call that moves funds. The keys this
+  # module generates are `IdempotencyKey.generate/0` v4 UUIDs, which satisfy it.
+  defp uuid_key(key) when is_binary(key) do
+    if Regex.match?(~r/\A[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}\z/, key),
+      do: :ok,
+      else: {:error, {:invalid_idempotency_key, key}}
+  end
+
+  defp uuid_key(other), do: {:error, {:invalid_idempotency_key, other}}
 
   # Full notation, never scientific: `Decimal.to_string/1` renders a small quantity as
   # 1E-8, which is not a number this venue reads.
@@ -478,14 +512,27 @@ defmodule DpExchange.Coinbase.Prime do
   # non-map raised inside the caller's process. An atom `:idempotency_key` is the same field
   # spelled differently, so it is checked as the string key it becomes.
   defp valid_claim_body(body) when is_map(body) do
-    case Enum.find(body, fn {key, _value} -> to_string(key) == "idempotency_key" end) do
-      nil -> :ok
-      {_key, value} when is_binary(value) and value != "" -> :ok
-      {_key, value} -> {:error, {:invalid_idempotency_key, value}}
-    end
+    with :ok <- valid_claim_key(body), do: valid_claim_inputs(body)
   end
 
   defp valid_claim_body(body), do: {:error, {:invalid_body, body}}
+
+  defp valid_claim_key(body) do
+    case Enum.find(body, fn {key, _value} -> to_string(key) == "idempotency_key" end) do
+      nil -> :ok
+      {_key, value} -> uuid_key(value)
+    end
+  end
+
+  # `put_claim_amount/2` merges `amount` into the body's `inputs`, and `Map.put/3` on a
+  # non-map `inputs` raised `BadMapError` in the caller's process.
+  defp valid_claim_inputs(body) do
+    case Enum.find(body, fn {key, _value} -> to_string(key) == "inputs" end) do
+      nil -> :ok
+      {_key, inputs} when is_map(inputs) -> :ok
+      {_key, inputs} -> {:error, {:invalid_inputs, inputs}}
+    end
+  end
 
   defp put_claim_amount(body, nil), do: body
 

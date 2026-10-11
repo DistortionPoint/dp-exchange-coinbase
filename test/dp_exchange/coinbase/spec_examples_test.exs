@@ -1070,7 +1070,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
 
       assert {:ok, response} =
                Prime.stake_portfolio(@prime_credentials, "pf-1", "eth", Decimal.new("16"),
-                 idempotency_key: "test-key-1",
+                 idempotency_key: "6f1d2a40-0000-4000-8000-000000000011",
                  plug: capturing(body, me),
                  retry_attempts: 0
                )
@@ -1083,7 +1083,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       assert Map.keys(decoded) |> Enum.sort() == ["amount", "currency_symbol", "idempotency_key"]
       assert decoded["currency_symbol"] == "ETH"
       assert decoded["amount"] == "16"
-      assert decoded["idempotency_key"] == "test-key-1"
+      assert decoded["idempotency_key"] == "6f1d2a40-0000-4000-8000-000000000011"
     end
 
     test "unstake_portfolio/5 sends idempotency_key, currency_symbol, amount to the unstake path" do
@@ -1092,7 +1092,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
 
       assert {:ok, _response} =
                Prime.unstake_portfolio(@prime_credentials, "pf-1", "eth", Decimal.new("16"),
-                 idempotency_key: "test-key-2",
+                 idempotency_key: "6f1d2a40-0000-4000-8000-000000000012",
                  plug: capturing(body, me),
                  retry_attempts: 0
                )
@@ -1112,7 +1112,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
 
       assert {:ok, response} =
                Prime.stake_wallet(@prime_credentials, "pf-1", "wal-1", "eth", Decimal.new("16"),
-                 idempotency_key: "test-key-3",
+                 idempotency_key: "6f1d2a40-0000-4000-8000-000000000013",
                  plug: capturing(body, me),
                  retry_attempts: 0
                )
@@ -1125,7 +1125,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
 
       decoded = Jason.decode!(raw)
 
-      assert decoded["idempotency_key"] == "test-key-3"
+      assert decoded["idempotency_key"] == "6f1d2a40-0000-4000-8000-000000000013"
       assert decoded["inputs"] == %{"amount" => "16"}
       refute Map.has_key?(decoded, "currency")
       refute Map.has_key?(decoded, "currency_symbol")
@@ -1137,7 +1137,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
 
       assert {:ok, _response} =
                Prime.unstake_wallet(@prime_credentials, "pf-1", "wal-1", "eth", Decimal.new("8"),
-                 idempotency_key: "test-key-4",
+                 idempotency_key: "6f1d2a40-0000-4000-8000-000000000014",
                  plug: capturing(body, me),
                  retry_attempts: 0
                )

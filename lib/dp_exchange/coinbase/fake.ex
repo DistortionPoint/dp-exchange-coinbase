@@ -468,6 +468,13 @@ defmodule DpExchange.Coinbase.Fake do
 
   @impl true
   def get_trade_history(credentials, opts) do
+    # The real function's local filter checks first, then the credential, in that order.
+    with :ok <- Rest.validate_fill_filters(opts) do
+      do_get_trade_history(credentials, opts)
+    end
+  end
+
+  defp do_get_trade_history(credentials, opts) do
     with_credentials(credentials, fn ->
       # A REVERSAL alongside the FILL, because that is the distinction a consumer must handle:
       # summing a mixed list produces a position and a cost basis that are both wrong and both
@@ -523,9 +530,11 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   defp matches?(nil, _actual), do: true
+  defp matches?(wanted, actual) when is_list(wanted), do: actual in wanted
   defp matches?(wanted, actual), do: wanted == actual
 
   defp canonical_symbol(nil), do: nil
+  defp canonical_symbol(symbols) when is_list(symbols), do: Enum.map(symbols, &canonical_symbol/1)
   defp canonical_symbol(symbol), do: SymbolFormat.to_canonical_symbol(symbol)
 
   defp after_start?(_at, nil), do: true
@@ -1246,6 +1255,13 @@ defmodule DpExchange.Coinbase.Fake do
   # open BTC-USD order — the "plausible answer to a question not asked" this fake must not give.
   @impl true
   def get_orders(credentials, opts \\ []) do
+    # The real function's local filter checks first, then the credential, in that order.
+    with :ok <- Rest.validate_order_filters(opts) do
+      do_get_orders(credentials, opts)
+    end
+  end
+
+  defp do_get_orders(credentials, opts) do
     with_credentials(credentials, fn ->
       # The canned order, unless it was cancelled here and so is stored, then what this
       # process placed in id order.
@@ -1286,7 +1302,7 @@ defmodule DpExchange.Coinbase.Fake do
   def preview_order(credentials, request, _opts \\ []) do
     with_injection(fn ->
       # The same request checks `place_order/3` runs, then the credential — as the real path.
-      with :ok <- Rest.validate_order_request(request),
+      with :ok <- Rest.validate_order_request(request, :preview),
            :ok <- Rest.validate_credentials(credentials) do
         {:ok,
          %{
