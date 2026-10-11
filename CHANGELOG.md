@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.110] - 2026-10-11
+
 ### Fixed
 
 Found by reading the load, security and leftovers paths of `lib/`.
