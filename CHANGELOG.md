@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.104] - 2026-10-11
+
 ### Fixed
 
 - **A finite number with an absurd exponent was admitted as a price.** `"1e999999999"` passed
