@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.105] - 2026-10-11
+
 ### Fixed
 
 Found by reading the order, edit, sweep, fill, Prime and user-channel code against
