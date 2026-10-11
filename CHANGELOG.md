@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.101] - 2026-10-11
+
 ### Fixed
 
 Found by reading the socket, feed, Prime and signing code against
