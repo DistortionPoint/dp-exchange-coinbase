@@ -20,6 +20,73 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Error text quotes a venue body bounded.** An unexpected HTTP status put `inspect(body)`
+  into `{:exchange_error, :coinbase, _}`, and a socket `error` frame with a non-string
+  message put `inspect(frame)` into a notice, so a CDN error page or an oversized frame
+  became the message. Both are quoted bounded now (`limit: 50`, `printable_limit` 2_048
+  and 1_024), as Core does.
+
+Found by reading the private surface of `rest.ex`, `prime.ex` and `fake.ex` against
+`docs/reference/coinbase/openapi/at-spec.yaml` and `prime-spec.yaml`.
+
+- **Seven calls raised `FunctionClauseError` in the caller's process for a non-string id.**
+  `get_payment_method/3`, `get_portfolio_breakdown/3`, `delete_portfolio/3`,
+  `rename_portfolio/4`, `commit_conversion/3`, `get_conversion/3` and `get_futures_position/3`
+  guarded on `is_binary/1` with no fallback. All now answer
+  `{:error, {:invalid_id, name, value}}` through the public `Rest.validate_id/2`, which the
+  fake shares (it also now refuses `""`/`nil` order ids on `get_order/3`, `cancel_order/3`,
+  `replace_order/4` and `preview_replace/4`, as the real calls do).
+- **Enum filters went to the venue as given, or raised in the query encoder.** `get_fees/2`
+  and `get_trade_volume/2` (`:product_type`, `:contract_expiry_type`, `:product_venue`),
+  `list_portfolios/1` (`:portfolio_type`) and `get_current_margin_window/2`
+  (`:margin_profile_type`) are checked against the spec's enums:
+  `{:error, {:invalid_option, key, value}}`. `get_portfolio_breakdown/3`'s `:currency` must be
+  a non-empty string. The fake runs the same checks.
+- **`get_balances/2` / `get_accounts/2` sent any `:limit`.** A map raised
+  `Protocol.UndefinedError`; `0`, `-1` or `100000` went out unmeasured. The spec's "max 250"
+  now bounds it: an integer in `1..250` or `{:error, {:invalid_limit, v}}`.
+- **`get_trade_history/2` forwarded `:order_id`, `:start` and `:end` unchecked.** A map in any
+  of them raised; a string bound or an inverted window went out unmeasured. `:order_id` is a
+  string or list of strings, `:start`/`:end` are `DateTimes` with `:start` before `:end`
+  (`{:invalid_order_id, v}`, `{:invalid_time, :start | :end, v}`,
+  `{:invalid_range, start: s, end: e}`); the fake runs the same check
+  (`Rest.validate_fill_filters/1`).
+- **`quote_conversion/5` sent `null` for a missing account; `transfer_internal/4` sent `null`
+  for a missing asset.** Both are now refused (`{:invalid_id, :from | :to, v}`,
+  `{:invalid_asset, v}`), and an empty `from`/`to` (conversion commit and read, transfer) or
+  an empty portfolio name (`create_portfolio/2`, `rename_portfolio/4`) is refused like a
+  missing one. The fake used to accept an unchecked amount and asset on both; it now calls
+  `Rest.validate_conversion_quote/3` and `Rest.validate_transfer/3`.
+- **The fake's conversion quote always issued the id `convert-1`**, so a second quote
+  overwrote a first that had been committed. Ids are now per quote.
+- **The fake's `close_position/3` checked nothing but the credential.** A `nil` symbol, an
+  empty `client_order_id` or a zero `size` were "closed". It runs
+  `Rest.validate_close_request/2`, the check `Rest.close_position/3` runs.
+- **`schedule_futures_sweep/2` and `cancel_futures_sweep/2` returned `{:ok, _}` for a `200`
+  carrying `success: false`.** Both response schemas are one `success` boolean, and a decline
+  on a call that moves funds read as a green light. It is now `{:refused, :sweep_not_scheduled}`
+  / `{:refused, :sweep_not_cancelled}`. A body that does not carry `success` is passed through
+  as before; the spec has no example of one and what a real success looks like beyond
+  `success: true` is unmeasured.
+- **A refused order edit reported the unset edit reason over a stated preview reason.**
+  `EditOrderError` carries `edit_failure_reason` and `preview_failure_reason`, each with an
+  `UNKNOWN_*` zero value; `{:refused, {:edit_rejected, reason}}` now carries the first one
+  that is set (the edit reason when neither is).
+- **`Prime.query_transaction_validators/3` forwarded any list as `transaction_ids`.** The spec
+  allows at most 100 string ids; anything else is
+  `{:error, {:invalid_transaction_ids, ids}}` and nothing is signed.
+
+### Documentation
+
+- `usage-rules.md` told you to narrow a truncated `get_orders/2` by "a date range"; that call
+  sends no date option. Corrected, `:limit` is stated as a page size rather than a cap, and
+  the new refusals are listed.
+- `Rest.get_trade_history/2`'s doc now says `:limit` is the venue's page size and the walk
+  follows the cursor past it; whether the venue withholds the cursor at `limit` was not
+  measured.
+
 ## [0.3.106] - 2026-10-11
 
 ### Fixed

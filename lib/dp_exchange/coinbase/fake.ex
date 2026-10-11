@@ -380,8 +380,8 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_balances(credentials, _opts) do
-    with_credentials(credentials, fn ->
+  def get_balances(credentials, opts) do
+    with_checks(credentials, Rest.validate_balance_options(opts), fn ->
       # A held amount that is not zero, so a consumer reading `available_balance` as the
       # total fails here rather than in production. The real venue reports both and no total.
       available = Decimal.new("1.25")
@@ -412,7 +412,7 @@ defmodule DpExchange.Coinbase.Fake do
 
   @impl true
   def get_accounts(credentials, opts) do
-    with_credentials(credentials, fn ->
+    with_checks(credentials, Rest.validate_account_options(opts), fn ->
       accounts = [
         %{
           "uuid" => "8bfc20d7-f7c6-4422-bf07-8243ca4169fe",
@@ -438,8 +438,8 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_fees(credentials, _opts) do
-    with_credentials(credentials, fn ->
+  def get_fees(credentials, opts) do
+    with_checks(credentials, Rest.validate_summary_filters(opts), fn ->
       # A promotion running, so the two tiers differ — the case a consumer that read only one
       # of them would get wrong.
       {:ok,
@@ -539,11 +539,11 @@ defmodule DpExchange.Coinbase.Fake do
 
   defp after_start?(_at, nil), do: true
   defp after_start?(at, %DateTime{} = start), do: DateTime.compare(at, start) == :gt
-  defp after_start?(_at, _unreadable), do: true
 
+  # `Rest.validate_fill_filters/1` has already refused any bound that is not a `DateTime`, so
+  # there is no "unreadable bound" to wave through here.
   defp before_end?(_at, nil), do: true
   defp before_end?(at, %DateTime{} = finish), do: DateTime.compare(at, finish) == :lt
-  defp before_end?(_at, _unreadable), do: true
 
   # Streaming, in memory. The fake pushes immediately on subscribe, which is what the
   # real venue's first tick does from the caller's side — and the caller cannot tell the
@@ -900,15 +900,20 @@ defmodule DpExchange.Coinbase.Fake do
 
   @impl true
   def quote_conversion(from, to, amount, opts \\ []) do
-    with_credentials(opts_credentials(opts), fn ->
+    checked = Rest.validate_conversion_quote(from, to, amount)
+
+    with_checks(opts_credentials(opts), checked, fn ->
       # `:quoted`, and no expiry — the two things a consumer must handle. A fake that returned
       # `:settled` would let one ship code that never commits.
-      # Remembered, so a commit or a read names a conversion this fake actually quoted.
-      Process.put(@conversions_key, Map.put(conversions(), "convert-1", :quoted))
+      # Remembered, so a commit or a read names a conversion this fake actually quoted. A new
+      # id per quote, as the venue issues: one fixed id made a second quote overwrite the
+      # state of a first that had been committed.
+      id = "convert-" <> Integer.to_string(map_size(conversions()) + 1)
+      Process.put(@conversions_key, Map.put(conversions(), id, :quoted))
 
       {:ok,
        %Types.Conversion{
-         id: "convert-1",
+         id: id,
          status: :quoted,
          from_asset: from,
          to_asset: to,
@@ -929,7 +934,8 @@ defmodule DpExchange.Coinbase.Fake do
       # Both accounts or nothing, as in the package: committing against accounts the caller
       # did not name converts between the wrong two balances. Then the credential, then the
       # venue's own answer about the id — the real order.
-      with {:ok, from, to} <- Rest.convert_accounts(opts),
+      with :ok <- Rest.validate_id(id, :trade_id),
+           {:ok, from, to} <- Rest.convert_accounts(opts),
            :ok <- Rest.validate_credentials(opts_credentials(opts)),
            {:ok, _status} <- fake_conversion(id) do
         Process.put(@conversions_key, Map.put(conversions(), id, :committed))
@@ -955,7 +961,8 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def get_conversion(id, opts \\ []) do
     with_injection(fn ->
-      with {:ok, from, to} <- Rest.convert_accounts(opts),
+      with :ok <- Rest.validate_id(id, :trade_id),
+           {:ok, from, to} <- Rest.convert_accounts(opts),
            :ok <- Rest.validate_credentials(opts_credentials(opts)),
            {:ok, known} <- fake_conversion(id) do
         {:ok,
@@ -993,8 +1000,8 @@ defmodule DpExchange.Coinbase.Fake do
   def convert(_from, _to, _amount, _opts \\ []), do: Venue.not_supported()
 
   @impl true
-  def get_trade_volume(credentials, _opts \\ []) do
-    with_credentials(credentials, fn ->
+  def get_trade_volume(credentials, opts \\ []) do
+    with_checks(credentials, Rest.validate_summary_filters(opts), fn ->
       # The Advanced Trade and Pro totals ride alongside the breakdown rather than being
       # folded into it: the venue documents the first as non-inclusive of the second, so
       # adding either to the breakdown double counts.
@@ -1013,7 +1020,7 @@ defmodule DpExchange.Coinbase.Fake do
 
   @impl true
   def list_portfolios(opts \\ []) do
-    with_credentials(opts_credentials(opts), fn ->
+    with_checks(opts_credentials(opts), Rest.validate_portfolio_filter(opts), fn ->
       # A deleted one alongside a live one: the venue keeps deleted portfolios in the listing
       # because old orders still name them, and a fake that returned only live ones would let
       # a consumer treat a historical id as one that never existed.
@@ -1111,7 +1118,9 @@ defmodule DpExchange.Coinbase.Fake do
 
   @impl true
   def rename_account(id, name, opts \\ []) do
-    with_credentials(opts_credentials(opts), fn ->
+    checked = Rest.validate_portfolio_rename(id, name)
+
+    with_checks(opts_credentials(opts), checked, fn ->
       {:ok,
        %Types.Portfolio{
          id: id,
@@ -1215,7 +1224,7 @@ defmodule DpExchange.Coinbase.Fake do
   def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
   @impl true
   def cancel_order(credentials, order_id, _opts \\ []) do
-    with_credentials(credentials, fn ->
+    with_checks(credentials, Rest.validate_id(order_id, :order_id), fn ->
       # The fake refuses the same way the venue does: an order that is not open cannot be
       # cancelled, and saying :ok would let a consumer's retry logic go untested.
       cancel_found(find_order(order_id), order_id)
@@ -1240,7 +1249,7 @@ defmodule DpExchange.Coinbase.Fake do
 
   @impl true
   def get_order(credentials, order_id, _opts \\ []) do
-    with_credentials(credentials, fn ->
+    with_checks(credentials, Rest.validate_id(order_id, :order_id), fn ->
       case find_order(order_id) do
         {:ok, order} -> {:ok, order}
         # The venue's 404, which `Rest` classifies `{:refused, :not_listed}`. This said
@@ -1328,7 +1337,7 @@ defmodule DpExchange.Coinbase.Fake do
       # on an edit the real venue refuses — `EditOrderRequest` declares order_id, price AND
       # size all required (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852), the same
       # requirement `Rest.replace_order/4` enforces — and `Rest`'s own check is what runs.
-      with :ok <- Rest.validate_order_edit(changes),
+      with :ok <- Rest.validate_order_edit(order_id, changes),
            :ok <- Rest.validate_credentials(credentials) do
         # Read back, as the real package does: the venue's edit response carries no order.
         # Both edited fields show in it — the size was left at the original, so the read-back
@@ -1362,7 +1371,7 @@ defmodule DpExchange.Coinbase.Fake do
       # The same edit surface replace_order/4 enforces — price and size, both required.
       # Anything less is an edit the venue refuses, and a fake that priced it would let a
       # consumer's suite go green on a call that cannot be made.
-      with :ok <- Rest.validate_order_edit(changes),
+      with :ok <- Rest.validate_order_edit(order_id, changes),
            :ok <- Rest.validate_credentials(credentials) do
         {:ok,
          %{
@@ -1382,8 +1391,8 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def close_position(credentials, symbol, _opts \\ []) do
-    with_credentials(credentials, symbol, fn ->
+  def close_position(credentials, symbol, opts \\ []) do
+    with_checks(credentials, symbol, Rest.validate_close_request(symbol, opts), fn ->
       # Side stays nil, as it does in the real package: the venue never states it and this
       # package never read the position. A fake that filled in :sell would teach a consumer
       # to rely on a field that is nil in production.
@@ -1432,18 +1441,21 @@ defmodule DpExchange.Coinbase.Fake do
 
   @impl true
   def get_payment_method(credentials, id, _opts \\ []) do
-    with_credentials(credentials, fn ->
+    with_checks(credentials, Rest.validate_id(id, :payment_method_id), fn ->
       {:ok, %{"id" => id, "type" => "ACH", "verified" => true, "allow_withdraw" => false}}
     end)
   end
 
   @impl true
-  def transfer_internal(_asset, _amount, opts, request_opts) do
+  def transfer_internal(asset, amount, opts, request_opts) do
     with_injection(fn ->
-      # Both uuids or nothing. A fake that defaulted one would let a consumer ship a move
-      # between portfolios it never named. Merged and read as the facade does (`opts` over
-      # `request_opts`), then the credential from `request_opts` — the real order.
-      with {:ok, from, to} <- Rest.transfer_portfolios(Keyword.merge(request_opts, opts)),
+      # The amount, the asset and both uuids, or nothing. A fake that defaulted one would let a
+      # consumer ship a move between portfolios it never named. Merged and read as the facade
+      # does (`opts` over `request_opts`), then the credential from `request_opts` — the real
+      # order.
+      merged = Keyword.merge(request_opts, opts)
+
+      with {:ok, from, to} <- Rest.validate_transfer(asset, amount, merged),
            :ok <- Rest.validate_credentials(opts_credentials(request_opts)) do
         # `MovePortfolioFundsResponse` (at-spec.yaml:7934) is the two uuids and nothing else. A
         # `funds` echo was a field a consumer could come to read that the venue never sends.
@@ -1491,6 +1503,18 @@ defmodule DpExchange.Coinbase.Fake do
   defp with_credentials(credentials, symbol \\ nil, fun) do
     with_injection(symbol, fn ->
       with :ok <- Rest.validate_credentials(credentials), do: fun.()
+    end)
+  end
+
+  # `with_credentials/3` for a call whose real function checks its arguments first.
+  # `checked` is the (pure) result of the `Rest.validate_*` the real path runs before it builds
+  # any request: the injected outcome still comes first, then the local checks, then the
+  # credential, then the answer — the real order, and each from the real function's own check.
+  defp with_checks(credentials, symbol \\ nil, checked, fun) do
+    with_injection(symbol, fn ->
+      with :ok <- checked, :ok <- Rest.validate_credentials(credentials) do
+        fun.()
+      end
     end)
   end
 

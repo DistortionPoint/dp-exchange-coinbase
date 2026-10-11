@@ -734,7 +734,9 @@ futures account; `list_futures_sweeps/2` reports the queue. **Omitting the amoun
 every available excess dollar** — the venue's default, not this package's. Only an
 *absent* `:usd_amount` means that: a present one must be a finite positive number
 (`{:error, {:invalid_amount, value}}` otherwise), so `""`, `0` or a typo cannot turn into
-"sweep everything" at the venue.
+"sweep everything" at the venue. A `200` saying `success: false` on either
+`schedule_futures_sweep/2` or `cancel_futures_sweep/2` is `{:refused, :sweep_not_scheduled}`
+or `{:refused, :sweep_not_cancelled}`, never `{:ok, _}`.
 
 **Perpetual orders carry `:leverage` and `:margin_type` when you name them.**
 `place_order/3` and `preview_order/3` send `leverage` and `margin_type` (`:cross`,
@@ -979,10 +981,49 @@ Each walk is bounded. A venue that keeps saying `has_next` answers
 `{:error, :too_many_account_pages}`, `{:error, :too_many_fill_pages}` or
 `{:error, :too_many_order_pages}` rather than looping inside your call. Those are errors
 about **this package's limit**, not statements about your account: retry with a narrower
-filter (`:symbol`, `:status`, or a date range) rather than treating them as "no data".
+filter (`:symbol` or `:status` on orders; `:symbol`, `:order_id` or `:start`/`:end` on fills)
+rather than treating them as "no data". `get_orders/2` has no date option: the venue's
+`start_date`/`end_date` are not sent.
+
+`:limit` is the venue's **page size**, not a cap: the walk collects every page, so take what
+you want from the list. On `get_balances/2` and `get_accounts/2` it must be an integer in
+`1..250` (the venue's "max 250"); on orders and fills any positive integer.
 
 `get_orders/2` returned one page until 0.3.36. If you built your own cursor loop on top of
 it, it now returns the whole set and your loop will see a single page with nothing after it.
+
+## A malformed argument to a private call is refused by name, before anything is sent
+
+None of these raises in your process, and the fake runs the same check in the same order
+(injected outcome, then the argument check, then the credential):
+
+- **An id that becomes a path segment** — a payment method, portfolio, trade, futures
+  product, order or account uuid — must be a non-empty string:
+  `{:error, {:invalid_id, name, value}}` (`name` is `:payment_method_id`, `:portfolio_uuid`,
+  `:trade_id`, `:product_id`, `:order_id` or `:uuid`). `nil`, a number or a map used to raise
+  `FunctionClauseError` on `get_payment_method/3`, `get_portfolio_breakdown/3`,
+  `delete_portfolio/3`, `rename_account/3`, `commit_conversion/2`, `get_conversion/2` and
+  `get_futures_position/3`.
+- **Enum filters are sent exactly as the venue spells them.** `get_fees/2` and
+  `get_trade_volume/2` take `:product_type`, `:contract_expiry_type`, `:product_venue`;
+  `list_portfolios/1` takes `:portfolio_type`; `get_current_margin_window/2` takes
+  `:margin_profile_type`. A word outside the spec's enum, or a non-string, is
+  `{:error, {:invalid_option, key, value}}`.
+- **Fill filters.** `get_trade_history/2` needs `:order_id` to be a non-empty string or list
+  of them (`{:invalid_order_id, v}`) and `:start` / `:end` to be `DateTime`s
+  (`{:invalid_time, :start | :end, v}`), with `:start` before `:end`
+  (`{:invalid_range, start: s, end: e}`). Strings used to be forwarded as given.
+- **Conversions and transfers.** `quote_conversion/4` needs a finite positive `Decimal`, and
+  `from`/`to` must be non-empty strings; `opts[:from]`/`opts[:to]` on commit and read, and
+  on `transfer_internal/4`, may not be `""`. `transfer_internal/4` also needs a non-empty
+  asset (`{:invalid_asset, v}`). A portfolio name (`create_account/1`, `rename_account/3`)
+  may not be `""` (`{:error, :name_required}`).
+- **`Prime.query_transaction_validators/3`** takes at most 100 transaction ids, each a
+  non-empty string (`{:error, {:invalid_transaction_ids, ids}}`) — the spec's stated limit.
+- **`replace_order/4`'s refusal reason.** The venue's edit error carries both
+  `edit_failure_reason` and `preview_failure_reason`, each starting at an `UNKNOWN_*` "not
+  set". `{:refused, {:edit_rejected, reason}}` carries the first one that is set, else the
+  edit reason.
 
 ## Error shapes that mean "do not act on this answer"
 

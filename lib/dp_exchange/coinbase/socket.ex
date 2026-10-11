@@ -785,7 +785,13 @@ defmodule DpExchange.Coinbase.Socket do
   # A non-string `message` made `String.downcase/1` raise inside `handle_frame`, and that
   # took the whole connection down. It is still the venue reporting an error.
   defp dispatch(%{"type" => "error"} = frame, state) do
-    notify(state, Notice.new(:degraded, :coinbase, details: %{venue_error: inspect(frame)}))
+    notify(
+      state,
+      Notice.new(:degraded, :coinbase,
+        details: %{venue_error: inspect(frame, limit: 50, printable_limit: 1_024)}
+      )
+    )
+
     state
   end
 

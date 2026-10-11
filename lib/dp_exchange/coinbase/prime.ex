@@ -145,7 +145,9 @@ defmodule DpExchange.Coinbase.Prime do
   **required** — `ListTransactionValidatorsRequest.transaction_ids` is a required field
   (docs/reference/coinbase/openapi/prime-spec.yaml:7350) with no documented "every
   transaction" meaning for its absence, so a caller who omits it is refused locally rather
-  than sent to the venue with a body that invents an empty list on its behalf.
+  than sent to the venue with a body that invents an empty list on its behalf. Every id must
+  be a non-empty string and there may be at most 100 (the spec's stated maximum), else
+  `{:error, {:invalid_transaction_ids, ids}}` and nothing is signed.
   `opts[:extra]` carries the venue's other documented fields (`cursor`, `limit`,
   `sort_direction`) as given, because reshaping them would be a second place to be wrong
   about a vocabulary only Prime defines.
@@ -157,18 +159,37 @@ defmodule DpExchange.Coinbase.Prime do
          :ok <- valid_extra(opts) do
       case Config.opt(opts, :transaction_ids, nil) do
         ids when is_list(ids) and ids != [] ->
-          post(
-            "/portfolios/#{portfolio_id}/staking/transaction-validators/query",
-            Map.merge(extra_fields(opts), %{"transaction_ids" => ids}),
-            credentials: credentials,
-            opts: opts
-          )
+          with :ok <- valid_transaction_ids(ids) do
+            post(
+              "/portfolios/#{portfolio_id}/staking/transaction-validators/query",
+              Map.merge(extra_fields(opts), %{"transaction_ids" => ids}),
+              credentials: credentials,
+              opts: opts
+            )
+          end
 
         _missing_or_empty ->
           {:error, :missing_transaction_ids}
       end
     end
   end
+
+  # The spec's `transaction_ids` is an array of strings, "maximum of 100 transaction IDs
+  # allowed per request" (prime-spec.yaml, `ListTransactionValidators`). A non-string element
+  # or a 101st id is a request the venue documents as invalid, so it is refused locally; an
+  # improper list is not a list of ids either.
+  @max_transaction_ids 100
+
+  defp valid_transaction_ids(ids) do
+    if transaction_ids?(ids, 0), do: :ok, else: {:error, {:invalid_transaction_ids, ids}}
+  end
+
+  defp transaction_ids?([id | rest], count)
+       when is_binary(id) and id != "" and count < @max_transaction_ids,
+       do: transaction_ids?(rest, count + 1)
+
+  defp transaction_ids?([], _count), do: true
+  defp transaction_ids?(_other, _count), do: false
 
   @doc """
   Stakes `amount` of `asset` **on one wallet** —
