@@ -20,6 +20,54 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Found by reading the order, cancel, edit, order-history, fill, account and portfolio code
+against `docs/reference/coinbase/openapi/at-spec.yaml`.
+
+- **`has_next: true` with no cursor returned the first page as the whole list.**
+  `get_balances/2`, `get_accounts/2` and `get_orders/2` stopped at page one and answered
+  `{:ok, page_one}`: every row real, the rest silently missing. It is now
+  `{:error, :pagination_cursor_missing}`. (An existing test pinned the old behaviour; it
+  now pins the error.)
+- **`proof_token_required: true` on an empty page read as "no orders" / "no fills".** The
+  spec says the data is withheld pending an EU SCA proof token. `get_orders/2` and
+  `get_trade_history/2` answer `{:refused, :proof_token_required}` for such a page.
+- **A fill with no `trade_type` was dropped without a word** by the `FILL`-only filter
+  (`nil` is in no list), leaving a hole in the history. It is now
+  `{:error, {:missing_required_field, :trade_type}}`; a stated, unwanted type is still
+  excluded as documented.
+- **Money fields were stringified, not validated.** `place_order/3`, `preview_order/3`,
+  `replace_order/4`, `preview_replace/4` and `close_position/3` sent a float such as
+  `1.0e-8` as `"1.0e-8"`, and sent `"abc"`, `""`, `0` and negative amounts for the venue to
+  reject. `:quantity`, `:quote_size`, `:price`, `:stop_price` (and `size`) are now parsed to
+  a finite, positive `Decimal`, always sent in plain notation, and refused locally with
+  `{:error, {:invalid_order_amount, field, value}}`.
+- **An edit with `price: nil` or `quantity: nil` counted as "given"** and sent `""`. It is
+  now `{:error, :missing_required_edit_field}` (or `:no_order_changes` when both are nil).
+- **`side` was upcased and sent whatever it was** (`:hold` went out as `"HOLD"`). Only
+  `:buy` / `:sell` (or those strings) are accepted; anything else is
+  `{:error, {:invalid_side, value}}`. The placed `Order` always carries the atom.
+- **`client_order_id: ""` was sent** as the venue's idempotency key (`"" || generate()`
+  kept the empty string). A supplied id must be a non-empty string, on `place_order/3` and
+  `close_position/3`; otherwise `{:error, {:invalid_client_order_id, value}}`.
+- **`success: true` with no `success_response` was `{:error, :unexpected_response_shape}`**
+  on `place_order/3` and `close_position/3`, telling a caller nothing was placed when
+  `success` is the only field the spec requires. It is accepted with `id: nil`, as an
+  unreadable `success_response` already was; an `order_id` that is not a non-empty string
+  is `nil` rather than carried as whatever it was.
+- **An order naming no `order_id` was returned** by `get_order/3` / `get_orders/2` with
+  `id: nil`, untrackable inside a list that looks complete. It is now
+  `{:error, {:missing_required_field, :order_id}}`.
+- **Caller ids were interpolated into URL paths raw.** An order, account or portfolio id
+  such as `"../portfolios"` addressed another resource, and `""` / `nil` addressed the
+  collection endpoints. Ids are percent-encoded, and `get_order/3`, `cancel_order/3`,
+  `replace_order/4`, `preview_replace/4` and `get_accounts/2` (`opts[:uuid]`) refuse an id
+  that is not a non-empty string with `{:error, {:invalid_id, field, value}}` before
+  anything is sent.
+- `place_order/3`'s returned `Order` now echoes `stop_price`, and its `@doc` records that a
+  retry may come back refused with `DUPLICATE_CLIENT_ORDER_ID` for an order that was placed.
+
 ## [0.3.98] - 2026-10-10
 
 ### Fixed

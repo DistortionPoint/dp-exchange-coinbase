@@ -156,11 +156,41 @@ defmodule DpExchange.Coinbase.AccountsTest do
       assert second =~ "cursor=page2"
     end
 
-    test "has_next true with no cursor stops rather than repeating the same page" do
-      body = %{"accounts" => [account()], "has_next" => true}
+    test "has_next true with no cursor is an error, not a silently short balance list" do
+      # It used to return page one as though it were everything: every number real, the
+      # rest of the account list never seen.
+      for body <- [
+            %{"accounts" => [account()], "has_next" => true},
+            %{"accounts" => [account()], "has_next" => true, "cursor" => ""}
+          ] do
+        assert {:error, :pagination_cursor_missing} =
+                 Rest.get_balances(@credentials, plug: responding(body), retry_attempts: 0)
+      end
+    end
 
-      assert {:ok, [_only]} =
-               Rest.get_balances(@credentials, plug: responding(body), retry_attempts: 0)
+    test "a single-account read refuses an id that would not name one" do
+      for bad <- ["", :atom, 5] do
+        opts = [uuid: bad, plug: fn _conn -> raise "must not be sent" end, retry_attempts: 0]
+        assert {:error, {:invalid_id, :uuid, ^bad}} = Rest.get_accounts(@credentials, opts)
+      end
+    end
+
+    test "an account uuid is percent-encoded into the path" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"account" => %{"uuid" => "x"}}))
+      end
+
+      assert {:ok, [_one]} =
+               Rest.get_accounts(@credentials, uuid: "a/../b", plug: plug, retry_attempts: 0)
+
+      assert_receive {:path, path}
+      assert path == "/api/v3/brokerage/accounts/a%2F..%2Fb"
     end
 
     test "a server that always says has_next is bounded, not an infinite loop" do
