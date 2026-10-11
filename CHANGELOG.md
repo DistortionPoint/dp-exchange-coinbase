@@ -20,6 +20,61 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_top_of_book/2` answered the first pricebook in the response, whatever its product.**
+  It took `hd(pricebooks)` without comparing its `product_id` with the product asked for,
+  so a response carrying another product's book was reported as the requested one's quote.
+  The matching book is now selected by `product_id`; when none matches the answer is
+  `{:error, {:product_not_in_response, product_id}}`.
+- **The fake's `replace_order/4` and `close_position/3` returned ids nothing could read back.**
+  `close_position/3` always answered `fake-close-1`, which `get_order/3` and `cancel_order/3`
+  called unknown; `replace_order/4` answered success for any id, remembering the edit only if
+  the order had already been stored, so an edit of the canned order read back unedited and an
+  edit of an id never issued returned an order no read could find. `close_position/3` now
+  mints a new id per call and remembers the order (per process, open), and `replace_order/4`
+  always remembers the edited order under its own id, so `get_order/3` and `cancel_order/3`
+  answer both. `replace_order/4` on an id the fake never issued is now `{:refused,
+  :not_listed}`, the venue's 404 on the read-back. (`place_orders/3` is declared absent here
+  and stays `not_supported`.)
+- **A caller's id could rewrite the request path.** `get_payment_method/3`,
+  `commit_conversion/3`, `get_conversion/3` and `get_futures_position/3` interpolated the id
+  raw, so `"a/b?c"` named another resource and `""` turned `/payment_methods/{id}` into the
+  list endpoint, both under a JWT minted for the path as built. The id is now an escaped
+  segment (`.` and `..` included, in every route that escapes one) and an empty id is
+  `{:error, {:invalid_id, name, id}}` before any request.
+- **Empty portfolio uuids, product symbols and listing walks.** `get_portfolio_breakdown/3`,
+  `rename_portfolio/4` and `delete_portfolio/3` with `""` addressed `/portfolios/` (the list;
+  for delete, a request naming no portfolio): now `{:error, {:invalid_id, :portfolio_uuid,
+  ""}}`. Product symbols in `get_price/2`, `get_trades/2`, `get_product/2` and the candles
+  path are escaped as segments. The product catalogue walk (`get_symbols/1`,
+  `get_market_overview/1`, `list_instruments/1`, `get_alias_map/1`) answered a first page as
+  the whole catalogue when `pagination.has_next` was true with no `next_cursor`; it is now
+  `{:error, :pagination_cursor_missing}`, as `/accounts` and `/orders` already were.
+- **Money amounts and enums on writes were passed through unchecked.** `quote_conversion/5`
+  and `transfer_internal/4` raised on a float or string amount and sent zero, negative, NaN
+  or infinite ones; now `{:error, {:invalid_amount, amount}}`. `set_intraday_margin_setting/3`
+  refuses a value outside the spec's three (`{:error, {:invalid_margin_setting, value}}`),
+  `place_order/3` refuses a `stop_direction` outside `STOP_DIRECTION_STOP_UP|DOWN` and a
+  non-boolean `post_only`, and `get_orders/2` refuses a `:status` outside
+  `OrderExecutionStatus` (`{:error, {:invalid_status, value}}`). The venue's handling of
+  those values is unmeasured, so none is sent.
+- **Reads that answered a question not asked.** `get_historical_prices/4` with `start` at or
+  after `end` is `{:error, {:invalid_range, start: _, end: _}}` instead of being sent (see
+  `usage-rules.md`). `get_trades/2` with a `:limit` that is not a positive integer is
+  `{:error, {:invalid_limit, limit}}`.
+- **A negative price or quantity in a `level2` row was a level.** `Socket` accepted any
+  parsable number, so `"price_level": "-1"` or `"new_quantity": "-5"` stood in a snapshot or
+  delta. A row with a non-positive price or a negative quantity is now unreadable, and the
+  event is refused whole with one `:data_quality` notice, as for any unreadable row. A zero
+  quantity (the venue's "removed") is unchanged.
+- **`Prime.claim_rewards/4` crashed or sent an unusable idempotency key from `opts[:body]`.**
+  A non-map body raised in the caller's process; a body carrying `"idempotency_key": ""` or
+  `nil` was kept, and the venue returns the first response for a repeated key. An
+  atom-keyed `:idempotency_key` was sent beside a generated string one. The body must be a
+  map (`{:error, {:invalid_body, body}}`), its key a non-empty string
+  (`{:error, {:invalid_idempotency_key, key}}`), and keys are sent as strings.
+
 ## [0.3.102] - 2026-10-11
 
 ### Fixed

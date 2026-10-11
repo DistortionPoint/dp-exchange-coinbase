@@ -162,6 +162,31 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       assert Jason.decode!(raw)["inputs"] == %{"amount" => "2"}
     end
 
+    test "claiming rewards refuses a body that is not a map or carries an unusable key" do
+      me = self()
+
+      assert {:error, {:invalid_body, "x"}} =
+               Prime.claim_rewards(@credentials, "pf-1", "w-9", opts(me, body: "x"))
+
+      bodies = [%{"idempotency_key" => ""}, %{"idempotency_key" => nil}, %{idempotency_key: 5}]
+
+      for bad <- bodies do
+        assert {:error, {:invalid_idempotency_key, _key}} =
+                 Prime.claim_rewards(@credentials, "pf-1", "w-9", opts(me, body: bad))
+      end
+
+      refute_received {:request, _method, _path, _raw, _headers}
+    end
+
+    test "an atom-keyed idempotency_key in the body is the same field, sent once" do
+      me = self()
+      good = opts(me, body: %{idempotency_key: "mine"})
+      assert {:ok, _result} = Prime.claim_rewards(@credentials, "pf-1", "w-9", good)
+
+      assert_receive {:request, "POST", _path, raw, _headers}, 5_000
+      assert Jason.decode!(raw) == %{"idempotency_key" => "mine"}
+    end
+
     test "the validator query is a POST that reads" do
       me = self()
 

@@ -99,7 +99,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_price(String.t(), keyword()) ::
           {:ok, Types.Quote.t()} | {:error, term()} | {:refused, term()}
   def get_price(symbol, opts) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
+    native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
     credentials = opts_credentials(opts)
 
     path =
@@ -123,7 +123,7 @@ defmodule DpExchange.Coinbase.Rest do
   def get_historical_prices(symbol, timeframe, range, opts) do
     with {:ok, enum} <- granularity_enum(timeframe),
          {:ok, params} <- candle_params(timeframe, range, enum) do
-      native = SymbolFormat.to_exchange_symbol(symbol)
+      native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
 
       # The venue publishes the same candles twice: `/market/products/…` unauthenticated
       # and `/products/…` for a credential. Reading the public one while holding a
@@ -297,13 +297,21 @@ defmodule DpExchange.Coinbase.Rest do
     case request(:get, path, credentials, opts, params) do
       {:ok, %{body: %{"products" => products} = body}} when is_list(products) ->
         collected = [Enum.filter(products, &named_product?/1) | acc]
-        pagination = body["pagination"] || %{}
-        next_cursor = pagination["next_cursor"]
+        pagination = body["pagination"]
+        next_cursor = if is_map(pagination), do: pagination["next_cursor"]
 
-        if pagination["has_next"] == true and is_binary(next_cursor) and next_cursor != "" do
-          all_products(credentials, path, opts, next_cursor, collected, page + 1)
-        else
-          {:ok, collected |> Enum.reverse() |> Enum.concat()}
+        # `has_next: true` with no usable cursor is "there is more" with no way to ask for
+        # it. Stopping returned the first page as the whole catalogue, every row real and the
+        # rest silently missing — the shape `next_cursor/1` refuses for `/accounts`.
+        cond do
+          not is_map(pagination) or pagination["has_next"] != true ->
+            {:ok, collected |> Enum.reverse() |> Enum.concat()}
+
+          is_binary(next_cursor) and next_cursor != "" ->
+            all_products(credentials, path, opts, next_cursor, collected, page + 1)
+
+          true ->
+            {:error, :pagination_cursor_missing}
         end
 
       {:ok, _unexpected} ->
@@ -432,7 +440,16 @@ defmodule DpExchange.Coinbase.Rest do
   # `"x?y=z"` addresses a different resource than the one named, and the JWT is minted for
   # the path as built, so the venue would accept it as legitimate. Only unreserved
   # characters pass through; a venue uuid is made of them.
+  #
+  # `.` and `..` are unreserved yet are path-navigation segments, so they are escaped too.
+  defp segment("."), do: "%2E"
+  defp segment(".."), do: "%2E%2E"
   defp segment(id) when is_binary(id), do: URI.encode(id, &URI.char_unreserved?/1)
+
+  # An id that becomes a path segment must name something: `""` would turn
+  # `/payment_methods/{id}` into the list endpoint and answer the wrong question.
+  defp path_id("", name), do: {:error, {:invalid_id, name, ""}}
+  defp path_id(id, _name) when is_binary(id), do: :ok
 
   # Pages are collected AS PAGES and concatenated once, not folded with `acc ++ page`.
   # `++` copies its left operand, so appending each page to a growing accumulator is
@@ -525,10 +542,14 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_payment_method(map(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_payment_method(credentials, id, opts) when is_binary(id) do
-    case request(:get, "/payment_methods/#{id}", credentials, opts) do
-      {:ok, %{body: %{"payment_method" => method}}} when is_map(method) -> {:ok, method}
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+    # An empty id would be `/payment_methods/`, the LIST endpoint, and an id with `/` or `?`
+    # another path: so it is refused empty and escaped as a segment otherwise.
+    with :ok <- path_id(id, :payment_method_id) do
+      case request(:get, "/payment_methods/#{segment(id)}", credentials, opts) do
+        {:ok, %{body: %{"payment_method" => method}}} when is_map(method) -> {:ok, method}
+        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
     end
   end
 
@@ -554,7 +575,8 @@ defmodule DpExchange.Coinbase.Rest do
   @spec transfer_internal(map(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def transfer_internal(credentials, asset, amount, opts) do
-    with {:ok, from, to} <- transfer_portfolios(opts) do
+    with :ok <- positive_amount(amount),
+         {:ok, from, to} <- transfer_portfolios(opts) do
       body = %{
         "funds" => %{"value" => Decimal.to_string(amount, :normal), "currency" => asset},
         "source_portfolio_uuid" => from,
@@ -814,13 +836,16 @@ defmodule DpExchange.Coinbase.Rest do
       when is_binary(portfolio_uuid) do
     params = put_unless_nil(%{}, "currency", Keyword.get(opts, :currency))
 
-    case request(:get, "/portfolios/#{segment(portfolio_uuid)}", credentials, opts, params) do
-      {:ok, %{body: %{"breakdown" => breakdown}}} when is_map(breakdown) -> {:ok, breakdown}
-      # `GetPortfolioBreakdownResponse` always carries `breakdown`. Any other object used to be
-      # handed back as the breakdown (`{}` read as a portfolio holding nothing); it is an
-      # unreadable answer, not a portfolio.
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+    # `""` would read `/portfolios/`, the LIST, and answer it as a breakdown.
+    with :ok <- path_id(portfolio_uuid, :portfolio_uuid) do
+      case request(:get, "/portfolios/#{segment(portfolio_uuid)}", credentials, opts, params) do
+        {:ok, %{body: %{"breakdown" => breakdown}}} when is_map(breakdown) -> {:ok, breakdown}
+        # `GetPortfolioBreakdownResponse` always carries `breakdown`. Any other object used to
+        # be handed back as the breakdown (`{}` read as a portfolio holding nothing); it is an
+        # unreadable answer, not a portfolio.
+        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
     end
   end
 
@@ -859,15 +884,17 @@ defmodule DpExchange.Coinbase.Rest do
       when is_binary(portfolio_uuid) and is_binary(name) do
     path = "/portfolios/#{segment(portfolio_uuid)}"
 
-    case put_json(path, %{"name" => name}, credentials, opts) do
-      {:ok, %{body: %{"portfolio" => portfolio}}} when is_map(portfolio) ->
-        to_portfolio(portfolio)
+    with :ok <- path_id(portfolio_uuid, :portfolio_uuid) do
+      case put_json(path, %{"name" => name}, credentials, opts) do
+        {:ok, %{body: %{"portfolio" => portfolio}}} when is_map(portfolio) ->
+          to_portfolio(portfolio)
 
-      {:ok, _unexpected} ->
-        {:error, :unexpected_response_shape}
+        {:ok, _unexpected} ->
+          {:error, :unexpected_response_shape}
 
-      {:error, reason} ->
-        classify(reason)
+        {:error, reason} ->
+          classify(reason)
+      end
     end
   end
 
@@ -883,10 +910,15 @@ defmodule DpExchange.Coinbase.Rest do
   @spec delete_portfolio(map(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def delete_portfolio(credentials, portfolio_uuid, opts) when is_binary(portfolio_uuid) do
-    case request(:delete, "/portfolios/#{segment(portfolio_uuid)}", credentials, once(opts)) do
-      {:ok, %{body: %{} = result}} -> {:ok, result}
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+    # `""` would be `DELETE /portfolios/`, a request naming no portfolio at all.
+    with :ok <- path_id(portfolio_uuid, :portfolio_uuid) do
+      path = "/portfolios/#{segment(portfolio_uuid)}"
+
+      case request(:delete, path, credentials, once(opts)) do
+        {:ok, %{body: %{} = result}} -> {:ok, result}
+        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
     end
   end
 
@@ -913,21 +945,34 @@ defmodule DpExchange.Coinbase.Rest do
   @spec quote_conversion(map(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, Types.Conversion.t()} | {:error, term()} | {:refused, term()}
   def quote_conversion(credentials, from, to, amount, opts) do
-    body =
-      %{
-        "from_account" => from,
-        "to_account" => to,
-        "amount" => Decimal.to_string(amount, :normal)
-      }
-      |> put_raw_unless_nil(
-        "trade_incentive_metadata",
-        Keyword.get(opts, :trade_incentive_metadata)
-      )
+    with :ok <- positive_amount(amount) do
+      body =
+        %{
+          "from_account" => from,
+          "to_account" => to,
+          "amount" => Decimal.to_string(amount, :normal)
+        }
+        |> put_raw_unless_nil(
+          "trade_incentive_metadata",
+          Keyword.get(opts, :trade_incentive_metadata)
+        )
 
-    with {:ok, trade} <- convert_trade(post_json("/convert/quote", body, credentials, opts)) do
-      to_conversion(trade, from, to)
+      with {:ok, trade} <- convert_trade(post_json("/convert/quote", body, credentials, opts)) do
+        to_conversion(trade, from, to)
+      end
     end
   end
+
+  # An amount that moves or prices money is a finite, positive `Decimal`. A float or string
+  # raised in `Decimal.to_string/2` inside the caller's process, and zero, a negative, NaN or
+  # infinity was sent to the venue as given.
+  defp positive_amount(%Decimal{} = amount) do
+    if Decimal.nan?(amount) or Decimal.inf?(amount) or not Decimal.positive?(amount),
+      do: {:error, {:invalid_amount, amount}},
+      else: :ok
+  end
+
+  defp positive_amount(other), do: {:error, {:invalid_amount, other}}
 
   @doc """
   Commits a quoted conversion — `POST /convert/trade/{trade_id}`. **This moves funds.**
@@ -940,11 +985,12 @@ defmodule DpExchange.Coinbase.Rest do
   @spec commit_conversion(map(), String.t(), keyword()) ::
           {:ok, Types.Conversion.t()} | {:error, term()} | {:refused, term()}
   def commit_conversion(credentials, trade_id, opts) when is_binary(trade_id) do
-    with {:ok, from, to} <- convert_accounts(opts) do
+    with :ok <- path_id(trade_id, :trade_id),
+         {:ok, from, to} <- convert_accounts(opts) do
       body = %{"from_account" => from, "to_account" => to}
+      path = "/convert/trade/#{segment(trade_id)}"
 
-      with {:ok, trade} <-
-             convert_trade(post_once("/convert/trade/#{trade_id}", body, credentials, opts)) do
+      with {:ok, trade} <- convert_trade(post_once(path, body, credentials, opts)) do
         to_conversion(trade, from, to)
       end
     end
@@ -960,11 +1006,12 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_conversion(map(), String.t(), keyword()) ::
           {:ok, Types.Conversion.t()} | {:error, term()} | {:refused, term()}
   def get_conversion(credentials, trade_id, opts) when is_binary(trade_id) do
-    with {:ok, from, to} <- convert_accounts(opts) do
+    with :ok <- path_id(trade_id, :trade_id),
+         {:ok, from, to} <- convert_accounts(opts) do
       params = %{"from_account" => from, "to_account" => to}
+      path = "/convert/trade/#{segment(trade_id)}"
 
-      with {:ok, trade} <-
-             convert_trade(request(:get, "/convert/trade/#{trade_id}", credentials, opts, params)) do
+      with {:ok, trade} <- convert_trade(request(:get, path, credentials, opts, params)) do
         to_conversion(trade, from, to)
       end
     end
@@ -1094,7 +1141,13 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_futures_position(map(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_futures_position(credentials, product_id, opts) when is_binary(product_id) do
-    case request(:get, "/cfm/positions/#{product_id}", credentials, opts) do
+    with :ok <- path_id(product_id, :product_id) do
+      get_futures_position_at(credentials, product_id, opts)
+    end
+  end
+
+  defp get_futures_position_at(credentials, product_id, opts) do
+    case request(:get, "/cfm/positions/#{segment(product_id)}", credentials, opts) do
       {:ok, %{body: %{"position" => position}}} when is_map(position) -> {:ok, position}
       {:ok, _unexpected} -> {:error, :unexpected_response_shape}
       {:error, reason} -> classify(reason)
@@ -1300,6 +1353,11 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  # The spec's whole enum (docs/reference/coinbase/openapi/at-spec.yaml:10261-10264). A
+  # string outside it is refused locally: the venue's behaviour for one is unmeasured.
+  @margin_settings ~w(INTRADAY_MARGIN_SETTING_UNSPECIFIED INTRADAY_MARGIN_SETTING_STANDARD
+                      INTRADAY_MARGIN_SETTING_INTRADAY)
+
   @doc """
   Sets the account's intraday margin setting — `POST /cfm/intraday/margin_setting`.
 
@@ -1313,13 +1371,17 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec set_intraday_margin_setting(map(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def set_intraday_margin_setting(credentials, setting, opts) when is_binary(setting) do
+  def set_intraday_margin_setting(credentials, setting, opts)
+      when setting in @margin_settings do
     case post_json("/cfm/intraday/margin_setting", %{"setting" => setting}, credentials, opts) do
       {:ok, %{body: %{} = result}} -> {:ok, result}
       {:ok, _unexpected} -> {:error, :unexpected_response_shape}
       {:error, reason} -> classify(reason)
     end
   end
+
+  def set_intraday_margin_setting(_credentials, setting, _opts),
+    do: {:error, {:invalid_margin_setting, setting}}
 
   @doc """
   Which margin window the account is in now — `GET /cfm/intraday/current_margin_window`.
@@ -1651,7 +1713,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_product(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_product(symbol, opts) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
+    native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
     credentials = opts_credentials(opts)
 
     path =
@@ -1780,17 +1842,25 @@ defmodule DpExchange.Coinbase.Rest do
     width = timeframe_seconds(timeframe)
     start = Keyword.get_lazy(range, :start, fn -> DateTime.add(finish, -width * 300, :second) end)
 
-    requested = div(DateTime.diff(finish, start, :second), width)
+    span = DateTime.diff(finish, start, :second)
+    requested = div(span, width)
 
-    if requested > @max_candles do
-      {:error, {:range_too_wide, requested: requested, max: @max_candles}}
-    else
-      {:ok,
-       %{
-         start: to_string(DateTime.to_unix(start)),
-         end: to_string(DateTime.to_unix(finish)),
-         granularity: enum
-       }}
+    cond do
+      # An empty or inverted window is not a request for "no candles": the venue's answer to
+      # `start >= end` is unmeasured, and an empty list would read as "no data".
+      span <= 0 ->
+        {:error, {:invalid_range, start: start, end: finish}}
+
+      requested > @max_candles ->
+        {:error, {:range_too_wide, requested: requested, max: @max_candles}}
+
+      true ->
+        {:ok,
+         %{
+           start: to_string(DateTime.to_unix(start)),
+           end: to_string(DateTime.to_unix(finish)),
+           granularity: enum
+         }}
     end
   end
 
@@ -2011,12 +2081,13 @@ defmodule DpExchange.Coinbase.Rest do
   def get_trades(symbol, opts) do
     case Keyword.get(opts, :limit) do
       nil -> {:error, :missing_limit}
-      limit -> do_get_trades(symbol, limit, opts)
+      limit when is_integer(limit) and limit > 0 -> do_get_trades(symbol, limit, opts)
+      other -> {:error, {:invalid_limit, other}}
     end
   end
 
   defp do_get_trades(symbol, limit, opts) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
+    native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
     credentials = opts_credentials(opts)
 
     path =
@@ -2160,8 +2231,8 @@ defmodule DpExchange.Coinbase.Rest do
       observed_at = DateTime.utc_now()
 
       case request(:get, "/best_bid_ask", credentials, opts, %{"product_ids" => native}) do
-        {:ok, %{body: %{"pricebooks" => [pricebook | _rest]}}} when is_map(pricebook) ->
-          build_top_of_book(native, pricebook, observed_at)
+        {:ok, %{body: %{"pricebooks" => [_first | _rest] = pricebooks}}} ->
+          select_pricebook(native, pricebooks, observed_at)
 
         # NOT a refusal — see the moduledoc's "An empty `pricebooks` array is silence, not
         # a statement". This batch endpoint answers "nothing for this one" by omitting the
@@ -2179,6 +2250,22 @@ defmodule DpExchange.Coinbase.Rest do
         {:error, reason} ->
           classify(reason)
       end
+    end
+  end
+
+  # The pricebook NAMING the product asked for, never the first one. A batch reply may carry
+  # other products or reorder them, and another product's best bid and ask under this
+  # symbol is a plausible price for the wrong instrument.
+  defp select_pricebook(native, pricebooks, observed_at) do
+    cond do
+      not Enum.all?(pricebooks, &is_map/1) ->
+        {:error, :unexpected_response_shape}
+
+      pricebook = Enum.find(pricebooks, &(&1["product_id"] == native)) ->
+        build_top_of_book(native, pricebook, observed_at)
+
+      true ->
+        {:error, {:product_not_in_response, native}}
     end
   end
 
@@ -2721,18 +2808,19 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp configuration_leaf(:limit, :gtc, request) do
     with {:ok, price} <- required_field(request, :price, :missing_limit_price),
+         {:ok, post_only} <- post_only(request),
          :ok <- refuse_unsupported_field(request, :end_time, :limit, :gtc) do
-      leaf = put_unless_nil(limit_leaf(request, price), "post_only", Map.get(request, :post_only))
-      {:ok, leaf}
+      {:ok, put_unless_nil(limit_leaf(request, price), "post_only", post_only)}
     end
   end
 
   defp configuration_leaf(:limit, :gtd, request) do
-    with {:ok, price} <- required_field(request, :price, :missing_limit_price) do
+    with {:ok, price} <- required_field(request, :price, :missing_limit_price),
+         {:ok, post_only} <- post_only(request) do
       leaf =
         request
         |> limit_leaf(price)
-        |> put_unless_nil("post_only", Map.get(request, :post_only))
+        |> put_unless_nil("post_only", post_only)
         |> put_end_time(Map.get(request, :end_time))
 
       {:ok, leaf}
@@ -2801,8 +2889,21 @@ defmodule DpExchange.Coinbase.Rest do
   defp stop_direction(nil), do: {:ok, nil}
   defp stop_direction(:up), do: {:ok, "STOP_DIRECTION_STOP_UP"}
   defp stop_direction(:down), do: {:ok, "STOP_DIRECTION_STOP_DOWN"}
-  defp stop_direction(value) when is_binary(value), do: {:ok, value}
+  @stop_directions ["STOP_DIRECTION_STOP_UP", "STOP_DIRECTION_STOP_DOWN"]
+
+  defp stop_direction(value) when value in @stop_directions, do: {:ok, value}
+
+  # Any other string is outside the spec's enum and its handling by the venue is unmeasured:
+  # refused, not sent on a live order.
   defp stop_direction(other), do: {:error, {:invalid_stop_direction, other}}
+
+  # `post_only` is a JSON boolean. A string such as `"yes"` was stringified and sent.
+  defp post_only(request) do
+    case Map.get(request, :post_only) do
+      value when is_nil(value) or is_boolean(value) -> {:ok, value}
+      other -> {:error, {:invalid_post_only, other}}
+    end
+  end
 
   defp put_unless_nil(map, _key, nil), do: map
 
@@ -3151,7 +3252,8 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_orders(map(), keyword()) ::
           {:ok, [Types.Order.t()]} | {:error, term()} | {:refused, term()}
   def get_orders(credentials, opts) do
-    with {:ok, orders} <- all_orders(credentials, opts, nil, [], 0) do
+    with :ok <- valid_statuses(Keyword.get(opts, :status)),
+         {:ok, orders} <- all_orders(credentials, opts, nil, [], 0) do
       # A row that is not an object refuses the whole list. It used to raise out of
       # `to_order/1`; skipping it instead would hand back the truncated order list this
       # function's doc already names as the wrong shape.
@@ -3222,10 +3324,28 @@ defmodule DpExchange.Coinbase.Rest do
   defp order_status_param(statuses) when is_list(statuses),
     do: Enum.map(statuses, &order_status_param/1)
 
-  defp order_status_param(status) when is_atom(status),
+  defp order_status_param(status) when is_atom(status) or is_binary(status),
     do: status |> to_string() |> String.upcase()
 
-  defp order_status_param(status) when is_binary(status), do: String.upcase(status)
+  # The filter must be one of `OrderExecutionStatus`'s values (at-spec.yaml:8577-8589); the
+  # venue's handling of any other word is unmeasured, so it is refused rather than sent.
+  @status_filters ~w(PENDING OPEN FILLED CANCELLED EXPIRED FAILED UNKNOWN_ORDER_STATUS QUEUED
+                     CANCEL_QUEUED EDIT_QUEUED)
+
+  defp valid_statuses(statuses) do
+    statuses
+    |> List.wrap()
+    |> Enum.find(&(not known_status?(&1)))
+    |> case do
+      nil -> :ok
+      bad -> {:error, {:invalid_status, bad}}
+    end
+  end
+
+  defp known_status?(status) when is_atom(status) or is_binary(status),
+    do: String.upcase(to_string(status)) in @status_filters
+
+  defp known_status?(_other), do: false
 
   defp venue_symbol(nil), do: nil
   defp venue_symbol(symbols) when is_list(symbols), do: Enum.map(symbols, &venue_symbol/1)

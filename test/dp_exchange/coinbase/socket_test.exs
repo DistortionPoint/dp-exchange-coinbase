@@ -702,6 +702,45 @@ defmodule DpExchange.Coinbase.SocketTest do
       end
     end
 
+    test "a non-positive price or a negative quantity makes a row unreadable" do
+      [event] = @snapshot["events"]
+
+      for {price, quantity} <- [{"-1.00", "1"}, {"0", "1"}, {"5.00", "-0.5"}] do
+        bad = %{
+          "event_time" => "2026-08-28T14:53:45.000000Z",
+          "side" => "bid",
+          "price_level" => price,
+          "new_quantity" => quantity
+        }
+
+        frame = %{@snapshot | "events" => [%{event | "updates" => event["updates"] ++ [bad]}]}
+
+        assert {:ok, _state} = Socket.handle_frame({:text, Jason.encode!(frame)}, state())
+        assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+        refute_received {:dp_exchange, :coinbase, %Types.OrderBook{}}
+      end
+    end
+
+    test "a zero quantity is still a readable row: the venue's way to say removed" do
+      [event] = @snapshot["events"]
+
+      removal = %{
+        "event_time" => "2026-08-28T14:53:45.000000Z",
+        "side" => "bid",
+        "price_level" => "98.00",
+        "new_quantity" => "0"
+      }
+
+      frame =
+        %{
+          @snapshot
+          | "events" => [%{event | "type" => "update", "updates" => [removal]}]
+        }
+
+      assert {:ok, _state} = Socket.handle_frame({:text, Jason.encode!(frame)}, state())
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBookDelta{levels: [_removed]}}
+    end
+
     test "an event of many unreadable rows raises ONE notice that counts them" do
       # What makes a row unreadable is usually the venue's format (a side this package does
       # not know, a quantity sent as null), which is true of every row at once. One notice per

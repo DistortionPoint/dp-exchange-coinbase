@@ -306,7 +306,8 @@ defmodule DpExchange.Coinbase.Prime do
   def claim_rewards(credentials, portfolio_id, wallet_id, opts) do
     with :ok <- valid_scope(portfolio_id, wallet_id),
          :ok <- valid_claim_amount(Config.opt(opts, :amount, nil)),
-         :ok <- valid_key(opts) do
+         :ok <- valid_key(opts),
+         :ok <- valid_claim_body(Config.opt(opts, :body, %{})) do
       post(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/claim_rewards",
         claim_rewards_body(opts),
@@ -463,12 +464,28 @@ defmodule DpExchange.Coinbase.Prime do
   defp claim_rewards_body(opts) do
     opts
     |> Config.opt(:body, %{})
+    |> Map.new(fn {key, value} -> {to_string(key), value} end)
     |> Map.put_new(
       "idempotency_key",
       Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate()
     )
     |> put_claim_amount(Config.opt(opts, :amount, nil))
   end
+
+  # The caller's own body must be a map, and a key it carries must be a non-empty string:
+  # `Map.put_new/3` kept a `nil` or `""` key (the venue treats the same key as the same
+  # request, so every claim after the first would return the first's response), and a
+  # non-map raised inside the caller's process. An atom `:idempotency_key` is the same field
+  # spelled differently, so it is checked as the string key it becomes.
+  defp valid_claim_body(body) when is_map(body) do
+    case Enum.find(body, fn {key, _value} -> to_string(key) == "idempotency_key" end) do
+      nil -> :ok
+      {_key, value} when is_binary(value) and value != "" -> :ok
+      {_key, value} -> {:error, {:invalid_idempotency_key, value}}
+    end
+  end
+
+  defp valid_claim_body(body), do: {:error, {:invalid_body, body}}
 
   defp put_claim_amount(body, nil), do: body
 

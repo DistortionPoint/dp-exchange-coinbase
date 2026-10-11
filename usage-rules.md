@@ -212,6 +212,10 @@ This package refuses an over-wide range up front:
 Widening your window to "get more per call" gets you nothing, and nothing reads as *no
 data for this period*. Page it yourself.
 
+An empty or inverted window (`start` at or after `end`) is refused too, as
+`{:error, {:invalid_range, start: start, end: end}}`. The venue's answer to one is
+unmeasured, and an empty list would read as *no data*.
+
 ## Coinbase publishes no rate-limit headers
 
 Measured: no `x-ratelimit-*`, no `retry-after`. The ceiling is not discoverable from a

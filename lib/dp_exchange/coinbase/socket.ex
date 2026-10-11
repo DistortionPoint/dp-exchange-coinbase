@@ -1145,11 +1145,19 @@ defmodule DpExchange.Coinbase.Socket do
     case {decimal(price), decimal(quantity)} do
       {nil, _ignored} -> :error
       {_ignored, nil} -> :error
-      {parsed_price, parsed_quantity} -> {:ok, {book_side(side), parsed_price, parsed_quantity}}
+      {parsed_price, parsed_quantity} -> book_level(side, parsed_price, parsed_quantity)
     end
   end
 
   defp decode_row(_row), do: :error
+
+  # A price is positive and a quantity is zero (the venue's "removed") or more. A negative
+  # either parses as a number and would stand in a book as a level no market has.
+  defp book_level(side, price, quantity) do
+    if Decimal.positive?(price) and not Decimal.negative?(quantity),
+      do: {:ok, {book_side(side), price, quantity}},
+      else: :error
+  end
 
   defp malformed_rows(state, first_row, count) do
     report_quality(

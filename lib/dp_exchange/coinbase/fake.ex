@@ -1303,21 +1303,23 @@ defmodule DpExchange.Coinbase.Fake do
         # of an edit disagreed with the edit it followed.
         # Of the order this process placed when it is one, so an edit keeps its symbol and
         # side; the canned order otherwise.
-        base =
-          case find_order(order_id) do
-            {:ok, order} -> order
-            :error -> fake_order()
-          end
+        # An id the fake never issued is the venue's 404 on that read-back, so it is refused
+        # here rather than answered with the canned order under an id nothing can read.
+        case find_order(order_id) do
+          {:ok, base} ->
+            edited = %{
+              base
+              | id: order_id,
+                price: cast_decimal(Map.get(changes, :price)),
+                quantity: cast_decimal(Map.get(changes, :quantity))
+            }
 
-        edited = %{
-          base
-          | id: order_id,
-            price: cast_decimal(Map.get(changes, :price)),
-            quantity: cast_decimal(Map.get(changes, :quantity))
-        }
+            # Remembered, so `get_order/3` and `cancel_order/3` on the same id answer it.
+            {:ok, remember_order(edited)}
 
-        if Map.has_key?(orders(), order_id), do: remember_order(edited)
-        {:ok, edited}
+          :error ->
+            {:refused, :not_listed}
+        end
       end
     end)
   end
@@ -1353,17 +1355,21 @@ defmodule DpExchange.Coinbase.Fake do
       # Side stays nil, as it does in the real package: the venue never states it and this
       # package never read the position. A fake that filled in :sell would teach a consumer
       # to rely on a field that is nil in production.
-      {:ok,
-       %Types.Order{
-         id: "fake-close-1",
-         symbol: symbol,
-         side: nil,
-         order_type: :market,
-         time_in_force: :ioc,
-         quantity: Decimal.new("1"),
-         status: :pending,
-         provider: :coinbase
-       }}
+      closing = %Types.Order{
+        id: next_order_id(),
+        symbol: symbol,
+        side: nil,
+        order_type: :market,
+        time_in_force: :ioc,
+        quantity: Decimal.new("1"),
+        status: :pending,
+        provider: :coinbase
+      }
+
+      # Remembered (per process) as a working order, so the id it returns reads back through
+      # `get_order/3` and answers `cancel_order/3`, as place_order's does.
+      remember_order(%{closing | status: :open, filled_quantity: Decimal.new("0")})
+      {:ok, closing}
     end)
   end
 

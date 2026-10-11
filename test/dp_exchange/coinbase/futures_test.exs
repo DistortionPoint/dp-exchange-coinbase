@@ -402,7 +402,9 @@ defmodule DpExchange.Coinbase.FuturesTest do
                )
 
       assert {:ok, _result} =
-               DpExchange.Coinbase.set_intraday_margin_setting(@credentials, "X",
+               DpExchange.Coinbase.set_intraday_margin_setting(
+                 @credentials,
+                 "INTRADAY_MARGIN_SETTING_STANDARD",
                  plug: responding(%{}),
                  retry_attempts: 0
                )
@@ -463,7 +465,14 @@ defmodule DpExchange.Coinbase.FuturesTest do
       assert {:error, _reason} = Rest.schedule_futures_sweep(@credentials, opts)
       assert {:error, _reason} = Rest.cancel_futures_sweep(@credentials, opts)
       assert {:error, _reason} = Rest.get_intraday_margin_setting(@credentials, opts)
-      assert {:error, _reason} = Rest.set_intraday_margin_setting(@credentials, "X", opts)
+
+      assert {:error, _reason} =
+               Rest.set_intraday_margin_setting(
+                 @credentials,
+                 "INTRADAY_MARGIN_SETTING_STANDARD",
+                 opts
+               )
+
       assert {:error, _reason} = Rest.get_current_margin_window(@credentials, opts)
     end
 

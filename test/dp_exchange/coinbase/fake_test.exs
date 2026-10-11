@@ -592,6 +592,52 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert {:ok, :cancelled} = Fake.cancel_order(@credentials, "fake-order-1")
       assert {:ok, %{status: :cancelled}} = Fake.get_order(@credentials, "fake-order-1")
     end
+
+    test "replace_order on a placed id keeps the id, reads back edited, and cancels" do
+      assert {:ok, placed} = Fake.place_order(@credentials, eth_sell())
+      edit = %{price: Decimal.new("3100"), quantity: Decimal.new("3")}
+
+      assert {:ok, edited} = Fake.replace_order(@credentials, placed.id, edit)
+      assert edited.id == placed.id
+      assert edited.symbol == "ETH-USD"
+
+      assert {:ok, read} = Fake.get_order(@credentials, edited.id)
+      assert Decimal.equal?(read.price, Decimal.new("3100"))
+      assert Decimal.equal?(read.quantity, Decimal.new("3"))
+      assert read.status == :open
+
+      assert {:ok, :cancelled} = Fake.cancel_order(@credentials, edited.id)
+    end
+
+    test "replace_order on the canned order reads back edited" do
+      edit = %{price: Decimal.new("41000"), quantity: Decimal.new("0.75")}
+
+      assert {:ok, _edited} = Fake.replace_order(@credentials, "fake-order-1", edit)
+      assert {:ok, read} = Fake.get_order(@credentials, "fake-order-1")
+      assert Decimal.equal?(read.price, Decimal.new("41000"))
+    end
+
+    test "replace_order on an id the fake never issued is the venue's 404" do
+      edit = %{price: Decimal.new("1"), quantity: Decimal.new("1")}
+
+      assert {:refused, :not_listed} = Fake.replace_order(@credentials, "never-issued", edit)
+      assert {:refused, :not_listed} = Fake.get_order(@credentials, "never-issued")
+    end
+
+    test "close_position mints an id that reads back and cancels, one per call" do
+      assert {:ok, first} = Fake.close_position(@credentials, "BTC-USD")
+      assert {:ok, second} = Fake.close_position(@credentials, "BTC-USD")
+      refute first.id == second.id
+
+      assert {:ok, read} = Fake.get_order(@credentials, first.id)
+      assert read.id == first.id
+      assert read.symbol == "BTC-USD"
+      assert read.side == nil
+      assert read.status == :open
+
+      assert {:ok, :cancelled} = Fake.cancel_order(@credentials, first.id)
+      assert {:ok, %{status: :open}} = Fake.get_order(@credentials, second.id)
+    end
   end
 
   describe "streaming parity, found 2026-10-10" do
