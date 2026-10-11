@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.111] - 2026-10-11
+
 ### Fixed
 
 Found by a cross-venue consistency audit against the family conventions.
