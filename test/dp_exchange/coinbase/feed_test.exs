@@ -327,6 +327,54 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
   end
 
+  describe "a sequence-gap notice names the symbols the consumer subscribed" do
+    # `Socket` can only name a symbol as the venue tagged it, and the venue renames aliased
+    # products (112 of the first 114 USDC ones). The notice's whole content is "re-read
+    # these", so a list in names the consumer does not hold told it to re-read nothing.
+    defp gap_notice(symbols) do
+      Notice.new(:data_quality, :coinbase,
+        severity: :warning,
+        message: "2 message(s) dropped",
+        details: %{reason: :sequence_gap, dropped: 2, symbols: symbols}
+      )
+    end
+
+    test "a renamed symbol is reported under the name that was subscribed" do
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | alias_map: %{"XLM-USD" => ["XLM-USDC"], "XLM-USDC" => ["XLM-USD"]},
+            alias_map_status: :ok,
+            wanted: MapSet.new(["XLM-USDC", "BTC-USD"])
+        }
+      end)
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      # OLD-USD is no longer wanted and, with the catalogue loaded, is not named.
+      send(feed, {:dp_exchange, :coinbase, gap_notice(["BTC-USD", "XLM-USD", "OLD-USD"])})
+
+      assert_receive {:dp_exchange, :coinbase, %Notice{details: details}}, 1_000
+
+      assert details.reason == :sequence_gap
+      assert details.symbols == ["BTC-USD", "XLM-USDC"]
+      assert details.dropped == 2
+    end
+
+    test "with no catalogue loaded the venue's names pass through, never a guessed one" do
+      feed = start_feed()
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      send(feed, {:dp_exchange, :coinbase, gap_notice(["XLM-USD", "BTC-USD"])})
+
+      assert_receive {:dp_exchange, :coinbase, %Notice{details: details}}, 1_000
+
+      assert details.symbols == ["BTC-USD", "XLM-USD"]
+    end
+  end
+
   describe "a dead subscriber is dropped, not walked forever" do
     # `Core.Fanout.resolve/1` already skipped a dead subscriber at send time, so no EVENTS
     # accumulated — but nothing removed the pid, so a supervised consumer that restarts left
@@ -682,6 +730,34 @@ defmodule DpExchange.Coinbase.FeedTest do
       send(feed, :nonsense)
       :sys.get_state(feed)
       assert Process.alive?(feed)
+    end
+  end
+
+  describe "a symbol list that cannot be sent is refused, not raised on" do
+    # One process serves every caller of an instance. `SymbolFormat.to_exchange_symbol/1` has
+    # no clause for a non-binary, so an atom in a list raised inside `handle_call/3`, and the
+    # restarted feed had none of the symbols any caller had subscribed.
+    test "the feed keeps what it had, and the same process answers" do
+      feed = start_feed()
+      :ok = Feed.update_symbols(feed, ["BTC-USD"])
+      before = :sys.get_state(feed)
+
+      for bad <- [[:eth], [nil], [""], [7], ["ETH-USD", :sol], nil, :btc, "BTC-USD"] do
+        assert {:error, {:invalid_symbols, _invalid}} = Feed.subscribe(feed, bad)
+        assert {:error, {:invalid_symbols, _invalid}} = Feed.unsubscribe(feed, bad)
+        assert {:error, {:invalid_symbols, _invalid}} = Feed.update_symbols(feed, bad)
+      end
+
+      assert Process.alive?(feed)
+      assert :sys.get_state(feed).wanted == before.wanted
+      assert :sys.get_state(feed).wanted == MapSet.new(["BTC-USD"])
+    end
+
+    test "the refusal names what was wrong, bounded" do
+      feed = start_feed()
+
+      assert {:error, {:invalid_symbols, [:a, 1, nil, "", :e]}} =
+               Feed.subscribe(feed, [:a, 1, nil, "", :e, :f, :g, "OK-USD"])
     end
   end
 
@@ -1050,12 +1126,20 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert channels == ["level2"]
     end
 
-    test "a credential-less feed still gets ticker only, even asking for the book" do
-      # The option NARROWS what is asked for; it never widens past what credentials allow.
-      # `level2` is authenticated on this venue, so requesting it without a credential must
-      # not produce a doomed subscribe.
-      feed = start_feed(channels: [:quotes, :order_book])
+    test "a credential-less feed asking for the book opens level2 too, unsigned" do
+      # `SubscribeLevel2`'s `jwt` is documented "Optional here; recommended for connection
+      # reliability." (at-async.json), so a credential-less caller is not refused the book:
+      # `channel_permitted?/2` is true for every channel. This test used to be titled the
+      # opposite ("ticker only") and asserted `["ticker"]`, and it passed only because the
+      # `level2` shard is deferred a `shard_spacing_ms` behind the synchronous `ticker` one:
+      # it read the shards before the second one had opened. It is waited for here.
+      feed = start_feed(channels: [:quotes, :order_book], shard_spacing_ms: 0)
+
       :ok = Feed.subscribe(feed, ["BTC-USD"])
+
+      wait_until(fn ->
+        feed |> :sys.get_state() |> Map.fetch!(:shards) |> Map.has_key?({"level2", 0})
+      end)
 
       channels =
         feed
@@ -1063,9 +1147,9 @@ defmodule DpExchange.Coinbase.FeedTest do
         |> Map.fetch!(:shards)
         |> Map.keys()
         |> Enum.map(fn {channel, _index} -> channel end)
-        |> Enum.uniq()
+        |> Enum.sort()
 
-      assert channels == ["ticker"]
+      assert channels == ["level2", "ticker"]
     end
 
     test "a kind this venue does not stream fails init loudly, never silently" do

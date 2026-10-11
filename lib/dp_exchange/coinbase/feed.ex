@@ -784,6 +784,33 @@ defmodule DpExchange.Coinbase.Feed do
   the slowest one takes. Fixed the same way: `delay` now reaches `reconcile_shard_in_place/8` and
   staggers its frames exactly as it already staggered a new shard's.
 
+  ## A deferred shard open is replaced, not repeated
+
+  Opening a shard is deferred `position * shard_spacing_ms` for every shard past the first.
+  A `subscribe/2` or `update_symbols/2` landing inside that window (the first 18 seconds of a
+  19-shard boot) used to schedule a second open for each key still waiting, and the two did
+  not know about each other: the older fired first and opened the shard with the symbols it
+  was scheduled with, and the newer, carrying the current ones, found the shard present and
+  was dropped. The shard was recorded with the stale list and nothing reconsidered it until
+  the next `reshard/1`, because the 60-second re-issue sends the recorded list. A symbol added
+  in that window was never subscribed. One removed in it was, and held a `level2` slot.
+
+  `state.pending_opens` now names, per shard key, the one open still to come. Scheduling
+  another for the key with different symbols cancels the earlier one (one with the same
+  symbols is left as it is, so a reshard that changed nothing does not push the shard out by a
+  stagger), a message already in the mailbox when that happened is ignored by its `ref`, and a
+  `reshard/1` whose plan no longer has the key cancels it. `retry_missing_shards/1` leaves a
+  key alone while its open is pending.
+
+  ## One caller's bad symbol cannot cost every caller's subscription
+
+  `subscribe/3`, `unsubscribe/2` and `update_symbols/2` take a list of non-empty strings and
+  answer `{:error, {:invalid_symbols, invalid}}` for anything else, before any state moves.
+  This feed is one process for every caller of the instance, and the conversion to the venue's
+  native form has no clause for a non-binary, so a single atom in a list used to raise inside
+  `handle_call/3`. The supervisor restarted `Feed` from its static options and every symbol
+  every caller had subscribed was gone.
+
   ## `shard_spacing_ms` — a supervision option, so a test does not have to wait out a
   production timer to prove staggering happened
 
@@ -1070,6 +1097,16 @@ defmodule DpExchange.Coinbase.Feed do
   delivery is recorded under the caller's own requested name instead of the venue's
   rewritten one, `coverage/1` reports exactly what was asked for, by construction, with
   nothing endpoint-specific added at the `coverage/1` call site itself.
+
+  ### A notice that names symbols is resolved the same way a frame is
+
+  `Socket`'s `:sequence_gap` notice lists the symbols its connection delivers, as the venue
+  tagged them. Its whole content is "re-read these", and a consumer that subscribed
+  `XLM-USDC` was told to re-read `XLM-USD`. `handle_info/2` resolves `details.symbols`
+  through `resolve_names/2`, the rule a delivered frame goes through, before the notice is
+  fanned out: aliased ids come back as the names that were subscribed, and one that is no
+  longer wanted is left out. With the catalogue not loaded the venue's names pass through
+  unchanged, as they do for frames.
 
   ### `coverage_by_kind/1` — the same fact, split by what actually arrived
 
@@ -1705,6 +1742,11 @@ defmodule DpExchange.Coinbase.Feed do
        # all, and cleared (per symbol) the moment a retry actually sends. Absent from a
        # key entirely is the ordinary case — this map is normally empty.
        pending_unsubscribes: %{},
+       # {channel, index} => %{ref: reference(), timer: reference(), symbols: [...]} — a deferred
+       # `:open_shard` that has been scheduled and has not fired. At most one per key: a later
+       # `reshard/1` replaces it (`schedule_open/4`) and one for a key nobody wants any more
+       # is cancelled. See the moduledoc's "A deferred shard open is replaced, not repeated".
+       pending_opens: %{},
        # Shard sockets whose link is down and not yet back: added on `:link_down`, removed
        # on `:reconnected` or when the shard goes. Nothing is sent to one of these — see the
        # moduledoc's "A socket that is reconnecting is not sent to" section.
@@ -1790,37 +1832,24 @@ defmodule DpExchange.Coinbase.Feed do
 
   @impl true
   def handle_call({:subscribe, symbols, subscriber}, _from, state) do
-    wanted = MapSet.union(state.wanted, MapSet.new(symbols))
-
-    state =
-      %{
-        state
-        | subscribers: MapSet.put(state.subscribers, subscriber),
-          monitors: Fanout.watch(subscriber, state.monitors),
-          wanted: wanted
-      }
-      |> maybe_schedule_alias_map_fetch()
-
-    {result, state} = reshard(state)
-    {:reply, result, state}
+    case check_symbols(symbols) do
+      :ok -> subscribe_symbols(symbols, subscriber, state)
+      {:error, _reason} = refusal -> {:reply, refusal, state}
+    end
   end
 
   def handle_call({:unsubscribe, symbols}, _from, state) do
-    wanted = MapSet.difference(state.wanted, MapSet.new(symbols))
-    state = %{state | wanted: wanted, delivering: Map.drop(state.delivering, symbols)}
-    {result, state} = reshard(state)
-    {:reply, result, state}
+    case check_symbols(symbols) do
+      :ok -> unsubscribe_symbols(symbols, state)
+      {:error, _reason} = refusal -> {:reply, refusal, state}
+    end
   end
 
   def handle_call({:update_symbols, symbols}, _from, state) do
-    wanted = MapSet.new(symbols)
-
-    state =
-      %{state | wanted: wanted, delivering: Map.take(state.delivering, symbols)}
-      |> maybe_schedule_alias_map_fetch()
-
-    {result, state} = reshard(state)
-    {:reply, result, state}
+    case check_symbols(symbols) do
+      :ok -> replace_symbols(symbols, state)
+      {:error, _reason} = refusal -> {:reply, refusal, state}
+    end
   end
 
   def handle_call(:coverage, _from, state) do
@@ -1966,7 +1995,7 @@ defmodule DpExchange.Coinbase.Feed do
 
   @impl true
   def handle_info({:dp_exchange, :coinbase, %Notice{} = notice}, state) do
-    fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})
+    fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, attribute_notice(notice, state)})
     {:noreply, state}
   end
 
@@ -2072,6 +2101,25 @@ defmodule DpExchange.Coinbase.Feed do
     attempt_alias_map_fetch(attempt, state)
   end
 
+  # A deferred open scheduled by `schedule_open/4`. It acts only if it is still THE pending
+  # open for its key: a later `reshard/1` that recomputed the shard replaced it with one
+  # carrying current symbols, and one for a key nobody wants any more was cancelled. A copy
+  # already in the mailbox when that happened is recognised here by its `ref`.
+  def handle_info({:open_shard, channel, index, symbols, ref}, state) do
+    key = {channel, index}
+
+    case Map.get(state.pending_opens, key) do
+      %{ref: ^ref} ->
+        handle_info(
+          {:open_shard, channel, index, symbols},
+          %{state | pending_opens: Map.delete(state.pending_opens, key)}
+        )
+
+      _replaced_or_cancelled ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:open_shard, channel, index, symbols}, state) do
     key = {channel, index}
 
@@ -2173,9 +2221,7 @@ defmodule DpExchange.Coinbase.Feed do
     # cadence an already-open shard's subscriptions are re-issued on, closes that gap —
     # staggered past whatever this tick already scheduled for open shards, for the same
     # connect-burst reason `shard_spacing_ms` exists everywhere else in this module.
-    retry_missing_shards(state)
-
-    {:noreply, state}
+    {:noreply, retry_missing_shards(state)}
   end
 
   # Reissues this shard's full current membership through the SAME unsubscribe-before-
@@ -2247,6 +2293,57 @@ defmodule DpExchange.Coinbase.Feed do
 
   # --- internal ------------------------------------------------------------
 
+  # **A symbol that cannot be sent is refused before it reaches shared state.** This feed is
+  # one process for every caller of the instance, and `Socket.subscribe/4` converts each
+  # symbol with `SymbolFormat.to_exchange_symbol/1`, which has no clause for anything but a
+  # binary. So one `subscribe(["BTC-USD", :eth])`, or an `update_symbols(nil)`, raised inside
+  # this `handle_call/3`, the feed crashed, and the supervisor restarted it from its static
+  # options: every symbol every caller had subscribed was gone, with `coverage/1` reading
+  # empty until each of them subscribed again. An empty string is refused as well: it is not
+  # a product, and would be sent to the venue as one.
+  defp check_symbols(symbols) when is_list(symbols) do
+    case Enum.reject(symbols, &(is_binary(&1) and &1 != "")) do
+      [] -> :ok
+      invalid -> {:error, {:invalid_symbols, Enum.take(invalid, 5)}}
+    end
+  end
+
+  defp check_symbols(other), do: {:error, {:invalid_symbols, other}}
+
+  defp subscribe_symbols(symbols, subscriber, state) do
+    wanted = MapSet.union(state.wanted, MapSet.new(symbols))
+
+    state =
+      %{
+        state
+        | subscribers: MapSet.put(state.subscribers, subscriber),
+          monitors: Fanout.watch(subscriber, state.monitors),
+          wanted: wanted
+      }
+      |> maybe_schedule_alias_map_fetch()
+
+    {result, state} = reshard(state)
+    {:reply, result, state}
+  end
+
+  defp unsubscribe_symbols(symbols, state) do
+    wanted = MapSet.difference(state.wanted, MapSet.new(symbols))
+    state = %{state | wanted: wanted, delivering: Map.drop(state.delivering, symbols)}
+    {result, state} = reshard(state)
+    {:reply, result, state}
+  end
+
+  defp replace_symbols(symbols, state) do
+    wanted = MapSet.new(symbols)
+
+    state =
+      %{state | wanted: wanted, delivering: Map.take(state.delivering, symbols)}
+      |> maybe_schedule_alias_map_fetch()
+
+    {result, state} = reshard(state)
+    {:reply, result, state}
+  end
+
   defp handle_open_shard(state, channel, index, symbols) do
     case get_socket(state) do
       {:ok, socket, state} ->
@@ -2292,11 +2389,12 @@ defmodule DpExchange.Coinbase.Feed do
   # DpCryptoManagement hit this in issue #22 by setting `resubscribe_interval_ms: 5_000`,
   # well below even one shard's own send window, and lost the run to it. But the same
   # failure is reachable with NO option set: the 60s default is shorter than the cycle span
-  # from 13 shards upward — reachable from a single `level2` grouping alone once a universe
-  # passes 360 symbols (`ceil(360 / 30)` is 12; 361 needs 13), a scope this package now
-  # sizes at `@level2_pairs_per_socket` rather than the far larger `@pairs_per_socket` (a
-  # 406-symbol universe needs 14 `level2` shards on its own), so a large enough consumer
-  # can still walk into this without `ticker` needing any shards of its own at all.
+  # from 57 shards upward at the current 1_000ms `shard_spacing_ms` ((57 - 1) * 1_000 + 5_000
+  # is 61_000; it was 13 shards at the 5_000ms this used to default to) — reachable from a
+  # single `level2` grouping alone once a universe passes 1_680 symbols (`ceil(1_680 / 30)` is
+  # 56; 1_681 needs 57), a scope this package sizes at `@level2_pairs_per_socket` rather than
+  # the far larger `@pairs_per_socket`, so a large enough consumer can still walk into this
+  # without `ticker` needing any shards of its own at all.
   #
   # The delay is therefore derived from the shard count that actually exists right now,
   # never from the configured value alone, and the extension is logged rather than applied
@@ -2342,15 +2440,15 @@ defmodule DpExchange.Coinbase.Feed do
       |> planned_shards(channel, wanted_list)
       |> Enum.map(fn {index, symbols} -> {{channel, index}, symbols} end)
     end)
-    |> Enum.reject(fn {key, _symbols} -> key in existing end)
+    # A key whose open is already scheduled is not re-scheduled: its own message is on its
+    # way, and a replacement here would push it out to `(base + position)` spacings from now.
+    |> Enum.reject(fn {key, _symbols} ->
+      key in existing or Map.has_key?(state.pending_opens, key)
+    end)
     |> Enum.sort_by(fn {key, _symbols} -> key end, &shard_key_order/2)
     |> Enum.with_index()
-    |> Enum.each(fn {{{channel, index}, symbols}, position} ->
-      Process.send_after(
-        self(),
-        {:open_shard, channel, index, symbols},
-        (base + position) * state.shard_spacing_ms
-      )
+    |> Enum.reduce(state, fn {{key, symbols}, position}, acc ->
+      schedule_open(acc, key, symbols, (base + position) * state.shard_spacing_ms)
     end)
   end
 
@@ -2399,6 +2497,10 @@ defmodule DpExchange.Coinbase.Feed do
     existing_keys = Map.keys(state.shards)
     wanted_keys = Map.keys(new_shards)
     new_keys = wanted_keys -- existing_keys
+
+    # An open scheduled by an earlier call for a key this plan no longer has. The ones it
+    # still has are replaced by `touch_shard/5` below, with this plan's symbols.
+    state = cancel_unplanned_opens(state, wanted_keys)
 
     # A shard whose whole symbol set was just removed disappears from `new_shards`
     # entirely — nothing above asked for any of its symbols any more. That must still
@@ -2503,6 +2605,10 @@ defmodule DpExchange.Coinbase.Feed do
   end
 
   defp open_shard(state, {channel, _index} = key, symbols, true, _delay) do
+    # Opening it now settles any deferred open of the same key; left scheduled it would fire
+    # later, find the shard present, and do nothing.
+    state = cancel_pending_open(state, key)
+
     case get_socket(state) do
       {:ok, socket, state} ->
         state = put_in(state.shards[key], %{socket: socket, symbols: symbols})
@@ -2514,9 +2620,63 @@ defmodule DpExchange.Coinbase.Feed do
     end
   end
 
-  defp open_shard(state, {channel, index}, symbols, false, delay) do
-    Process.send_after(self(), {:open_shard, channel, index, symbols}, delay)
-    {:ok, state}
+  defp open_shard(state, key, symbols, false, delay) do
+    {:ok, schedule_open(state, key, symbols, delay)}
+  end
+
+  # **At most one deferred open per shard key, and the newest one wins.**
+  #
+  # Every `reshard/1` that finds a key with no shard schedules an `:open_shard` for it,
+  # `position * shard_spacing_ms` away. Nothing replaced an earlier one, so a second
+  # `subscribe/2` or `update_symbols/2` inside that window (at 19 shards and the default
+  # spacing, the first 18 seconds after boot) left two: the older fired first, opened the
+  # shard with the symbols it had been scheduled with, and the newer, carrying the current
+  # ones, then found the key present and was dropped as redundant. The shard was recorded with
+  # the stale list. A symbol added in between was never subscribed, one removed in between
+  # was, and nothing reconsidered the shard until the next `reshard/1`: the 60-second
+  # re-issue sends `state.shards[key].symbols`, which is the stale list.
+  #
+  # The message carries a `ref` and the key's entry in `state.pending_opens` names the current
+  # one, so a copy already sitting in the mailbox when it was replaced is ignored on arrival.
+  # The timer is cancelled as well, so the common case never delivers it at all.
+  #
+  # A pending open that already carries exactly these symbols is left as it is. Its message is
+  # on the way and was scheduled no later than this one would be, and replacing it would push
+  # the shard out by a stagger every time a caller reshards without changing it.
+  defp schedule_open(state, {channel, index} = key, symbols, delay) do
+    case Map.get(state.pending_opens, key) do
+      %{symbols: ^symbols} ->
+        state
+
+      _absent_or_different ->
+        state = cancel_pending_open(state, key)
+        ref = make_ref()
+        timer = Process.send_after(self(), {:open_shard, channel, index, symbols, ref}, delay)
+        entry = %{ref: ref, timer: timer, symbols: symbols}
+
+        %{state | pending_opens: Map.put(state.pending_opens, key, entry)}
+    end
+  end
+
+  defp cancel_pending_open(state, key) do
+    case Map.pop(state.pending_opens, key) do
+      {nil, _unchanged} ->
+        state
+
+      {%{timer: timer}, remaining} ->
+        Process.cancel_timer(timer)
+        %{state | pending_opens: remaining}
+    end
+  end
+
+  # A deferred open for a key that is no longer in the plan: the symbols it carried were all
+  # unsubscribed (or moved to another shard) since it was scheduled. Cancelled rather than
+  # left to open a socket, and subscribe symbols, that nobody wants.
+  defp cancel_unplanned_opens(state, planned_keys) do
+    state.pending_opens
+    |> Map.keys()
+    |> Enum.reject(&(&1 in planned_keys))
+    |> Enum.reduce(state, &cancel_pending_open(&2, &1))
   end
 
   # `removed` is unsubscribed before `added` is subscribed, on the SAME already-open
@@ -3051,9 +3211,7 @@ defmodule DpExchange.Coinbase.Feed do
     # shard whose FIRST open never happened at all (see `retry_missing_shards/1`'s own
     # moduledoc reference); a shard that was open and delivering a moment ago should not
     # wait up to `resubscribe_interval_ms` (60s by default) to try again.
-    Process.send_after(self(), {:open_shard, channel, index, symbols}, 0)
-
-    state
+    schedule_open(state, key, symbols, 0)
   end
 
   # Mirrors `payload_kind/1`'s struct-to-kind mapping, from the other direction: a
@@ -3326,8 +3484,32 @@ defmodule DpExchange.Coinbase.Feed do
   # `[delivered, equivalent]` filtered down to what the caller actually asked for, and
   # covers the "both names subscribed" case by construction: if both are wanted, both
   # survive the filter and both receive a copy below.
-  defp attribution_targets(payload, state) do
-    delivered = delivered_symbol(payload)
+  defp attribution_targets(payload, state), do: resolve_names(delivered_symbol(payload), state)
+
+  # A `:sequence_gap` notice names the symbols its connection delivers, and `Socket` can only
+  # name them as the venue tagged them. A consumer holding the books it subscribed under
+  # `XLM-USDC` was told to re-read `XLM-USD`: a name it does not hold, for a notice whose
+  # whole content is "re-read these". 112 of the first 114 USDC products are aliased, so for
+  # a USDC universe that is nearly every symbol in the list. Resolved through the same rule a
+  # delivered frame is, so the notice and the frames it concerns agree on what a symbol is
+  # called.
+  defp attribute_notice(
+         %Notice{details: %{reason: :sequence_gap, symbols: symbols} = details} = notice,
+         state
+       )
+       when is_list(symbols) do
+    named =
+      symbols
+      |> Enum.flat_map(&resolve_names(&1, state))
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    %{notice | details: %{details | symbols: named}}
+  end
+
+  defp attribute_notice(notice, _state), do: notice
+
+  defp resolve_names(delivered, state) do
     equivalent = state.alias_map |> Map.get(delivered) |> List.wrap()
 
     targets =

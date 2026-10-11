@@ -40,6 +40,21 @@ defmodule DpExchange.Coinbase.Prime do
   the caller actually said — a `:wallet_id` in `opts` means the wallet, its absence means
   the portfolio. Nothing is defaulted.
 
+  ## What is refused before anything is signed
+
+  A portfolio or wallet id is a path segment that is signed and sent exactly as given, so it
+  has to be a non-empty string of letters, digits, `_` and `-`. `nil`, `""`, a number, or a
+  string carrying `/`, `?` or `.` answers `{:error, {:invalid_portfolio_id, value}}` or
+  `{:error, {:invalid_wallet_id, value}}` and sends nothing. Before, `nil` became
+  `/portfolios//staking/initiate` and `"x/../y"` named a different path from the one the
+  function promises.
+
+  An `opts[:idempotency_key]` that is given must be a non-empty string
+  (`{:error, {:invalid_idempotency_key, value}}`): the venue returns the first response for a
+  repeated key, so `""` made every later stake a copy of the first. And `opts[:extra]` fills in
+  fields this module does not know; it cannot replace `amount`, `currency_symbol`,
+  `idempotency_key` or `transaction_ids`, which are the ones it validated.
+
   ## What was measured, and what was not
 
   **Nothing here has been run against Prime.** The paths are read from the vendor's own
@@ -83,7 +98,10 @@ defmodule DpExchange.Coinbase.Prime do
   @spec stake_portfolio(credentials(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def stake_portfolio(credentials, portfolio_id, asset, amount, opts) do
-    with :ok <- valid_asset(asset), :ok <- valid_amount(amount) do
+    with :ok <- valid_portfolio(portfolio_id),
+         :ok <- valid_asset(asset),
+         :ok <- valid_amount(amount),
+         :ok <- valid_key(opts) do
       post(
         "/portfolios/#{portfolio_id}/staking/initiate",
         portfolio_stake_body(asset, amount, opts),
@@ -104,7 +122,10 @@ defmodule DpExchange.Coinbase.Prime do
   @spec unstake_portfolio(credentials(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def unstake_portfolio(credentials, portfolio_id, asset, amount, opts) do
-    with :ok <- valid_asset(asset), :ok <- valid_amount(amount) do
+    with :ok <- valid_portfolio(portfolio_id),
+         :ok <- valid_asset(asset),
+         :ok <- valid_amount(amount),
+         :ok <- valid_key(opts) do
       post(
         "/portfolios/#{portfolio_id}/staking/unstake",
         portfolio_stake_body(asset, amount, opts),
@@ -130,19 +151,19 @@ defmodule DpExchange.Coinbase.Prime do
   @spec query_transaction_validators(credentials(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def query_transaction_validators(credentials, portfolio_id, opts) do
-    case Config.opt(opts, :transaction_ids, nil) do
-      ids when is_list(ids) and ids != [] ->
-        body = Map.merge(%{"transaction_ids" => ids}, Config.opt(opts, :extra, %{}))
+    with :ok <- valid_portfolio(portfolio_id) do
+      case Config.opt(opts, :transaction_ids, nil) do
+        ids when is_list(ids) and ids != [] ->
+          post(
+            "/portfolios/#{portfolio_id}/staking/transaction-validators/query",
+            Map.merge(extra_fields(opts), %{"transaction_ids" => ids}),
+            credentials: credentials,
+            opts: opts
+          )
 
-        post(
-          "/portfolios/#{portfolio_id}/staking/transaction-validators/query",
-          body,
-          credentials: credentials,
-          opts: opts
-        )
-
-      _missing_or_empty ->
-        {:error, :missing_transaction_ids}
+        _missing_or_empty ->
+          {:error, :missing_transaction_ids}
+      end
     end
   end
 
@@ -159,7 +180,9 @@ defmodule DpExchange.Coinbase.Prime do
   @spec stake_wallet(credentials(), String.t(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def stake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
-    with :ok <- valid_amount(amount) do
+    with :ok <- valid_scope(portfolio_id, wallet_id),
+         :ok <- valid_amount(amount),
+         :ok <- valid_key(opts) do
       post(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/initiate",
         wallet_stake_body(amount, opts),
@@ -186,7 +209,9 @@ defmodule DpExchange.Coinbase.Prime do
         ) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
-    with :ok <- valid_amount(amount) do
+    with :ok <- valid_scope(portfolio_id, wallet_id),
+         :ok <- valid_amount(amount),
+         :ok <- valid_key(opts) do
       post(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake",
         wallet_stake_body(amount, opts),
@@ -221,7 +246,7 @@ defmodule DpExchange.Coinbase.Prime do
           keyword()
         ) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
-    with :ok <- valid_amount(amount) do
+    with :ok <- valid_scope(portfolio_id, wallet_id), :ok <- valid_amount(amount) do
       post(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake/preview",
         %{"amount" => Decimal.to_string(amount, :normal)},
@@ -242,10 +267,12 @@ defmodule DpExchange.Coinbase.Prime do
   @spec unstake_status(credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def unstake_status(credentials, portfolio_id, wallet_id, opts) do
-    get("/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake/status",
-      credentials: credentials,
-      opts: opts
-    )
+    with :ok <- valid_scope(portfolio_id, wallet_id) do
+      get("/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake/status",
+        credentials: credentials,
+        opts: opts
+      )
+    end
   end
 
   @doc """
@@ -277,7 +304,9 @@ defmodule DpExchange.Coinbase.Prime do
   @spec claim_rewards(credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def claim_rewards(credentials, portfolio_id, wallet_id, opts) do
-    with :ok <- valid_claim_amount(Config.opt(opts, :amount, nil)) do
+    with :ok <- valid_scope(portfolio_id, wallet_id),
+         :ok <- valid_claim_amount(Config.opt(opts, :amount, nil)),
+         :ok <- valid_key(opts) do
       post(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/claim_rewards",
         claim_rewards_body(opts),
@@ -298,10 +327,12 @@ defmodule DpExchange.Coinbase.Prime do
   @spec staking_status(credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def staking_status(credentials, portfolio_id, wallet_id, opts) do
-    get("/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/status",
-      credentials: credentials,
-      opts: opts
-    )
+    with :ok <- valid_scope(portfolio_id, wallet_id) do
+      get("/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/status",
+        credentials: credentials,
+        opts: opts
+      )
+    end
   end
 
   # --- internals ----------------------------------------------------------
@@ -327,6 +358,38 @@ defmodule DpExchange.Coinbase.Prime do
 
   defp valid_asset(asset) when is_binary(asset) and asset != "", do: :ok
   defp valid_asset(asset), do: {:error, {:invalid_asset, asset}}
+
+  # **A portfolio or wallet id is a path segment, and a path segment is checked.** Both are
+  # interpolated into the request path and covered by the signature, so whatever the caller
+  # passed was signed and sent. `nil` interpolated to `""` and reached
+  # `/portfolios//staking/initiate`; `"pf/../x"` or `"pf?x=1"` named a different path from
+  # the one the function's name promises. On the staking writes that is a request this module
+  # signed for a resource nobody chose. Prime issues UUIDs, so letters, digits, `_` and `-`
+  # are all an id needs; anything else is refused before anything is signed.
+  defp valid_portfolio(id), do: valid_id(id, :invalid_portfolio_id)
+
+  defp valid_scope(portfolio_id, wallet_id) do
+    with :ok <- valid_portfolio(portfolio_id), do: valid_id(wallet_id, :invalid_wallet_id)
+  end
+
+  defp valid_id(id, error) when is_binary(id) do
+    if Regex.match?(~r/\A[A-Za-z0-9_-]+\z/, id), do: :ok, else: {:error, {error, id}}
+  end
+
+  defp valid_id(id, error), do: {:error, {error, id}}
+
+  # **A caller-supplied idempotency key must be a non-empty string.** `"" || generate()` is
+  # `""`, so `idempotency_key: ""` was sent, and the venue treats "the same key" as "the same
+  # request" and returns the first response (`prime-spec.yaml`: "Subsequent requests using the
+  # same key will not create new transactions"). Two different stakes sent with `""` were one
+  # stake, and the second came back `{:ok, _}`.
+  defp valid_key(opts) do
+    case Keyword.get(opts, :idempotency_key) do
+      nil -> :ok
+      key when is_binary(key) and key != "" -> :ok
+      other -> {:error, {:invalid_idempotency_key, other}}
+    end
+  end
 
   # Full notation, never scientific: `Decimal.to_string/1` renders a small quantity as
   # 1E-8, which is not a number this venue reads.
@@ -361,13 +424,18 @@ defmodule DpExchange.Coinbase.Prime do
   # (docs/reference/coinbase/openapi/prime-spec.yaml:15862, :15909) — the caller's amount was
   # silently discarded. Split into `portfolio_stake_body/3` and `wallet_stake_body/2` below so
   # each scope's body only ever mirrors that scope's own schema.
+  #
+  # **`opts[:extra]` is merged UNDER the fields this module validated, not over them.** It
+  # was merged over, so `extra: %{"amount" => "100"}` replaced the amount that `valid_amount/1`
+  # had just checked and the caller had just been told was the one sent. `extra` is for the
+  # fields the venue documents and this module does not know; the key, the symbol and the
+  # amount are not among them. See `extra_fields/1`.
   defp portfolio_stake_body(asset, amount, opts) do
-    %{
+    Map.merge(extra_fields(opts), %{
       "idempotency_key" => Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate(),
       "currency_symbol" => String.upcase(asset),
       "amount" => Decimal.to_string(amount, :normal)
-    }
-    |> Map.merge(Config.opt(opts, :extra, %{}))
+    })
   end
 
   # `WalletStakeInputs`/`WalletUnstakeInputs` carry `amount` (plus asset-specific fields like
@@ -378,9 +446,7 @@ defmodule DpExchange.Coinbase.Prime do
   # StakingInitiateRequest never declared". `opts[:metadata]`, if given, is sent as the
   # sibling `metadata` object the schema also allows, since that one is genuinely top-level.
   defp wallet_stake_body(amount, opts) do
-    inputs =
-      %{"amount" => Decimal.to_string(amount, :normal)}
-      |> Map.merge(Config.opt(opts, :extra, %{}))
+    inputs = Map.merge(extra_fields(opts), %{"amount" => Decimal.to_string(amount, :normal)})
 
     %{"idempotency_key" => Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate()}
     |> Map.put("inputs", inputs)
@@ -413,6 +479,13 @@ defmodule DpExchange.Coinbase.Prime do
 
   defp put_present(map, _key, nil), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)
+
+  # `opts[:extra]` with string keys. An atom-keyed entry (`%{amount: "100"}`) beside the
+  # string-keyed field this module sets is two JSON members with one name, and the venue
+  # decides which of the two it reads. One spelling means a merge can actually replace.
+  defp extra_fields(opts) do
+    opts |> Config.opt(:extra, %{}) |> Map.new(fn {key, value} -> {to_string(key), value} end)
+  end
 
   defp post(path, body, credentials: credentials, opts: opts) do
     encoded = Jason.encode!(body)

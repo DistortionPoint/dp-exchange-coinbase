@@ -391,6 +391,54 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
     end
 
+    test "an unparseable frame puts the reason in the notice, not a copy of the frame" do
+      # `%Jason.DecodeError{}` holds the whole payload in `:data`. A level2 frame is hundreds
+      # of kilobytes, and every notice subscriber got its own copy of one that failed to parse.
+      huge = "{" <> String.duplicate("a", 200_000)
+
+      assert {:ok, _state} = Socket.handle_frame({:text, huge}, state())
+
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality} = notice}
+      assert is_binary(notice.details.reason)
+      assert notice.details.reason =~ "position 1"
+      assert :erlang.external_size(notice) < 5_000
+    end
+
+    test "a fault on every frame is reported once per connection, not once per frame" do
+      # A ticker is several frames a second per product. A fault in the venue's format fails
+      # every one of them, and each used to raise its own identical notice.
+      bad = fn product, price ->
+        update_in(@ticker["events"], fn [event] ->
+          [
+            update_in(event["tickers"], fn [t] ->
+              [t |> Map.put("price", price) |> Map.put("product_id", product)]
+            end)
+          ]
+        end)
+      end
+
+      send_bad = fn state, product, price ->
+        {:ok, next} = Socket.handle_frame({:text, Jason.encode!(bad.(product, price))}, state)
+        next
+      end
+
+      after_two = state() |> send_bad.("BTC-USD", "null") |> send_bad.("BTC-USD", "nope")
+
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+      refute_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+      refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
+
+      # Another product with the same fault is its own fault.
+      after_three = send_bad.(after_two, "ETH-USD", "null")
+      assert_received {:dp_exchange, :coinbase, %Notice{details: %{payload: "ETH-USD"}}}
+
+      # A reconnect forgets what was reported: a fault still there is reported again.
+      {:ok, reconnected} = Socket.handle_connect(%{}, after_three)
+      _state = send_bad.(reconnected, "BTC-USD", "null")
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality, details: details}}
+      assert details.payload == "BTC-USD"
+    end
+
     test "an unrecognised channel is ignored rather than guessed at" do
       assert {:ok, _state} = frame(%{"channel" => "something_new", "events" => []})
       refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
@@ -529,35 +577,50 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert message.product_ids == ~w(BTC-USD)
     end
 
-    # Reaches the private builder through the public path, since that is what actually
-    # runs in production. `send/3` fails on a dead pid, which is enough to observe the
-    # message that was built.
-    defp subscription(channel, symbols, credentials) do
-      dead = dead_pid()
+    # The message `subscribe/4` builds, from the function `subscribe/4` itself builds it with.
+    # These assertions used to run against a `rebuild/3` in this file that copied the same
+    # `cond` (including what each channel gets a JWT for), so deleting the JWT from `level2`,
+    # or attaching one to `ticker`, in the socket left every one of them green.
+    defp subscription(channel, symbols, credentials),
+      do: Socket.subscription_frame(channel, symbols, credentials)
 
-      case Socket.subscribe(dead, channel, symbols, credentials) do
-        {:error, {:credentials_required, _channel}} = refusal -> refusal
-        {:error, {:unsupported_key_size, _size}} = error -> error
-        _sent_or_failed -> rebuild(channel, symbols, credentials)
-      end
+    test "market_trades is public too: no jwt, even when credentials are held" do
+      assert {:ok, message} = subscription("market_trades", ~w(BTC-USD), @credentials)
+      refute Map.has_key?(message, :jwt)
     end
 
-    defp rebuild(channel, symbols, credentials) do
-      products = Enum.map(symbols, &DpExchange.Coinbase.SymbolFormat.to_exchange_symbol/1)
-      base = %{type: "subscribe", product_ids: products, channel: channel}
+    test "a public channel carries no jwt even when credentials are held" do
+      assert {:ok, message} = subscription("ticker", ~w(BTC-USD), @credentials)
+      refute Map.has_key?(message, :jwt)
+    end
 
-      cond do
-        channel == "user" ->
-          {:ok, token} = DpExchange.Coinbase.Auth.jwt(credentials)
-          {:ok, Map.put(base, :jwt, token)}
+    test "credentials that cannot sign are refused for level2, not sent unsigned" do
+      assert {:error, {:unsupported_key_size, 3}} =
+               subscription("level2", ~w(BTC-USD), %{
+                 api_key: "k",
+                 api_secret: Base.encode64("abc")
+               })
+    end
 
-        channel == "level2" and not is_nil(credentials) ->
-          {:ok, token} = DpExchange.Coinbase.Auth.jwt(credentials)
-          {:ok, Map.put(base, :jwt, token)}
+    test "subscribe/4 puts exactly that message on the wire" do
+      test = self()
 
-        true ->
-          {:ok, base}
-      end
+      socket =
+        spawn(fn ->
+          receive do
+            {:"$websockex_send", from, {:text, raw}} ->
+              send(test, {:wire, Jason.decode!(raw)})
+              :gen.reply(from, :ok)
+          end
+        end)
+
+      assert :ok = Socket.subscribe(socket, "level2", ~w(btc-usd), @credentials)
+      assert_receive {:wire, wire}, 1_000
+
+      assert wire["type"] == "subscribe"
+      assert wire["channel"] == "level2"
+      assert wire["product_ids"] == ["BTC-USD"]
+      assert length(String.split(wire["jwt"], ".")) == 3
     end
   end
 
@@ -637,6 +700,38 @@ defmodule DpExchange.Coinbase.SocketTest do
         refute_received {:dp_exchange, :coinbase, %Types.OrderBook{}}
         refute_received {:dp_exchange, :coinbase, %Types.OrderBookDelta{}}
       end
+    end
+
+    test "an event of many unreadable rows raises ONE notice that counts them" do
+      # What makes a row unreadable is usually the venue's format (a side this package does
+      # not know, a quantity sent as null), which is true of every row at once. One notice per
+      # row sent a consumer tens of thousands of them for a single refused snapshot, through
+      # the one fan-out path that is never bounded.
+      rows =
+        for n <- 1..50 do
+          %{
+            "event_time" => "2026-08-28T14:53:45.000000Z",
+            "side" => "sideways",
+            "price_level" => "#{n}.00",
+            "new_quantity" => "1"
+          }
+        end
+
+      frame = %{
+        @snapshot
+        | "events" => [%{"type" => "snapshot", "product_id" => "BTC-USD", "updates" => rows}]
+      }
+
+      assert {:ok, _state} = Socket.handle_frame({:text, Jason.encode!(frame)}, state())
+
+      sent = collect([])
+      quality = for {:dp_exchange, :coinbase, %Notice{kind: :data_quality} = n} <- sent, do: n
+
+      assert [notice] = quality
+      assert notice.details.bad_rows == 50
+      assert notice.details.channel == :level2
+      assert notice.details.payload =~ "event_time"
+      refute Enum.any?(sent, &match?({:dp_exchange, :coinbase, %Types.OrderBook{}}, &1))
     end
 
     test "a snapshot's rows are sorted even when the venue sends them out of price order" do

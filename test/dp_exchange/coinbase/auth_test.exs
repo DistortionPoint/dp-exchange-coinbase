@@ -91,6 +91,17 @@ defmodule DpExchange.Coinbase.AuthTest do
     test "a non-base64 secret is refused" do
       assert {:error, :invalid_base64} = Auth.jwt(%{@credentials | api_secret: "not base64 !!"})
     end
+
+    test "a PEM key is named as an unsupported format, not reported as bad Base64" do
+      # `alg` is always EdDSA. A PEM block is not Base64, so it answered `:invalid_base64`
+      # and sent the reader to check an encoding that was fine.
+      pem = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEE\n-----END EC PRIVATE KEY-----\n"
+
+      credentials = %{@credentials | api_secret: pem}
+
+      assert {:error, :unsupported_key_format} = Auth.jwt(credentials)
+      assert {:error, :unsupported_key_format} = Auth.rest_headers(:get, "/x", nil, credentials)
+    end
   end
 
   describe "rest_headers/4" do

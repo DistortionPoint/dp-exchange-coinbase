@@ -256,8 +256,13 @@ failures, they now arrive as `{:refused, {:venue_error, 401, _}}`.**
 
 A credential that cannot produce a signature — a malformed `api_secret`, or a map missing
 `:api_key` / `:api_secret` — refuses **locally**, before anything is sent:
-`{:error, :invalid_base64}`, `{:error, {:unsupported_key_size, n}}`, or
-`{:error, {:missing_credentials, :coinbase}}`.
+`{:error, :invalid_base64}`, `{:error, {:unsupported_key_size, n}}`,
+`{:error, :unsupported_key_format}`, or `{:error, {:missing_credentials, :coinbase}}`.
+
+Only Ed25519 keys sign: `api_secret` is the Base64 of a 32-byte seed or a 64-byte
+seed-plus-public-key. A PEM block (the form an ECDSA key takes) answers
+`:unsupported_key_format`, which is the key type being refused rather than an encoding
+fault. It is not converted.
 
 This package used to drop the `Authorization` header and send the request anyway. On a
 public market-data `GET` that is harmless — Coinbase serves those anonymously. On a
@@ -409,13 +414,21 @@ sending your subscribe frames, capping throughput and starving `ticker`.
 every message on a connection and says its servers can drop messages even though the
 transport is TCP. This package checks that numbering. A jump raises a `:data_quality`
 notice with `details.reason: :sequence_gap` and the number of messages lost. `details.symbols`
-lists every symbol the connection delivers. The numbering is per connection, so any of those
-could be the one that lost a message. Treat it exactly as `:link_up` below: the book you
-built from deltas is no longer reliable, so re-read it.
+lists every symbol the connection delivers, **under the names you subscribed**: a symbol the
+venue renamed (see "Frames are tagged with the symbol you subscribed" above) is listed as you
+asked for it, not as the venue tagged it, and one you no longer want is left out. The
+numbering is per connection, so any of those could be the one that lost a message. Treat it
+exactly as `:link_up` below: the book you built from deltas is no longer reliable, so
+re-read it.
 
-**A level2 event with an unreadable row is not delivered at all.** Each bad row raises a
-`:data_quality` notice, and the snapshot or delta it came in is dropped whole. Delivering the
-rest would hand you a book missing a level, or a delta leaving a removed level standing. A
+**A `:data_quality` fault is reported once per connection, not once per frame.** The same
+channel, product and kind of reason on the same connection raises one notice; every frame
+carrying it is still dropped. After a reconnect a fault that persists is reported again.
+
+**A level2 event with an unreadable row is not delivered at all.** The event raises **one**
+`:data_quality` notice (it names the first unreadable row; `details.bad_rows` counts them),
+and the snapshot or delta it came in is dropped whole. Delivering the rest would hand you a
+book missing a level, or a delta leaving a removed level standing. A
 message older than one already delivered is dropped, as the venue advises,
 with `details.reason: :out_of_order`. If several such messages arrive in a row, counting up
 one at a time, the baseline this package held was wrong, not the messages. It adopts the
@@ -456,17 +469,19 @@ children = [{DpExchange.Coinbase, credentials: my_credentials(), resubscribe_int
 Default is **60,000 ms**, and it is a diagnostic knob, not a way to make coverage catch
 up faster. A value shorter than one full re-issue cycle across your current shard count
 is not honoured: this package derives the floor from the shard count that actually
-exists — `(shards - 1) * 5_000ms + 5_000ms` — and uses that instead, logging the
+exists — `(shards - 1) * shard_spacing_ms + 5_000ms` — and uses that instead, logging the
 substitution, rather than wedging the feed with overlapping re-issue cycles queued behind
 each other. That is a real, measured incident (DpCryptoManagement's issue #22): it
 happened both from an explicit `resubscribe_interval_ms: 5_000` and from the 60s
-*default* past thirteen shards. There is no way to make this package re-issue faster than
-that floor — only a log line explaining why it didn't.
+*default* past thirteen shards, when `shard_spacing_ms` defaulted to 5,000ms. At the current
+1,000ms default the 60s default is extended from **57 shards** upward. There is no way to
+make this package re-issue faster than that floor — only a log line explaining why it
+didn't.
 
-**Shard count now counts `level2` and `ticker` separately, and `level2` needs more of
-them than `ticker` does** — see the next section. Thirteen shards is reachable from
-`level2` alone once your universe passes 360 symbols; it no longer takes 1,101 symbols the
-way it did when both channels shared one 100-per-socket grouping.
+**Shard count counts `level2` and `ticker` separately, and `level2` needs more of them than
+`ticker` does** — see the next section. Fifty-seven shards is reachable from `level2` alone
+once your universe passes 1,680 symbols at the default 30 per socket (`ceil(1_681 / 30)`),
+and sooner once `ticker` and `market_trades` shards are counted beside it.
 
 **A shard whose socket never opened at all is retried on this same cadence, and it says
 so.** A transient connect failure on a shard beyond the first (a brief DNS blip, a refused
@@ -721,7 +736,15 @@ them.** Portfolio-scoped calls send a flat `{idempotency_key, currency_symbol, a
 inputs: {amount, ...}}` — no `currency` field at all, because a wallet already names one
 asset on the venue's side — and `opts[:extra]` merges into `inputs`, not the top level.
 `opts[:metadata]`, where the venue defines that field, is sent as its own sibling key
-either way.
+either way. `opts[:extra]` fills in fields this package does not know; it **cannot replace**
+`amount`, `currency_symbol`, `idempotency_key` or `transaction_ids`, the ones it validated.
+
+**What is refused before anything is signed.** `:portfolio_id` and `:wallet_id` are path
+segments and must be strings of letters, digits, `_` and `-`; anything else (including `""`
+and `nil` for a wallet) answers `{:error, {:invalid_portfolio_id, value}}` or
+`{:error, {:invalid_wallet_id, value}}`. A given `:idempotency_key` must be a non-empty
+string (`{:error, {:invalid_idempotency_key, value}}`): the venue answers a repeated key with
+the first response, so `""` made every later stake a copy of the first.
 
 The other five are Coinbase-specific — no generic callback fits them, so they
 are plain functions on `DpExchange.Coinbase` instead:
@@ -955,6 +978,13 @@ feed is too busy to answer within its call budget, and `{:error, {:feed_exited, 
 when it dies while answering. `coverage/1` and `coverage_by_kind/1` answer an empty map in
 all three cases, which means "not observed". Treat `:feed_timeout` as transient and retry.
 Treat the other two as a feed your supervision tree has to bring back.
+
+**A symbol list that cannot be sent is refused, and nothing changes.** `subscribe/2`,
+`unsubscribe/2` and `update_symbols/2` take a list of non-empty strings. Anything else (an
+atom, `nil`, `""`, or an argument that is not a list) answers
+`{:error, {:invalid_symbols, invalid}}` before the feed's state is touched. It used to raise
+inside the feed, which is shared by every caller of the instance: the supervisor restarted
+it from its static options and every symbol every caller had subscribed was gone.
 
 ## `:websocket_url` in application config replaces the default socket endpoint
 

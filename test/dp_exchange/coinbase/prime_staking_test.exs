@@ -809,6 +809,163 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
     end
   end
 
+  describe "what is refused before anything is signed" do
+    @bad_ids [nil, "", " ", "a/b", "../x", "pf?x=1", "pf.1", 7, :atom, ["pf-1"]]
+
+    test "a portfolio or wallet id that is not a plain path segment sends nothing" do
+      me = self()
+      one = Decimal.new(1)
+
+      for bad <- @bad_ids do
+        assert {:error, {:invalid_portfolio_id, ^bad}} =
+                 Prime.stake_portfolio(@credentials, bad, "ETH", one, opts(me))
+
+        assert {:error, {:invalid_portfolio_id, ^bad}} =
+                 Prime.unstake_portfolio(@credentials, bad, "ETH", one, opts(me))
+
+        assert {:error, {:invalid_portfolio_id, ^bad}} =
+                 Prime.query_transaction_validators(
+                   @credentials,
+                   bad,
+                   opts(me, transaction_ids: ["tx-1"])
+                 )
+
+        assert {:error, {:invalid_portfolio_id, ^bad}} =
+                 Prime.stake_wallet(@credentials, bad, "w-1", "ETH", one, opts(me))
+
+        assert {:error, {:invalid_wallet_id, ^bad}} =
+                 Prime.stake_wallet(@credentials, "pf-1", bad, "ETH", one, opts(me))
+
+        assert {:error, {:invalid_wallet_id, ^bad}} =
+                 Prime.unstake_wallet(@credentials, "pf-1", bad, "ETH", one, opts(me))
+
+        assert {:error, {:invalid_wallet_id, ^bad}} =
+                 Prime.preview_unstake_wallet(@credentials, "pf-1", bad, "ETH", one, opts(me))
+
+        assert {:error, {:invalid_wallet_id, ^bad}} =
+                 Prime.claim_rewards(@credentials, "pf-1", bad, opts(me))
+
+        assert {:error, {:invalid_wallet_id, ^bad}} =
+                 Prime.staking_status(@credentials, "pf-1", bad, opts(me))
+
+        assert {:error, {:invalid_wallet_id, ^bad}} =
+                 Prime.unstake_status(@credentials, "pf-1", bad, opts(me))
+      end
+
+      refute_received {:request, _method, _path, _raw, _headers}
+    end
+
+    test "the facade's wallet scope cannot reach /wallets//" do
+      # `stake/3` picks the wallet scope on `wallet_id != nil`, so `""` was a wallet.
+      me = self()
+
+      assert {:error, {:invalid_wallet_id, ""}} =
+               DpExchange.Coinbase.stake(
+                 "ETH",
+                 Decimal.new(1),
+                 opts(me, credentials: @credentials, portfolio_id: "pf-1", wallet_id: "")
+               )
+
+      refute_received {:request, _method, _path, _raw, _headers}
+    end
+
+    test "an idempotency key that is given must be a non-empty string" do
+      # The venue answers a repeated key with the first response, so `""` turned every later
+      # stake into a copy of the first, reported as a success.
+      me = self()
+      one = Decimal.new(1)
+
+      for bad <- ["", 7, :key, false] do
+        assert {:error, {:invalid_idempotency_key, ^bad}} =
+                 Prime.stake_portfolio(
+                   @credentials,
+                   "pf-1",
+                   "ETH",
+                   one,
+                   opts(me, idempotency_key: bad)
+                 )
+
+        assert {:error, {:invalid_idempotency_key, ^bad}} =
+                 Prime.unstake_wallet(
+                   @credentials,
+                   "pf-1",
+                   "w-1",
+                   "ETH",
+                   one,
+                   opts(me, idempotency_key: bad)
+                 )
+
+        assert {:error, {:invalid_idempotency_key, ^bad}} =
+                 Prime.claim_rewards(@credentials, "pf-1", "w-1", opts(me, idempotency_key: bad))
+      end
+
+      refute_received {:request, _method, _path, _raw, _headers}
+
+      assert {:ok, _result} =
+               Prime.stake_portfolio(
+                 @credentials,
+                 "pf-1",
+                 "ETH",
+                 one,
+                 opts(me, idempotency_key: "9b2c0c46-9d56-4c2c-8f43-0f7a4c2d9e11")
+               )
+
+      assert_receive {:request, "POST", _path, raw, _headers}
+      assert Jason.decode!(raw)["idempotency_key"] == "9b2c0c46-9d56-4c2c-8f43-0f7a4c2d9e11"
+    end
+
+    test "opts[:extra] cannot replace the fields that were validated" do
+      me = self()
+
+      hostile = %{
+        "amount" => "1000",
+        "currency_symbol" => "DOGE",
+        "idempotency_key" => "stolen",
+        amount: "2000"
+      }
+
+      assert {:ok, _result} =
+               Prime.stake_portfolio(
+                 @credentials,
+                 "pf-1",
+                 "eth",
+                 Decimal.new("1"),
+                 opts(me, extra: hostile)
+               )
+
+      assert_receive {:request, "POST", _path, raw, _headers}
+      body = Jason.decode!(raw)
+      assert body["amount"] == "1"
+      assert body["currency_symbol"] == "ETH"
+      assert body["idempotency_key"] =~ ~r/\A[0-9a-f-]{36}\z/
+
+      assert {:ok, _result} =
+               Prime.stake_wallet(
+                 @credentials,
+                 "pf-1",
+                 "w-1",
+                 "ETH",
+                 Decimal.new("1"),
+                 opts(me, extra: %{"amount" => "1000", "validator_address" => "0xabc"})
+               )
+
+      assert_receive {:request, "POST", _path, raw, _headers}
+      inputs = Jason.decode!(raw)["inputs"]
+      assert inputs["amount"] == "1"
+      assert inputs["validator_address"] == "0xabc"
+
+      assert {:ok, _result} =
+               Prime.query_transaction_validators(
+                 @credentials,
+                 "pf-1",
+                 opts(me, transaction_ids: ["tx-1"], extra: %{"transaction_ids" => ["other"]})
+               )
+
+      assert_receive {:request, "POST", _path, raw, _headers}
+      assert Jason.decode!(raw)["transaction_ids"] == ["tx-1"]
+    end
+  end
+
   describe "a retried Prime request" do
     test "is signed again, with its own timestamp" do
       # A retry carrying the first attempt's `X-CB-ACCESS-TIMESTAMP` ages with every attempt

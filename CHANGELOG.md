@@ -20,6 +20,82 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Found by reading the socket, feed, Prime and signing code against
+`docs/reference/coinbase/openapi/at-async.json` and `prime-spec.yaml`.
+
+- **A second `subscribe/2` or `update_symbols/2` inside the boot stagger opened shards on
+  stale symbols.** Each `reshard/1` scheduled an `:open_shard` for every key still waiting,
+  and nothing replaced an earlier one. The older fired first and opened the shard on the
+  symbols it was scheduled with; the newer one, carrying the current symbols, then found the
+  shard present and was dropped. A symbol added in that window was never subscribed (the
+  60-second re-issue sends the recorded, stale list), and one removed in it was subscribed
+  and held a `level2` slot. `Feed` now keeps one pending open per shard key
+  (`state.pending_opens`): scheduling another replaces and cancels the earlier timer, a copy
+  already in the mailbox is ignored by its `ref`, and a plan that no longer has the key
+  cancels it. `retry_missing_shards/1` leaves a key alone while its open is pending.
+- **One bad symbol in a `subscribe/2`, `unsubscribe/2` or `update_symbols/2` list wiped every
+  caller's subscription.** `SymbolFormat.to_exchange_symbol/1` has no clause for a
+  non-binary, so `subscribe(["BTC-USD", :eth])` or `update_symbols(nil)` raised inside the
+  shared `Feed`'s `handle_call/3`; the supervisor restarted it from its static options and
+  every symbol every caller had subscribed was gone. The three calls now take a list of
+  non-empty strings and answer `{:error, {:invalid_symbols, invalid}}` otherwise, before any
+  state moves.
+- **A `:sequence_gap` notice named symbols the consumer does not hold.** `details.symbols`
+  carried the venue's ids, and the venue renames aliased products (112 of the first 114 USDC
+  ones), so a consumer that subscribed `XLM-USDC` was told to re-read `XLM-USD`. `Feed` now
+  resolves them through the alias catalogue the way it resolves a delivered frame, and leaves
+  out a symbol that is no longer wanted.
+- **One refused `level2` event raised one `:data_quality` notice per unreadable row.** A
+  snapshot is ~44,000 rows at `BTC-USD`'s measured size and an unreadable row is usually a
+  fact about the venue's format (a side this package does not know, a `null` quantity), true
+  of every row, so a single refused snapshot sent notice subscribers tens of thousands of
+  notices through the one fan-out path that is never bounded. It is now one notice per event,
+  naming the first unreadable row, with `details.bad_rows` counting them. The event is still
+  refused whole.
+- **A fault on every frame raised a notice on every frame.** A ticker with no timestamp or a
+  trade with a null size fails each frame that carries it, and `ticker` alone is several
+  frames a second per product, so notice subscribers got an identical `:data_quality` notice
+  per frame for as long as the fault lasted. Each fault (channel, product, kind of reason) is
+  now reported once per connection; the frames are still dropped every time. A reconnect
+  reports a fault that is still present again, and the remembered set is capped at 256.
+- **A frame that was not JSON copied itself into the notice.** `report_quality/4` put the
+  `Jason.DecodeError` struct, which holds the entire payload in `:data`, into `details.reason`
+  and into the message through `inspect/1`. `details.reason` is now the decoder's own message
+  (the byte and its position).
+- **`Prime` signed and sent any value as a portfolio or wallet id.** `nil` interpolated to
+  `""` and reached `/portfolios//staking/initiate`; the facade's wallet scope was chosen by
+  `wallet_id != nil`, so `""` reached `/wallets//`; `"x/../y"` or `"x?a=1"` named another path
+  from the one the function promises. A portfolio or wallet id must be a string of letters,
+  digits, `_` and `-`, otherwise `{:error, {:invalid_portfolio_id, value}}` or
+  `{:error, {:invalid_wallet_id, value}}` and nothing is signed or sent.
+- **`Prime` accepted `idempotency_key: ""`.** `"" || generate()` is `""`, and the venue
+  answers a repeated key with the first response, so every later stake or unstake sent with it
+  came back `{:ok, _}` as a copy of the first. A given key must be a non-empty string, otherwise
+  `{:error, {:invalid_idempotency_key, value}}`.
+- **`Prime`'s `opts[:extra]` could replace the amount it had just validated.** It was merged
+  over `amount`, `currency_symbol`, `idempotency_key` and `transaction_ids`, so
+  `extra: %{"amount" => "1000"}` sent 1000 after `valid_amount/1` had checked 1. It is merged
+  under them now, with atom keys spelled as strings so a merge can replace what it names.
+- **A PEM `api_secret` was reported as `:invalid_base64`.** The error sent the reader to check
+  an encoding that was fine; the key type is what `Auth.jwt/2` does not sign with. It answers
+  `{:error, :unsupported_key_format}`. Nothing is converted.
+
+### Changed
+
+- **`usage-rules.md` gave the resubscribe floor as `(shards - 1) * 5_000ms + 5_000ms`** and
+  said the 60s default was extended past thirteen shards. The code reads `shard_spacing_ms`,
+  which defaults to `1_000`, so it is extended from 57 shards. The same stale
+  figure was in a comment in `feed.ex`. Both are corrected.
+- **Tests that could not fail.** The `subscription messages` tests in `socket_test.exs`
+  asserted on a `rebuild/3` that copied `Socket`'s own `cond`, so deleting the JWT from
+  `level2`, or attaching one to `ticker`, left them green; they call
+  `Socket.subscription_frame/3` now, and a new one pins what `subscribe/4` puts on the wire.
+  The feed test titled "a credential-less feed still gets ticker only" asserted `["ticker"]`
+  against behaviour its own code comment says was removed, and passed only because the `level2`
+  shard is deferred behind the `ticker` one; it now waits for and asserts both.
+
 ## [0.3.100] - 2026-10-11
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

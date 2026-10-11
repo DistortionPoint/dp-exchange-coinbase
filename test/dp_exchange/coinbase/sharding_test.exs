@@ -1140,14 +1140,18 @@ defmodule DpExchange.Coinbase.ShardingTest do
     end
 
     test "the resubscribe timer re-issues every open shard's subscriptions" do
-      {feed, socket} = start_with_socket()
+      # This asserted that the feed and the socket were still alive, which a timer that
+      # re-issued nothing satisfies as well as one that re-issued everything.
+      socket = frame_reporting_socket(self())
+      feed = start_feed(socket: socket)
 
-      Feed.subscribe(feed, ~w(BTC-USD), to: self())
+      assert :ok = Feed.subscribe(feed, ~w(BTC-USD), to: self())
+      assert_receive {:frame, "subscribe", ["BTC-USD"]}, 5_000
+
       send(feed, :resubscribe)
-      :sys.get_state(feed)
 
+      assert_receive {:frame, "subscribe", ["BTC-USD"]}, 5_000
       assert Process.alive?(feed)
-      assert Process.alive?(socket)
     end
 
     test "the resubscribe timer skips a shard whose socket has died" do
@@ -1213,6 +1217,95 @@ defmodule DpExchange.Coinbase.ShardingTest do
       # keeps the same safe shape as every other stagger assertion in this file rather
       # than being the one exception.
       assert t1 - before >= @test_shard_spacing_ms_precise / 2
+    end
+  end
+
+  describe "a deferred shard open is replaced, not repeated" do
+    # 250 quote symbols are three `ticker` shards: 100 (opened now, on the injected socket),
+    # 100 and 50 (deferred). The spacing is ten minutes, so a deferred open stays pending for
+    # the whole test and each assertion reads `pending_opens` rather than waiting on a timer.
+    # A later call that touches shards 1 and 2 opens shard 1 now, as its primary, and defers
+    # shard 2: that is the open the older message used to win the race for.
+    defp symbols_named(prefix, count) do
+      for n <- 1..count do
+        "#{prefix}#{String.pad_leading(Integer.to_string(n), 3, "0")}-USD"
+      end
+    end
+
+    defp start_staggered_feed do
+      start_supervised!(
+        {Feed,
+         name: :"feed_#{System.unique_integer([:positive])}",
+         socket: fake_socket(),
+         shard_spacing_ms: 600_000,
+         channels: [:quotes],
+         alias_map_source: fn -> {:ok, %{}} end}
+      )
+    end
+
+    test "an update_symbols/2 inside the window replaces the pending open's symbols" do
+      # The older open used to fire first with the symbols it was scheduled with and open the
+      # shard on them; the newer one, carrying the current symbols, then found the shard open
+      # and was dropped. A symbol added in the window was never subscribed.
+      first = symbols_named("A", 250)
+      feed = start_staggered_feed()
+
+      assert :ok = Feed.subscribe(feed, first)
+
+      assert %{{"ticker", 2} => %{ref: first_ref}, {"ticker", 1} => %{}} =
+               :sys.get_state(feed).pending_opens
+
+      # Shard 2's 50 symbols are replaced by 60 others; shard 1 is unchanged.
+      second = Enum.take(first, 200) ++ symbols_named("B", 60)
+      assert :ok = Feed.update_symbols(feed, second)
+
+      state = :sys.get_state(feed)
+      assert Map.has_key?(state.shards, {"ticker", 1})
+      assert %{{"ticker", 2} => %{ref: second_ref}} = state.pending_opens
+      assert second_ref != first_ref
+
+      # The copy that was already in the mailbox when it was replaced does nothing.
+      send(feed, {:open_shard, "ticker", 2, Enum.drop(first, 200), first_ref})
+      state = :sys.get_state(feed)
+      refute Map.has_key?(state.shards, {"ticker", 2})
+      assert %{{"ticker", 2} => %{ref: ^second_ref}} = state.pending_opens
+
+      # The current one opens the shard on what is wanted now.
+      send(feed, {:open_shard, "ticker", 2, symbols_named("B", 60), second_ref})
+      state = :sys.get_state(feed)
+      assert state.pending_opens == %{}
+      assert state.shards[{"ticker", 2}].symbols == symbols_named("B", 60)
+    end
+
+    test "a reshard whose plan no longer has the key cancels its pending open" do
+      # The symbols were unsubscribed before the open fired. It used to open a socket anyway
+      # and subscribe them.
+      first = symbols_named("A", 250)
+      feed = start_staggered_feed()
+
+      assert :ok = Feed.subscribe(feed, first)
+
+      assert %{{"ticker", 1} => %{ref: ref}, {"ticker", 2} => %{}} =
+               :sys.get_state(feed).pending_opens
+
+      assert :ok = Feed.unsubscribe(feed, Enum.drop(first, 100))
+      assert :sys.get_state(feed).pending_opens == %{}
+
+      send(feed, {:open_shard, "ticker", 1, Enum.slice(first, 100, 100), ref})
+      refute Map.has_key?(:sys.get_state(feed).shards, {"ticker", 1})
+    end
+
+    test "the resubscribe tick leaves a key alone while its open is pending" do
+      # `retry_missing_shards/1` would otherwise replace the pending open with one
+      # `(base + position)` spacings away, pushing it further out on every tick.
+      feed = start_staggered_feed()
+      assert :ok = Feed.subscribe(feed, symbols_named("A", 250))
+      pending = :sys.get_state(feed).pending_opens
+      assert Enum.sort(Map.keys(pending)) == [{"ticker", 1}, {"ticker", 2}]
+
+      send(feed, :resubscribe)
+
+      assert :sys.get_state(feed).pending_opens == pending
     end
   end
 

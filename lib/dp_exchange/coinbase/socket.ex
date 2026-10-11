@@ -97,6 +97,21 @@ defmodule DpExchange.Coinbase.Socket do
   this family's `usage-rules/feeds.md` for the full account of why those two signals
   are sufficient.
 
+  ## An unreadable `level2` row refuses the whole event, and says so once
+
+  A row whose `side` is neither `bid` nor `offer`, or whose `price_level` or `new_quantity`
+  does not parse, refuses the snapshot or delta it arrived in: delivering the rest would hand
+  a consumer a book missing a level, or a delta leaving a removed level standing. The refusal
+  raises **one** `:data_quality` notice per event. It names the first unreadable row and
+  carries `details.bad_rows`, the number of unreadable rows in that event. It used to raise one
+  per row, and an unreadable row is usually a fact about the venue's format rather than about
+  one level, so a single refused snapshot of ~44,000 rows could send a consumer ~44,000
+  notices through the one fan-out path that is never bounded.
+
+  A frame that is not JSON at all raises a `:data_quality` notice whose `details.reason` is
+  the decoder's own message (the byte and its position), not the decoder's error struct, which
+  holds the entire frame and would copy it into every notice.
+
   ## `market_trades` — the trade tape, taker side, and no snapshot history
 
   `market_trades` is public (no JWT) and delivers each print as a
@@ -285,6 +300,10 @@ defmodule DpExchange.Coinbase.Socket do
   # makes. See `handle_disconnect/2`.
   @stable_session_ms 30_000
 
+  # How many distinct `:data_quality` faults one connection remembers having reported. See
+  # `report_quality/5`.
+  @max_reported_faults 256
+
   @doc """
   How long to wait before the reconnect that `attempt` is about to make.
 
@@ -377,7 +396,11 @@ defmodule DpExchange.Coinbase.Socket do
       # many consecutive sessions dropped before `@stable_session_ms`. See
       # `handle_disconnect/2`.
       connected_at: nil,
-      short_sessions: 0
+      short_sessions: 0,
+      # The `{channel, subject, kind}` of each `:data_quality` fault already reported on THIS
+      # connection. See `report_quality/5`. Cleared on every connect, capped at
+      # `@max_reported_faults`.
+      reported_faults: MapSet.new()
     }
 
     opts = connection_opts(opts)
@@ -441,11 +464,21 @@ defmodule DpExchange.Coinbase.Socket do
   @spec subscribe(pid(), String.t(), [String.t()], Credentials.t() | nil) ::
           :ok | {:error, term()}
   def subscribe(socket, channel, symbols, credentials \\ nil) do
-    products = Enum.map(symbols, &SymbolFormat.to_exchange_symbol/1)
-
-    with {:ok, message} <- subscription_message(channel, products, credentials) do
+    with {:ok, message} <- subscription_frame(channel, symbols, credentials) do
       FrameSender.send(socket, {:text, Jason.encode!(message)}, "coinbase subscribe #{channel}")
     end
+  end
+
+  # The subscribe message exactly as `subscribe/4` sends it: symbols converted to the venue's
+  # native form, and the JWT attached or withheld by channel. Exposed (not `defp`) and
+  # `@doc false` so a test can pin the message itself. Those tests used to rebuild it with a
+  # copy of the same `cond` and assert on the copy, which passes whatever this does.
+  @doc false
+  @spec subscription_frame(String.t(), [String.t()], map() | nil) ::
+          {:ok, map()} | {:error, term()}
+  def subscription_frame(channel, symbols, credentials) do
+    products = Enum.map(symbols, &SymbolFormat.to_exchange_symbol/1)
+    subscription_message(channel, products, credentials)
   end
 
   @doc "Unsubscribes `symbols` from `channel`."
@@ -490,7 +523,8 @@ defmodule DpExchange.Coinbase.Socket do
          last_frame_at: now_ms(),
          silence_check: check
      }
-     |> Map.put(:connected_at, now_ms())}
+     |> Map.put(:connected_at, now_ms())
+     |> Map.put(:reported_faults, MapSet.new())}
   end
 
   @impl true
@@ -612,11 +646,19 @@ defmodule DpExchange.Coinbase.Socket do
     case Jason.decode(payload) do
       {:ok, decoded} -> {:ok, sequenced(decoded, state)}
       # A payload that did not parse is reported, not swallowed and not fatal.
-      {:error, reason} -> {:ok, report_quality(state, :frame, payload, reason)}
+      {:error, reason} -> {:ok, report_quality(state, :frame, payload, decode_reason(reason))}
     end
   end
 
   def handle_frame(_frame, state), do: {:ok, state}
+
+  # **The reason, not the frame.** `%Jason.DecodeError{}` carries the whole payload in its
+  # `:data` field, and `report_quality/4` puts the reason into both the notice's message
+  # (through `inspect/1`) and its `details`. A `level2` frame that failed to parse is
+  # hundreds of kilobytes, so one bad frame sent every notice subscriber a copy of it, after
+  # `report_quality/4` had gone to the trouble of truncating `:payload` to 120 characters.
+  # The error's own message names the byte and the position, which is all a reader can use.
+  defp decode_reason(%Jason.DecodeError{} = error), do: Exception.message(error)
 
   # --- internal ----------------------------------------------------------
 
@@ -1070,17 +1112,33 @@ defmodule DpExchange.Coinbase.Socket do
   # delta one that left a stale level standing (`new_quantity: "0"` is how the venue says
   # "removed"). Both look like a whole, true answer. Found 2026-10-10. Still never fatal to
   # the connection, and the venue's next snapshot is a fresh baseline.
+  #
+  # **One notice per refused event, not one per unreadable row.** A snapshot is ~22,800 bid and
+  # ~21,100 ask rows at `BTC-USD`'s measured size, and what makes a row unreadable is usually
+  # a property of the venue's format (a side value this package does not know, a quantity it
+  # sends as `null`), which is true of every row at once. Reporting each one sent a consumer
+  # tens of thousands of `:data_quality` notices, through the one fan-out path that is
+  # deliberately never bounded, for one refused snapshot. The notice names the first
+  # unreadable row and `details.bad_rows` says how many there were.
   defp decode_rows(rows, state) do
-    {reversed, state, malformed?} =
-      Enum.reduce(rows, {[], state, false}, fn row, {levels, acc_state, malformed?} ->
+    {reversed, {bad_rows, first_bad}} =
+      Enum.reduce(rows, {[], {0, nil}}, fn row, {levels, {count, first}} ->
         case decode_row(row) do
-          {:ok, level} -> {[level | levels], acc_state, malformed?}
-          :error -> {levels, malformed_row(acc_state, row), true}
+          {:ok, level} -> {[level | levels], {count, first}}
+          :error -> {levels, {count + 1, first_unreadable(count, first, row)}}
         end
       end)
 
-    if malformed?, do: {:refused, state}, else: {:ok, Enum.reverse(reversed), state}
+    if bad_rows == 0 do
+      {:ok, Enum.reverse(reversed), state}
+    else
+      {:refused, malformed_rows(state, first_bad, bad_rows)}
+    end
   end
+
+  # The first unreadable row is the one reported; the rest are only counted.
+  defp first_unreadable(0, _first, row), do: row
+  defp first_unreadable(_count, first, _row), do: first
 
   defp decode_row(%{"side" => side, "price_level" => price, "new_quantity" => quantity})
        when side in ["bid", "offer"] do
@@ -1093,8 +1151,15 @@ defmodule DpExchange.Coinbase.Socket do
 
   defp decode_row(_row), do: :error
 
-  defp malformed_row(state, row),
-    do: report_quality(state, :level2, inspect(row), :unreadable_price_level_or_quantity)
+  defp malformed_rows(state, first_row, count) do
+    report_quality(
+      state,
+      :level2,
+      inspect(first_row),
+      :unreadable_price_level_or_quantity,
+      %{bad_rows: count}
+    )
+  end
 
   # `Types.OrderBookDelta.side/0` is `:bid | :ask` — singular, unlike `OrderBook`'s
   # separate `bids`/`asks` lists, because one delta level names its own side rather
@@ -1267,19 +1332,57 @@ defmodule DpExchange.Coinbase.Socket do
   # "CT-USD"}` thirty times a day with no way to tell a bad venue frame from a decoder gap.
   # `payload` keeps its old meaning and truncation, since hosts already read it. `channel`,
   # `reason` and a readable `message` are added, the way `report_sequence/3` already did.
-  defp report_quality(state, channel, detail, reason) do
+  defp report_quality(state, channel, detail, reason),
+    do: report_quality(state, channel, detail, reason, %{})
+
+  # `extra` is merged into `details` and never over the four keys hosts already read.
+  #
+  # **Once per fault per connection, not once per frame.** A fault in the venue's format
+  # (a ticker with no timestamp, a trade with a null size) fails every frame that carries
+  # it, and `ticker` alone is several frames a second per product, so this used to send
+  # every notice subscriber a stream of identical notices for as long as the fault lasted.
+  # The frame is still dropped every time; only the repeat notice is withheld. A fault is
+  # `{channel, subject, kind}`, where `kind` is the reason without the venue's value (see
+  # `fault_kind/1`), so a different bad value of the same kind is not a new fault. The set
+  # is cleared on every connect, so a fault still present after a reconnect is reported
+  # again, and it is capped at `@max_reported_faults` so a venue naming endless distinct
+  # subjects cannot grow it. Past the cap, new faults are reported every time, as before.
+  defp report_quality(state, channel, detail, reason, extra) do
     subject = String.slice(to_string(detail), 0, 120)
+    fault = {channel, subject, fault_kind(reason)}
+    reported = Map.get(state, :reported_faults, MapSet.new())
 
-    notify(
-      state,
-      Notice.new(:data_quality, :coinbase,
-        message: "dropped a #{channel} frame for #{subject}: #{inspect(reason)}",
-        details: %{payload: subject, channel: channel, reason: reason}
+    if MapSet.member?(reported, fault) do
+      state
+    else
+      notify(
+        state,
+        Notice.new(:data_quality, :coinbase,
+          message: "dropped a #{channel} frame for #{subject}: #{inspect(reason)}",
+          details: Map.merge(extra, %{payload: subject, channel: channel, reason: reason})
+        )
       )
-    )
 
-    state
+      remember_fault(state, reported, fault)
+    end
   end
+
+  defp remember_fault(state, reported, fault) do
+    if MapSet.size(reported) < @max_reported_faults do
+      Map.put(state, :reported_faults, MapSet.put(reported, fault))
+    else
+      state
+    end
+  end
+
+  # The reason with the venue's own value taken out: `{:invalid_decimal, :price, "x"}` and
+  # `{:invalid_decimal, :price, "y"}` are one kind of fault. A binary reason is a decode
+  # error's message, which names a byte position that differs frame to frame.
+  defp fault_kind(reason) when is_tuple(reason) and tuple_size(reason) > 1,
+    do: Tuple.delete_at(reason, tuple_size(reason) - 1)
+
+  defp fault_kind(reason) when is_binary(reason), do: :undecodable
+  defp fault_kind(reason), do: reason
 
   # Lossy by contract: a notice that cannot be delivered is dropped rather than retried.
   # Reporting on the work must never become the reason the work does not happen.

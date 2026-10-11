@@ -96,6 +96,15 @@ defmodule DpExchange.Coinbase.Auth do
   to use that default, for the reason above, is doc-derived rather than an arbitrary
   number that happens to match.
 
+  ## Only Ed25519 keys are supported
+
+  `alg` is `EdDSA`, so `api_secret` is the Base64 of a 32-byte seed or a 64-byte
+  seed-plus-public-key. A PEM block (the form an ECDSA private key takes) is not that: this
+  builder does not sign with ECDSA, and a PEM `api_secret` answers
+  `{:error, :unsupported_key_format}` rather than `{:error, :invalid_base64}`. It is
+  refused, not converted. Not probed against a live ECDSA key; this is the shape of the
+  string, nothing more.
+
   ## Credentials that cannot sign are refused here, by name
 
   A map without `:api_key` and `:api_secret` — `nil`, `%{}`, or one assembled with a
@@ -149,6 +158,12 @@ defmodule DpExchange.Coinbase.Auth do
 
   defp maybe_put_uri(claims, nil), do: claims
   defp maybe_put_uri(claims, uri) when is_binary(uri), do: Map.put(claims, "uri", uri)
+
+  # A PEM block (`-----BEGIN EC PRIVATE KEY-----`, the form an ECDSA key takes) is named for
+  # what it is. It is not Base64, so it used to answer `:invalid_base64` and send the reader
+  # to check an encoding that was fine, when the key type is what this builder does not
+  # support (`alg` is always `EdDSA`).
+  defp decode_private_key("-----BEGIN" <> _pem), do: {:error, :unsupported_key_format}
 
   # The raw 32-byte Ed25519 seed. Coinbase issues both a 32-byte seed and a 64-byte
   # seed-plus-public-key; the second is the seed followed by the public key, so the
