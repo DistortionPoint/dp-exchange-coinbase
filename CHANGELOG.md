@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.108] - 2026-10-11
+
 ### Fixed
 
 - **An order the venue calls `STOP` read back with `order_type: nil`.** The spec's `OrderType`
