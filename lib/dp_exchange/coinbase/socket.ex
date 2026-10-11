@@ -564,9 +564,15 @@ defmodule DpExchange.Coinbase.Socket do
 
   @impl true
   def handle_disconnect(%{reason: reason} = status, state) do
-    notify(state, Notice.new(:link_down, :coinbase, details: %{reason: inspect(reason)}))
+    # Bounded, as the venue-error quotes elsewhere in this package are: a refused upgrade
+    # carries the venue's response (headers and body) inside the reason, and that went whole
+    # into every notice subscriber and, as a metadata value, into every telemetry handler.
+    # A short reason such as `{:remote, :closed}` prints exactly as before.
+    reason_text = inspect(reason, limit: 50, printable_limit: 1_024)
+
+    notify(state, Notice.new(:link_down, :coinbase, details: %{reason: reason_text}))
     report_link_down(state)
-    Telemetry.link_down(:coinbase, inspect(reason))
+    Telemetry.link_down(:coinbase, reason_text)
 
     # `attempt_number` comes from `websockex` itself. It is a documented key of the
     # `connection_status_map` this function already pattern-matches on

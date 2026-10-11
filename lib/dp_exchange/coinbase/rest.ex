@@ -3979,6 +3979,10 @@ defmodule DpExchange.Coinbase.Rest do
   defp type_atom("MARKET"), do: :market
   defp type_atom("LIMIT"), do: :limit
   defp type_atom("STOP_LIMIT"), do: :stop_limit
+  # The spec's `OrderType` enum names `STOP` ("becomes a market order when triggered") and
+  # Core's `Order.order_type` has `:stop`; mapping it to `nil` threw a stated type away.
+  # BRACKET, TWAP, ROLL_*, LIQUIDATION and SCALED have no Core atom and stay `nil`.
+  defp type_atom("STOP"), do: :stop
   defp type_atom(_other), do: nil
 
   defp tif_atom("GOOD_UNTIL_CANCELLED"), do: :gtc

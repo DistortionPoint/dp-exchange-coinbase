@@ -20,6 +20,18 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An order the venue calls `STOP` read back with `order_type: nil`.** The spec's `OrderType`
+  enum (`at-spec.yaml`) names `STOP` ("becomes a market order when triggered") and Core's
+  `Order.order_type` has `:stop`, but the reader only knew `MARKET`, `LIMIT` and
+  `STOP_LIMIT`. `STOP` is now `:stop`; `BRACKET`, `TWAP`, `ROLL_*`, `LIQUIDATION` and
+  `SCALED` have no Core atom and stay `nil`.
+- **A socket disconnect reason went whole into the `:link_down` notice and the telemetry
+  `reason`.** A refused upgrade carries the venue's response inside the reason, so a large
+  body was copied to every notice subscriber and telemetry handler. Both are quoted bounded
+  now (`limit: 50`, `printable_limit: 1_024`); a short reason prints as before.
+
 ## [0.3.107] - 2026-10-11
 
 ### Fixed

@@ -451,7 +451,12 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
       assert order.side == nil
     end
 
-    for {venue, expected} <- [{"MARKET", :market}, {"LIMIT", :limit}, {"STOP_LIMIT", :stop_limit}] do
+    for {venue, expected} <- [
+          {"MARKET", :market},
+          {"LIMIT", :limit},
+          {"STOP", :stop},
+          {"STOP_LIMIT", :stop_limit}
+        ] do
       test "order type #{venue} maps to #{expected}" do
         body = %{"order" => order_json(%{"order_type" => unquote(venue)})}
 

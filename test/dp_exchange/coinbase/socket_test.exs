@@ -200,6 +200,20 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :link_down, severity: :error}}
     end
 
+    test "a disconnect reason carrying a large venue body is bounded in the notice" do
+      body = String.duplicate("x", 50_000)
+
+      assert {:reconnect, _state} =
+               Socket.handle_disconnect(%{reason: {:remote, 1006, body}}, state())
+
+      assert_received {:dp_exchange, :coinbase,
+                       %Notice{kind: :link_down, details: %{reason: reason}}}
+
+      assert is_binary(reason)
+      assert byte_size(reason) < 2_048
+      assert reason =~ "remote"
+    end
+
     test "disconnecting also tells Feed WHICH link dropped, so coverage can narrow to it" do
       # Separate from the notice on purpose: `Feed` narrows `coverage/1` to this shard's
       # symbols and this shard's channel's kind, never the whole feed, and it needs a pid to
