@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.112] - 2026-10-11
+
 ### Fixed
 
 - **A whitespace-only symbol passed `Rest.validate_symbol/1`.** The market-data reads (and
