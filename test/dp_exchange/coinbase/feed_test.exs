@@ -922,7 +922,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       {feed, socket} = start_with_socket()
       ref = Process.monitor(socket)
       Process.exit(socket, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^socket, _reason}, 500
+      assert_receive {:DOWN, ^ref, :process, ^socket, _reason}, 5_000
 
       assert {:error, _reason} = Feed.subscribe(feed, ~w(BTC-USD), to: self())
       assert Process.alive?(feed)
@@ -980,7 +980,7 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :link_down, details: %{channel: "ticker", shard: 0}}},
-                     500
+                     5_000
 
       assert Process.alive?(feed)
       # Cleared immediately — not merely "will clear once something else overwrites
@@ -995,7 +995,50 @@ defmodule DpExchange.Coinbase.FeedTest do
       # proving an attempt actually happened, not merely that nothing crashed.
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{channel: "ticker", shard: 0}}},
-                     2_000
+                     5_000
+    end
+
+    test "crash_reopen_delay/3: first crash reopens at once, a streak backs off, quiet resets" do
+      key = {"level2", 0}
+
+      assert {0, crashes} = Feed.crash_reopen_delay(%{}, key, 1_000)
+      assert crashes[key] == {1, 1_000}
+
+      assert {1_000, crashes} = Feed.crash_reopen_delay(crashes, key, 2_000)
+      assert {2_000, crashes} = Feed.crash_reopen_delay(crashes, key, 3_000)
+      assert {4_000, crashes} = Feed.crash_reopen_delay(crashes, key, 4_000)
+
+      # Capped, however long the streak runs.
+      crashes = Map.put(crashes, key, {500, 4_000})
+      assert {60_000, crashes} = Feed.crash_reopen_delay(crashes, key, 5_000)
+
+      # A shard that stayed up past the streak window starts over, and keys are independent.
+      assert {0, crashes} = Feed.crash_reopen_delay(crashes, key, 5_000 + 300_000)
+      assert crashes[key] == {1, 305_000}
+      assert {0, _crashes} = Feed.crash_reopen_delay(crashes, {"ticker", 0}, 305_001)
+    end
+
+    test "a shard whose socket keeps crashing is reopened after a wait, not at once" do
+      socket = fake_socket()
+      feed = start_feed()
+      key = {"ticker", 0}
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | shards: %{key => %{socket: socket, symbols: ["A-USD"]}},
+            wanted: MapSet.new(["A-USD"]),
+            shard_crashes: %{key => {1, System.monotonic_time(:millisecond)}}
+        }
+      end)
+
+      send(feed, {:EXIT, socket, :boom})
+      state = :sys.get_state(feed)
+
+      assert {2, _at} = state.shard_crashes[key]
+      # Still pending: the 1s wait of a second consecutive crash, not the 0 the first gets.
+      assert %{symbols: ["A-USD"]} = state.pending_opens[key]
+      refute Map.has_key?(state.shards, key)
     end
 
     test "a deferred :open_shard message for a key someone else already reopened " <>

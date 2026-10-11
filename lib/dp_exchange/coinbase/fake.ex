@@ -230,18 +230,18 @@ defmodule DpExchange.Coinbase.Fake do
   def get_order_book(symbol, opts \\ []),
     do: with_injection(symbol, fn -> fake_order_book(symbol, opts) end)
 
+  # The real path's order: the options are refused locally, before any request, so they win
+  # over an unlisted symbol (which only the venue can name). The check is `Rest`'s own.
   defp fake_order_book(symbol, opts) do
-    case Map.fetch(@price, native(symbol)) do
-      {:ok, price} ->
-        mid = Decimal.new(price)
+    with :ok <- Rest.validate_book_options(opts) do
+      case Map.fetch(@price, native(symbol)) do
+        {:ok, price} ->
+          limit = Keyword.get(opts, :limit) || 3
+          {:ok, fake_book(symbol, Decimal.new(price), limit)}
 
-        case Config.opt(opts, :limit, 3) do
-          limit when is_integer(limit) and limit >= 0 -> {:ok, fake_book(symbol, mid, limit)}
-          other -> {:error, {:invalid_limit, other}}
-        end
-
-      :error ->
-        {:refused, :not_listed}
+        :error ->
+          {:refused, :not_listed}
+      end
     end
   end
 

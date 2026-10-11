@@ -1892,10 +1892,36 @@ defmodule DpExchange.Coinbase.Rest do
   # receiving `INVALID_ARGUMENT` — the caller gets a reason it can act on instead of an
   # empty result it will read as "no data".
   defp candle_params(timeframe, range, enum) do
-    finish = Keyword.get_lazy(range, :end, &DateTime.utc_now/0)
     width = timeframe_seconds(timeframe)
-    start = Keyword.get_lazy(range, :start, fn -> DateTime.add(finish, -width * 300, :second) end)
 
+    with {:ok, start, finish} <- candle_window(range, width) do
+      candle_span(start, finish, width, enum)
+    end
+  end
+
+  # A `range` that is not a keyword list, or a bound that is not a `DateTime`, used to raise
+  # `FunctionClauseError` out of `DateTime.diff/3` in the caller's process. The window is the
+  # caller's to get right, so it is refused by name. A `nil` bound is an absent one.
+  defp candle_window(range, width) do
+    if is_list(range) and Keyword.keyword?(range) do
+      finish = Keyword.get(range, :end) || DateTime.utc_now()
+      start = Keyword.get(range, :start) || default_start(finish, width)
+
+      if is_struct(start, DateTime) and is_struct(finish, DateTime),
+        do: {:ok, start, finish},
+        else: {:error, {:invalid_range, start: start, end: finish}}
+    else
+      {:error, {:invalid_range, range}}
+    end
+  end
+
+  defp default_start(%DateTime{} = finish, width),
+    do: DateTime.add(finish, -width * 300, :second)
+
+  # Only reached with a bad `:end`; the caller's refusal then names it.
+  defp default_start(_not_a_datetime, _width), do: nil
+
+  defp candle_span(start, finish, width, enum) do
     span = DateTime.diff(finish, start, :second)
     requested = div(span, width)
 
@@ -2388,31 +2414,70 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_order_book(String.t(), keyword()) ::
           {:ok, Types.OrderBook.t()} | {:error, term()} | {:refused, term()}
   def get_order_book(symbol, opts) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
-    credentials = opts_credentials(opts)
+    with {:ok, limit, increment} <- book_options(opts) do
+      native = SymbolFormat.to_exchange_symbol(symbol)
+      credentials = opts_credentials(opts)
 
-    params =
-      %{"product_id" => native}
-      |> put_unless_nil("limit", Keyword.get(opts, :limit))
-      |> put_unless_nil(
-        "aggregation_price_increment",
-        Keyword.get(opts, :aggregation_price_increment)
-      )
+      params =
+        %{"product_id" => native}
+        |> put_unless_nil("limit", limit)
+        |> put_unless_nil("aggregation_price_increment", increment)
 
-    # The venue publishes the same book twice: `/market/product_book` unauthenticated and
-    # `/product_book` for a credential. Reading the public one while holding a credential
-    # would silently forgo whatever the authenticated view adds.
-    path = if credentials, do: "/product_book", else: "/market/product_book"
+      # The venue publishes the same book twice: `/market/product_book` unauthenticated and
+      # `/product_book` for a credential. Reading the public one while holding a credential
+      # would silently forgo whatever the authenticated view adds.
+      path = if credentials, do: "/product_book", else: "/market/product_book"
 
-    case request(:get, path, credentials, opts, params) do
-      {:ok, %{body: %{"pricebook" => pricebook}}} when is_map(pricebook) ->
-        build_order_book(native, pricebook)
+      case request(:get, path, credentials, opts, params) do
+        {:ok, %{body: %{"pricebook" => pricebook}}} when is_map(pricebook) ->
+          build_order_book(native, pricebook)
 
-      {:ok, _unexpected} ->
-        {:error, :unexpected_response_shape}
+        {:ok, _unexpected} ->
+          {:error, :unexpected_response_shape}
 
-      {:error, reason} ->
-        classify(reason)
+        {:error, reason} ->
+          classify(reason)
+      end
+    end
+  end
+
+  @doc """
+  The local checks `get_order_book/2` runs on its options before any request: `:limit` (a
+  non-negative integer, the spec's `int32`) and `:aggregation_price_increment` (a finite
+  positive number). Errors: `{:invalid_limit, v}`,
+  `{:invalid_aggregation_price_increment, v}`.
+
+  Either used to be stringified with `to_string/1` and sent as given, so a map raised
+  `Protocol.UndefinedError` in the caller's process and `"abc"` or `-1` went out for the
+  venue to answer.
+  """
+  @spec validate_book_options(keyword()) :: :ok | {:error, term()}
+  def validate_book_options(opts) do
+    with {:ok, _limit, _increment} <- book_options(opts), do: :ok
+  end
+
+  @max_int32 2_147_483_647
+
+  defp book_options(opts) do
+    limit = Keyword.get(opts, :limit)
+    increment = Keyword.get(opts, :aggregation_price_increment)
+
+    with :ok <- book_limit(limit),
+         {:ok, increment} <- book_increment(increment) do
+      {:ok, limit, increment}
+    end
+  end
+
+  defp book_limit(nil), do: :ok
+  defp book_limit(limit) when is_integer(limit) and limit >= 0 and limit <= @max_int32, do: :ok
+  defp book_limit(limit), do: {:error, {:invalid_limit, limit}}
+
+  defp book_increment(nil), do: {:ok, nil}
+
+  defp book_increment(value) do
+    case order_amount(value) do
+      %Decimal{} = increment -> {:ok, increment}
+      nil -> {:error, {:invalid_aggregation_price_increment, value}}
     end
   end
 

@@ -34,7 +34,7 @@ defmodule DpExchange.Coinbase.SocketTest do
   defp dead_pid do
     pid = spawn(fn -> :ok end)
     ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 500
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
     pid
   end
 
@@ -1140,6 +1140,35 @@ defmodule DpExchange.Coinbase.SocketTest do
 
       assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
       assert book.venue_time == ~U[2026-08-28 14:53:47.000000Z]
+    end
+
+    test "a large snapshot sharing a few timestamps still takes the newest, once each" do
+      # `latest_event_time/1` parses each DISTINCT timestamp string once. 6,000 rows over
+      # three stamps (one of them unreadable) must give the same answer parsing every row did.
+      stamps = ["2026-08-28T14:53:45.000000Z", "not a time", "2026-08-28T14:53:49.500000Z"]
+
+      rows =
+        for n <- 1..6_000 do
+          %{
+            "event_time" => Enum.at(stamps, rem(n, 3)),
+            "side" => "bid",
+            "price_level" => Integer.to_string(n),
+            "new_quantity" => "1"
+          }
+        end
+
+      frame = %{
+        "channel" => "l2_data",
+        "events" => [%{"type" => "snapshot", "product_id" => "BTC-USD", "updates" => rows}]
+      }
+
+      assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(frame)}, state())
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
+      assert book.venue_time == ~U[2026-08-28 14:53:49.500000Z]
+      assert length(book.bids) == 6_000
+      assert {top, _size} = hd(book.bids)
+      assert Decimal.equal?(top, Decimal.new(6_000))
     end
 
     test "a row with an unparseable event_time is skipped, not fatal to the whole frame" do

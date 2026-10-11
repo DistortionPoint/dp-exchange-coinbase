@@ -1091,17 +1091,22 @@ defmodule DpExchange.Coinbase.Socket do
   # otherwise-good row must not sink the whole frame by itself when another row's time is
   # readable. Only an empty result — no rows, or none with a readable `event_time` — fails
   # the whole frame closed, exactly as a missing envelope timestamp did before.
+  #
+  # **Each distinct `event_time` string is parsed once.** A snapshot is ~44,000 rows that
+  # share a handful of timestamps, and this used to run `DateTime.from_iso8601/1` on every
+  # one of them inside the socket process. Only a binary can parse (anything else is skipped
+  # as before), so collecting the distinct binaries first changes no result.
   defp latest_event_time(rows) do
     rows
-    |> Enum.flat_map(fn
-      %{"event_time" => value} ->
-        case parse_time(value) do
-          {:ok, at} -> [at]
-          {:error, _reason} -> []
-        end
-
-      _other ->
-        []
+    |> Enum.reduce(MapSet.new(), fn
+      %{"event_time" => value}, acc when is_binary(value) -> MapSet.put(acc, value)
+      _other, acc -> acc
+    end)
+    |> Enum.flat_map(fn value ->
+      case parse_time(value) do
+        {:ok, at} -> [at]
+        {:error, _reason} -> []
+      end
     end)
     |> Enum.max(DateTime, fn -> nil end)
     |> case do

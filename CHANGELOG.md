@@ -20,6 +20,35 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Found by reading `socket.ex`, `feed.ex`, `auth.ex`, `rest.ex`'s market-data readers and the
+committed AsyncAPI/OpenAPI specs.
+
+- **A shard whose socket crashed on every attempt was reopened in a tight loop.**
+  `Feed.isolate_crashed_shard/5` rescheduled the open at delay 0 every time, so a socket that
+  died as soon as the venue's next frame arrived cost a connect, a subscribe, a crash and a
+  `:link_down` notice per round trip, with no backoff on that path. The first crash still
+  reopens at once; a crash within five minutes of the previous one waits 1s, then 2s, 4s, up
+  to 60s (`Feed.crash_reopen_delay/3`, state `shard_crashes`, dropped with the shard).
+- **`get_historical_prices/4` raised on a malformed window.** A `range` that was not a keyword
+  list, or a `:start`/`:end` that was not a `DateTime`, reached `DateTime.diff/3` and raised
+  `FunctionClauseError` in the caller's process (an explicit `end: nil` did the same). It is
+  now `{:error, {:invalid_range, _}}`; `nil` is an absent bound.
+- **`get_order_book/2` stringified its options and sent them as given.** `limit: %{}` raised
+  `Protocol.UndefinedError` in the caller's process and `limit: -1` or
+  `aggregation_price_increment: "abc"` went to the venue. `:limit` must now be an integer in
+  `0..int32` (`{:invalid_limit, v}`) and `:aggregation_price_increment` a finite positive
+  number (`{:invalid_aggregation_price_increment, v}`), sent in plain notation. The fake runs
+  the same check (`Rest.validate_book_options/1`) before it consults its symbol list.
+
+### Changed
+
+- **A `level2` snapshot parses each distinct `event_time` once.** `Socket.latest_event_time/1`
+  ran `DateTime.from_iso8601/1` on every one of a snapshot's ~44,000 rows inside the socket
+  process; rows share a handful of stamps. The distinct strings are collected first. The
+  result (the newest readable stamp, unreadable ones skipped) is unchanged.
+
 ## [0.3.105] - 2026-10-11
 
 ### Fixed

@@ -147,7 +147,9 @@ down with it: only that one shard's symbols drop out of `coverage/1` and
 `coverage_by_kind/1` (only the `data_kind()` its channel carries — a `level2` crash
 never touches a symbol's `ticker` coverage), you get a `:link_down` `Core.Notice`
 naming which shard and why, and this package reopens that shard on its own, immediately,
-without you calling `subscribe/2` again.
+without you calling `subscribe/2` again. A shard that crashes again within five minutes of
+its last crash is reopened after a growing wait (1s, 2s, 4s, capped at 60s) rather than in
+a tight loop; a shard that stayed up longer starts again at "immediately".
 
 **What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
 the socket-crash path, or anything that kills the `Feed` pid directly.
@@ -214,7 +216,14 @@ data for this period*. Page it yourself.
 
 An empty or inverted window (`start` at or after `end`) is refused too, as
 `{:error, {:invalid_range, start: start, end: end}}`. The venue's answer to one is
-unmeasured, and an empty list would read as *no data*.
+unmeasured, and an empty list would read as *no data*. So is a `range` that is not a
+keyword list, or a `:start` / `:end` that is not a `DateTime` (`nil` means absent): the
+same `{:invalid_range, _}`, never a raise in your process.
+
+`get_order_book/2` checks its options the same way before any request: `:limit` must be a
+non-negative integer within `int32` (`{:error, {:invalid_limit, v}}`), and
+`:aggregation_price_increment` a finite positive number
+(`{:error, {:invalid_aggregation_price_increment, v}}`). It is sent in plain notation.
 
 ## Coinbase publishes no rate-limit headers
 

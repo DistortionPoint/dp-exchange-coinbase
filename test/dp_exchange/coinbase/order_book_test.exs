@@ -723,4 +723,107 @@ defmodule DpExchange.Coinbase.OrderBookTest do
                Rest.get_order_book("BTC-USD", plug: responding(body), retry_attempts: 0)
     end
   end
+
+  describe "get_order_book/2 options" do
+    # `limit` and `aggregation_price_increment` were stringified and sent as given: a map
+    # raised in the caller's process and `"abc"` or `-1` went to the venue.
+    test "a limit that is not a count is refused before any request" do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:request_sent, conn.request_path})
+        responding(%{"pricebook" => pricebook()}).(conn)
+      end
+
+      for bad <- [-1, "5", 1.5, %{}, [3], 2_147_483_648] do
+        assert {:error, {:invalid_limit, ^bad}} =
+                 Rest.get_order_book("BTC-USD", limit: bad, plug: plug, retry_attempts: 0)
+      end
+
+      refute_received {:request_sent, _path}
+    end
+
+    test "an aggregation increment that is not a finite positive number is refused" do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:request_sent, conn.request_path})
+        responding(%{"pricebook" => pricebook()}).(conn)
+      end
+
+      for bad <- [0, -1, "abc", "NaN", %{}, :x] do
+        assert {:error, {:invalid_aggregation_price_increment, ^bad}} =
+                 Rest.get_order_book("BTC-USD",
+                   aggregation_price_increment: bad,
+                   plug: plug,
+                   retry_attempts: 0
+                 )
+      end
+
+      refute_received {:request_sent, _path}
+    end
+
+    test "a valid limit and increment are sent in plain notation" do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:query, conn.query_string})
+        responding(%{"pricebook" => pricebook()}).(conn)
+      end
+
+      assert {:ok, _book} =
+               Rest.get_order_book("BTC-USD",
+                 limit: 5,
+                 aggregation_price_increment: Decimal.new("1E-8"),
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}, 5_000
+      params = URI.decode_query(query)
+      assert params["limit"] == "5"
+      assert params["aggregation_price_increment"] == "0.00000001"
+    end
+
+    test "the fake refuses the same options in the same order" do
+      alias DpExchange.Coinbase.Fake
+
+      assert {:error, {:invalid_limit, %{}}} = Fake.get_order_book("BTC-USD", limit: %{})
+
+      assert {:error, {:invalid_aggregation_price_increment, "abc"}} =
+               Fake.get_order_book("BTC-USD", aggregation_price_increment: "abc")
+
+      # Refused locally, ahead of the venue naming a symbol unlisted.
+      assert {:error, {:invalid_limit, -1}} = Fake.get_order_book("NOPE-USD", limit: -1)
+    end
+  end
+
+  describe "get_historical_prices/4 with a window it cannot read" do
+    test "a bound that is not a DateTime is refused, not raised on" do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:request_sent, conn.request_path})
+        responding(%{"candles" => []}).(conn)
+      end
+
+      for range <- [[start: 1_700_000_000], [end: "now"], [start: ~D[2026-01-01]], :bad, [1]] do
+        assert {:error, {:invalid_range, _window}} =
+                 Rest.get_historical_prices("BTC-USD", "1h", range, plug: plug, retry_attempts: 0)
+      end
+
+      refute_received {:request_sent, _path}
+    end
+
+    test "a nil bound is an absent one" do
+      assert {:ok, []} =
+               Rest.get_historical_prices(
+                 "BTC-USD",
+                 "1h",
+                 [start: nil, end: nil],
+                 plug: responding(%{"candles" => []}),
+                 retry_attempts: 0
+               )
+    end
+  end
 end

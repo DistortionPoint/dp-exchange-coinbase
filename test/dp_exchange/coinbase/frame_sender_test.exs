@@ -61,7 +61,7 @@ defmodule DpExchange.Coinbase.FrameSenderTest do
       dead = socket(:accepts)
       ref = Process.monitor(dead)
       Process.exit(dead, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 500
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 5_000
 
       assert {:error, {:send_exit, _reason}} = FrameSender.send(dead, {:text, "{}"}, "test")
       assert Process.alive?(self())

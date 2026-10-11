@@ -1795,6 +1795,10 @@ defmodule DpExchange.Coinbase.Feed do
        # `reshard/1` replaces it (`schedule_open/4`) and one for a key nobody wants any more
        # is cancelled. See the moduledoc's "A deferred shard open is replaced, not repeated".
        pending_opens: %{},
+       # {channel, index} => {consecutive crash count, monotonic ms of the last one}. Read by
+       # `crash_reopen_delay/3` so a shard whose socket dies on every attempt is reopened
+       # with a growing wait instead of in a tight loop. Entries leave with their shard.
+       shard_crashes: %{},
        # Shard sockets whose link is down and not yet back: added on `:link_down`, removed
        # on `:reconnected` or when the shard goes. Nothing is sent to one of these — see the
        # moduledoc's "A socket that is reconnecting is not sent to" section.
@@ -2931,6 +2935,7 @@ defmodule DpExchange.Coinbase.Feed do
     %{
       state
       | shards: shards,
+        shard_crashes: Map.drop(state.shard_crashes, keys),
         down_links: Enum.reduce(closed, state.down_links, &MapSet.delete(&2, &1))
     }
   end
@@ -3284,18 +3289,56 @@ defmodule DpExchange.Coinbase.Feed do
 
     notify_shard_crashed(state, channel, index, symbols, reason)
 
+    now_ms = System.monotonic_time(:millisecond)
+    {delay, crashes} = crash_reopen_delay(state.shard_crashes, key, now_ms)
+    state = %{state | shard_crashes: crashes}
+
     # Reopened NOW, not on the next `:resubscribe` tick — that cadence exists to cover a
     # shard whose FIRST open never happened at all (see `retry_missing_shards/1`'s own
     # moduledoc reference); a shard that was open and delivering a moment ago should not
     # wait up to `resubscribe_interval_ms` (60s by default) to try again.
+    #
+    # **The first crash reopens at once; a shard that keeps crashing waits longer each time.**
+    # A socket that dies on every attempt (a decoder fault the venue's next frame retriggers)
+    # was reopened at delay 0 forever: a connect, a subscribe and a crash per round trip, with
+    # a `:link_down` notice each time, and no backoff anywhere on this path. See
+    # `crash_reopen_delay/3`.
     # Only what is still wanted: a shard being retired (its symbols unwanted, release not yet
     # confirmed) must not come back to life as an open on symbols nobody asked for. The
     # pending open keeps its index claim in `planned_shards/3`, so a reshard that lands
     # before it fires re-plans around it instead of duplicating its symbols elsewhere.
     case Enum.filter(symbols, &MapSet.member?(state.wanted, &1)) do
       [] -> state
-      live -> schedule_open(state, key, live, 0)
+      live -> schedule_open(state, key, live, delay)
     end
+  end
+
+  @crash_streak_window_ms 300_000
+  @crash_backoff_base_ms 1_000
+  @crash_backoff_max_ms 60_000
+
+  @doc false
+  # How long to wait before reopening `key`'s shard after its socket crashed at `now_ms`, and
+  # the updated record. A crash within `@crash_streak_window_ms` of the previous one extends
+  # a streak: the first crash waits nothing, the second `@crash_backoff_base_ms`, doubling to
+  # `@crash_backoff_max_ms`. A shard that stayed up longer than the window starts again at
+  # nothing. Exposed (not `defp`) purely so a test can pin the schedule without waiting it out.
+  @spec crash_reopen_delay(map(), term(), integer()) :: {non_neg_integer(), map()}
+  def crash_reopen_delay(crashes, key, now_ms) do
+    streak =
+      case Map.get(crashes, key) do
+        {count, last_ms} when now_ms - last_ms < @crash_streak_window_ms -> count + 1
+        _first_or_long_ago -> 1
+      end
+
+    delay =
+      if streak <= 1 do
+        0
+      else
+        min(@crash_backoff_base_ms * Bitwise.bsl(1, min(streak - 2, 10)), @crash_backoff_max_ms)
+      end
+
+    {delay, Map.put(crashes, key, {streak, now_ms})}
   end
 
   # Mirrors `payload_kind/1`'s struct-to-kind mapping, from the other direction: a

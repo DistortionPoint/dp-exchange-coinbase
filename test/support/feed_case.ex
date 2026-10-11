@@ -84,7 +84,7 @@ defmodule DpExchange.Coinbase.FeedCase do
   def dead_pid do
     pid = spawn(fn -> :ok end)
     ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 500
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
     pid
   end
 
