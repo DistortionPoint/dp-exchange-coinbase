@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.109] - 2026-10-11
+
 ### Fixed
 
 - **A `:to` that is not a pid or a registered name crashed the shared `Feed`.**
