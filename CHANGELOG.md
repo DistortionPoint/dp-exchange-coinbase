@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.99] - 2026-10-11
+
 ### Fixed
 
 Found by reading the order, cancel, edit, order-history, fill, account and portfolio code
