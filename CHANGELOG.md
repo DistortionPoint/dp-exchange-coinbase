@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.103] - 2026-10-11
+
 ### Fixed
 
 - **`get_top_of_book/2` answered the first pricebook in the response, whatever its product.**
