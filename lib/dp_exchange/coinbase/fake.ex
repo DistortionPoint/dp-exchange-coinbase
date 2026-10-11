@@ -65,7 +65,7 @@ defmodule DpExchange.Coinbase.Fake do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Coinbase.{Rest, SymbolFormat}
+  alias DpExchange.Coinbase.{Feed, Prime, Rest, SymbolFormat}
   alias DpExchange.Core.{Capabilities, Config, FakeInjection, Instrument, Notice, Types, Venue}
 
   @symbols ~w(BTC-USD BTC-USDC ETH-USD ETH-EUR)
@@ -118,7 +118,11 @@ defmodule DpExchange.Coinbase.Fake do
   def capabilities, do: DpExchange.Coinbase.capabilities()
 
   @impl true
-  def get_price(symbol, _opts \\ []), do: with_injection(symbol, fn -> fake_quote(symbol) end)
+  def get_price(symbol, _opts \\ []) do
+    with_injection(symbol, fn ->
+      with :ok <- Rest.validate_symbol(symbol), do: fake_quote(symbol)
+    end)
+  end
 
   # Outside `with_injection/2`, so `subscribe/2` builds its push without consuming a failure
   # a test queued for `get_price/2` (found 2026-10-10).
@@ -158,7 +162,9 @@ defmodule DpExchange.Coinbase.Fake do
     with_injection(symbol, fn ->
       # `Rest`'s own test, so `%{}` — which the real path reads as no credential — refuses
       # here too. This checked only `nil`, and a consumer passing `%{}` got a book.
-      with :ok <- Rest.validate_credentials(Keyword.get(opts, :credentials)) do
+      # `Rest.get_top_of_book/2` checks the symbol before the credential.
+      with :ok <- Rest.validate_symbol(symbol),
+           :ok <- Rest.validate_credentials(Keyword.get(opts, :credentials)) do
         case Map.fetch(@price, native(symbol)) do
           {:ok, price} ->
             {:ok,
@@ -191,7 +197,8 @@ defmodule DpExchange.Coinbase.Fake do
       # request, so they win over an unlisted symbol (which only the venue can name). The
       # check is `Rest`'s own — this used to re-state it and answered `:not_listed` first.
       # `12h`, which the shared vocabulary models and Coinbase does not serve, fails here.
-      with :ok <- Rest.validate_candle_request(timeframe, range) do
+      with :ok <- Rest.validate_candle_request(timeframe, range),
+           :ok <- Rest.validate_symbol(symbol) do
         if native(symbol) in @symbols do
           # A bar, not a quote. The fake returned `get_price/2`'s `Quote` here, which agreed
           # with the real package's own defect — a suite reproducing the bug it is meant to
@@ -233,7 +240,8 @@ defmodule DpExchange.Coinbase.Fake do
   # The real path's order: the options are refused locally, before any request, so they win
   # over an unlisted symbol (which only the venue can name). The check is `Rest`'s own.
   defp fake_order_book(symbol, opts) do
-    with :ok <- Rest.validate_book_options(opts) do
+    with :ok <- Rest.validate_symbol(symbol),
+         :ok <- Rest.validate_book_options(opts) do
       case Map.fetch(@price, native(symbol)) do
         {:ok, price} ->
           limit = Keyword.get(opts, :limit) || 3
@@ -289,6 +297,12 @@ defmodule DpExchange.Coinbase.Fake do
   # at most `limit` of them, the newest. This returned the newest first, so a consumer reading
   # `List.last/1` as "the latest print" passed here and failed against the venue.
   defp get_trades_result(symbol, limit) do
+    with :ok <- Rest.validate_symbol(symbol) do
+      trades_for(symbol, limit)
+    end
+  end
+
+  defp trades_for(symbol, limit) do
     case Map.fetch(@price, native(symbol)) do
       {:ok, price} ->
         # More than one print, because the whole point of the tape is that get_price/2
@@ -557,9 +571,15 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def subscribe(symbols, opts \\ []) do
     symbols = canonical_case(symbols)
-    target = Config.opt(opts, :to, self())
-    channels = Config.opt(opts, :channels, [:quotes])
 
+    # Refused as `Feed.subscribe/3` refuses, in the same order: symbols, then subscriber.
+    with :ok <- Feed.check_symbols(symbols),
+         {:ok, target} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
+      do_subscribe(symbols, target, Config.opt(opts, :channels, [:quotes]))
+    end
+  end
+
+  defp do_subscribe(symbols, target, channels) do
     for symbol <- symbols, symbol in @symbols do
       case fake_quote(symbol) do
         # The real stream's volume is `volume_24_h`, a rolling total, where `get_price/2`'s is
@@ -622,15 +642,25 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def unsubscribe(symbols, _opts \\ []) do
     symbols = canonical_case(symbols)
-    Process.put(__MODULE__, MapSet.difference(subscribed(), MapSet.new(symbols)))
-    Process.put(@trades_key, MapSet.difference(subscribed_trades(), MapSet.new(symbols)))
-    Process.put(@order_book_key, MapSet.difference(subscribed_books(), MapSet.new(symbols)))
-    :ok
+
+    with :ok <- Feed.check_symbols(symbols) do
+      Process.put(__MODULE__, MapSet.difference(subscribed(), MapSet.new(symbols)))
+      Process.put(@trades_key, MapSet.difference(subscribed_trades(), MapSet.new(symbols)))
+      Process.put(@order_book_key, MapSet.difference(subscribed_books(), MapSet.new(symbols)))
+      :ok
+    end
   end
 
   @impl true
-  def update_symbols(symbols, _opts \\ []) do
+  def update_symbols(symbols, opts \\ []) do
     symbols = canonical_case(symbols)
+
+    with :ok <- Feed.check_symbols(symbols) do
+      do_update_symbols(symbols, opts)
+    end
+  end
+
+  defp do_update_symbols(symbols, _opts) do
     wanted = MapSet.new(Enum.filter(symbols, &(&1 in @symbols)))
 
     # A symbol this adds is pushed for, as `subscribe/2` pushes, so `coverage/1` never
@@ -684,12 +714,10 @@ defmodule DpExchange.Coinbase.Fake do
 
   @impl true
   def subscribe_notices(opts \\ []) do
-    send(
-      Config.opt(opts, :to, self()),
-      {:dp_exchange, :coinbase, Notice.new(:link_up, :coinbase)}
-    )
-
-    :ok
+    with {:ok, target} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
+      send(target, {:dp_exchange, :coinbase, Notice.new(:link_up, :coinbase)})
+      :ok
+    end
   end
 
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())
@@ -748,21 +776,24 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def quantization(symbol) do
     with_injection(symbol, fn ->
-      if Map.has_key?(@price, symbol) do
-        {:ok,
-         %{
-           # Deliberately different from quantity_increment: a fake where they match would
-           # never catch a caller rounding a price to the base increment.
-           price_increment: Decimal.new("0.01"),
-           quantity_increment: Decimal.new("0.00000001"),
-           min_quantity: Decimal.new("0.00000001"),
-           min_quote_size: Decimal.new("1"),
-           max_quantity: Decimal.new("1000"),
-           max_quote_size: Decimal.new("50000000"),
-           status: "online"
-         }}
-      else
-        {:refused, :not_listed}
+      # `Rest.get_product/2` upper-cases the symbol it sends, so `btc-usd` is listed here too.
+      with :ok <- Rest.validate_symbol(symbol) do
+        if Map.has_key?(@price, native(symbol)) do
+          {:ok,
+           %{
+             # Deliberately different from quantity_increment: a fake where they match would
+             # never catch a caller rounding a price to the base increment.
+             price_increment: Decimal.new("0.01"),
+             quantity_increment: Decimal.new("0.00000001"),
+             min_quantity: Decimal.new("0.00000001"),
+             min_quote_size: Decimal.new("1"),
+             max_quantity: Decimal.new("1000"),
+             max_quote_size: Decimal.new("50000000"),
+             status: "online"
+           }}
+        else
+          {:refused, :not_listed}
+        end
       end
     end)
   end
@@ -829,10 +860,11 @@ defmodule DpExchange.Coinbase.Fake do
       # Same guard as the package: a portfolio or nothing. A fake that defaulted one would
       # let a consumer ship a stake into a portfolio it never named.
       with {:ok, portfolio} <- fake_portfolio(opts),
+           :ok <- Prime.validate_scope(portfolio, Keyword.get(opts, :wallet_id)),
            :ok <- fake_prime_checks(asset, amount, opts) do
         {:ok,
          %{
-           "currency" => asset && String.upcase(asset),
+           "currency" => upcase_asset(asset),
            "amount" => Decimal.to_string(amount, :normal),
            "portfolio_id" => portfolio,
            "wallet_id" => Keyword.get(opts, :wallet_id),
@@ -842,16 +874,22 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  # A wallet-scoped call carries an asset the real path never sends, so it may be anything the
+  # caller passed; only a string is upper-cased.
+  defp upcase_asset(asset) when is_binary(asset), do: String.upcase(asset)
+  defp upcase_asset(_not_a_string), do: nil
+
   @impl true
   def unstake(asset, amount, opts \\ []) do
     with_injection(fn ->
       with {:ok, portfolio} <- fake_portfolio(opts),
+           :ok <- Prime.validate_scope(portfolio, Keyword.get(opts, :wallet_id)),
            :ok <- fake_prime_checks(asset, amount, opts) do
         # Nothing has arrived. An unstake that reported itself settled would teach a consumer
         # to spend an asset that is still unbonding.
         {:ok,
          %{
-           "currency" => asset && String.upcase(asset),
+           "currency" => upcase_asset(asset),
            "amount" => Decimal.to_string(amount, :normal),
            "portfolio_id" => portfolio,
            "wallet_id" => Keyword.get(opts, :wallet_id),
@@ -1288,6 +1326,12 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   defp status_matches?(nil, _actual), do: true
+
+  # `Rest.get_orders/2` takes one status or a list (`status: [:open, :pending]`) and the venue
+  # answers the union, so a list matches when any member does. It raised
+  # `FunctionClauseError` here, in the consumer's test process.
+  defp status_matches?(wanted, actual) when is_list(wanted),
+    do: Enum.any?(wanted, &status_matches?(&1, actual))
 
   defp status_matches?(wanted, actual) when is_atom(wanted) or is_binary(wanted),
     do: String.upcase(to_string(wanted)) == String.upcase(to_string(actual))

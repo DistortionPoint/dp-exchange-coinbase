@@ -989,6 +989,29 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       assert_receive {:request, "POST", _path, raw, _headers}
       assert Jason.decode!(raw)["transaction_ids"] == ["tx-1"]
     end
+
+    test "an extra field that cannot be encoded is refused as a value, nothing sent" do
+      me = self()
+
+      assert {:error, :unencodable_body} =
+               Prime.stake_portfolio(
+                 @credentials,
+                 "pf-1",
+                 "eth",
+                 Decimal.new("1"),
+                 opts(me, extra: %{"validator" => {:not, :json}})
+               )
+
+      assert {:error, :unencodable_body} =
+               Prime.claim_rewards(
+                 @credentials,
+                 "pf-1",
+                 "w-1",
+                 opts(me, body: %{"inputs" => %{"x" => self()}})
+               )
+
+      refute_receive {:request, _method, _path, _raw, _headers}, 50
+    end
   end
 
   describe "a retried Prime request" do

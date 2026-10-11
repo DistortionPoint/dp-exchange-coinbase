@@ -20,6 +20,39 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `:to` that is not a pid or a registered name crashed the shared `Feed`.**
+  `Feed.subscribe/3` and `Feed.subscribe_notices/2` stored any term, and `Core.Fanout.resolve/1`
+  only has pid and atom clauses, so a string, an integer, `{:global, _}` or `{:via, _, _}`
+  raised `FunctionClauseError` inside the feed on the first delivery; the restart dropped every
+  consumer. Both now answer `{:error, {:invalid_subscriber, to}}` in the caller, recording
+  nothing; `subscribe/3` checks symbols first. `subscribe_notices/2`'s spec widens from `:ok`.
+  `DpExchange.Coinbase.Fake` refuses the same way, in the same order, and now also refuses a
+  bad symbol list in `subscribe/2`, `unsubscribe/2` and `update_symbols/2` as the feed does.
+- **`coverage/1` and `coverage_by_kind/1` raised for a `{:global, _}` or `{:via, _, _}` feed.**
+  The facade's liveness check had only atom and pid clauses; any other server reference is
+  now resolved with `GenServer.whereis/1`.
+
+- **A market-data read with a symbol that names no product raised.** `get_price/2`,
+  `get_top_of_book/2`, `get_historical_prices/4`, `get_order_book/2`, `get_trades/2`,
+  `quantization/1` and `Rest.get_product/2` passed the symbol to
+  `SymbolFormat.to_exchange_symbol/1`, which has no clause for `nil`, an atom or a number
+  (`FunctionClauseError` in the caller), and built `/products//ticker` for `""`. All now answer
+  `{:error, {:invalid_symbol, value}}` before anything is built, after the timeframe and
+  limit checks that already ran first. `Fake` refuses identically (it answered
+  `{:refused, :not_listed}`), and `Fake.quantization/1` now upper-cases like the real path.
+- **A caller-supplied term JSON cannot encode raised on a write.** `trade_incentive_metadata`
+  on `quote_conversion/5`, and `opts[:extra]`, `:metadata` and `:body` on the Prime staking
+  writes, went to `Jason.encode!/1` after validation and raised `Protocol.UndefinedError`
+  (a tuple, a pid). They answer `{:error, :unencodable_body}` now, with nothing sent.
+
+- **`Fake` diverged from the real path in three places.** `Fake.get_orders/2` raised
+  `FunctionClauseError` for `status: [:open, :pending]` (a list is the union, as at the venue);
+  `Fake.stake/3` and `Fake.unstake/3` accepted a portfolio or wallet id the real path refuses
+  with `{:invalid_portfolio_id, _}` / `{:invalid_wallet_id, _}` (new `Prime.validate_scope/2`,
+  shared), and raised on a non-string asset in wallet scope, where the real path sends none.
+
 ### Changed
 
 - **`Feed.start_link/1` and `Supervisor.start_link/1` carry a `@doc`.** Both were public with a

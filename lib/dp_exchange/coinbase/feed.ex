@@ -1658,10 +1658,41 @@ defmodule DpExchange.Coinbase.Feed do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
+  @doc """
+  Subscribes `symbols` and registers `opts[:to]` (default: the caller) for their data.
+
+  Refuses in the caller, before the shared feed process sees it and recording nothing:
+  `{:error, {:invalid_symbols, term}}` (see `check_symbols/1`), then
+  `{:error, {:invalid_subscriber, term}}` for a `:to` that is neither a pid nor a registered
+  name (see `valid_subscriber/1`).
+  """
   @spec subscribe(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
   def subscribe(feed \\ __MODULE__, symbols, opts \\ []) do
-    GenServer.call(feed, {:subscribe, symbols, Config.opt(opts, :to, self())}, @call_timeout)
+    with :ok <- check_symbols(symbols),
+         {:ok, subscriber} <- valid_subscriber(Config.opt(opts, :to, self())) do
+      GenServer.call(feed, {:subscribe, symbols, subscriber}, @call_timeout)
+    end
   end
+
+  @doc """
+  The subscriber as given if it is a pid or a registered name, or the refusal.
+
+  That is all `Core.Fanout.resolve/1` has a clause for. Anything else (`"consumer"`, `42`,
+  `{:global, name}`, `{:via, ...}`, a ref) used to be stored and raised `FunctionClauseError`
+  inside this shared process on the first payload or notice sent to it, and the restart
+  dropped every other consumer's subscription. `nil` and booleans are atoms and would
+  resolve to no process: a subscriber that silently receives nothing.
+
+  Exposed so `DpExchange.Coinbase.Fake` refuses exactly as the real feed does.
+  """
+  @spec valid_subscriber(term()) ::
+          {:ok, pid() | atom()} | {:error, {:invalid_subscriber, term()}}
+  def valid_subscriber(pid) when is_pid(pid), do: {:ok, pid}
+
+  def valid_subscriber(name) when is_atom(name) and name not in [nil, true, false],
+    do: {:ok, name}
+
+  def valid_subscriber(other), do: {:error, {:invalid_subscriber, other}}
 
   @spec unsubscribe(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
   def unsubscribe(feed \\ __MODULE__, symbols),
@@ -1710,9 +1741,18 @@ defmodule DpExchange.Coinbase.Feed do
   # A `GenServer.call/3` timeout exits in the CALLER, not in the feed. So the channel a host
   # uses to *hear that something is wrong* was the one call that could kill the host's
   # calling process for asking during exactly the conditions it exists to report.
-  @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
-  def subscribe_notices(feed \\ __MODULE__, opts \\ []),
-    do: GenServer.call(feed, {:subscribe_notices, Config.opt(opts, :to, self())}, @call_timeout)
+  @doc """
+  Registers `opts[:to]` (default: the caller) for this feed's notices.
+
+  `{:error, {:invalid_subscriber, term}}` for a `:to` that is neither a pid nor a registered
+  name, for the reason `valid_subscriber/1` gives; nothing is recorded.
+  """
+  @spec subscribe_notices(GenServer.server(), keyword()) ::
+          :ok | {:error, {:invalid_subscriber, term()}}
+  def subscribe_notices(feed \\ __MODULE__, opts \\ []) do
+    with {:ok, subscriber} <- valid_subscriber(Config.opt(opts, :to, self())),
+         do: GenServer.call(feed, {:subscribe_notices, subscriber}, @call_timeout)
+  end
 
   # --- server ------------------------------------------------------------
 
@@ -2368,14 +2408,21 @@ defmodule DpExchange.Coinbase.Feed do
   # options: every symbol every caller had subscribed was gone, with `coverage/1` reading
   # empty until each of them subscribed again. An empty string is refused as well: it is not
   # a product, and would be sent to the venue as one.
-  defp check_symbols(symbols) when is_list(symbols) do
+  #
+  # Public so `subscribe/3` can refuse in the caller, and so `DpExchange.Coinbase.Fake`
+  # refuses exactly as the real feed does.
+  @doc """
+  `:ok` for a list of non-empty strings, else `{:error, {:invalid_symbols, term}}`.
+  """
+  @spec check_symbols(term()) :: :ok | {:error, {:invalid_symbols, term()}}
+  def check_symbols(symbols) when is_list(symbols) do
     case Enum.reject(symbols, &(is_binary(&1) and &1 != "")) do
       [] -> :ok
       invalid -> {:error, {:invalid_symbols, Enum.take(invalid, 5)}}
     end
   end
 
-  defp check_symbols(other), do: {:error, {:invalid_symbols, other}}
+  def check_symbols(other), do: {:error, {:invalid_symbols, other}}
 
   defp subscribe_symbols(symbols, subscriber, state) do
     wanted = MapSet.union(state.wanted, MapSet.new(symbols))

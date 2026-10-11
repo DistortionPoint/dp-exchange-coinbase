@@ -362,6 +362,18 @@ defmodule DpExchange.Coinbase.Prime do
     end
   end
 
+  @doc """
+  The id check every staking call runs first: `portfolio_id`, and `wallet_id` when the call is
+  wallet-scoped (`nil` means portfolio scope).
+
+  `{:error, {:invalid_portfolio_id, v}}` or `{:error, {:invalid_wallet_id, v}}`. Exposed so
+  `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
+  """
+  @spec validate_scope(term(), term()) ::
+          :ok | {:error, {:invalid_portfolio_id | :invalid_wallet_id, term()}}
+  def validate_scope(portfolio_id, nil), do: valid_portfolio(portfolio_id)
+  def validate_scope(portfolio_id, wallet_id), do: valid_scope(portfolio_id, wallet_id)
+
   # --- internals ----------------------------------------------------------
 
   # **A write that moves funds refuses an amount it cannot send, instead of raising.**
@@ -572,14 +584,24 @@ defmodule DpExchange.Coinbase.Prime do
     opts |> Config.opt(:extra, %{}) |> Map.new(fn {key, value} -> {to_string(key), value} end)
   end
 
+  # `opts[:extra]`, `opts[:metadata]` and `opts[:body]` are the caller's own terms, and
+  # `Jason.encode!/1` raised `Protocol.UndefinedError` (a tuple, a pid) inside the caller's
+  # process after every field had been validated. Refused as a value instead, before anything
+  # is signed.
   defp post(path, body, credentials: credentials, opts: opts) do
-    encoded = Jason.encode!(body)
+    with {:ok, encoded} <- encode_body(body) do
+      headers = signer(:post, path, encoded, credentials)
 
-    headers = signer(:post, path, encoded, credentials)
+      :post
+      |> HttpClient.request(@base_url <> @api_path <> path, headers, encoded, request_opts(opts))
+      |> unwrap()
+    end
+  end
 
-    :post
-    |> HttpClient.request(@base_url <> @api_path <> path, headers, encoded, request_opts(opts))
-    |> unwrap()
+  defp encode_body(body) do
+    {:ok, Jason.encode!(body)}
+  rescue
+    _error in [Protocol.UndefinedError, Jason.EncodeError] -> {:error, :unencodable_body}
   end
 
   defp get(path, credentials: credentials, opts: opts) do

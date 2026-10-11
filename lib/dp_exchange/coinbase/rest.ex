@@ -99,17 +99,19 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_price(String.t(), keyword()) ::
           {:ok, Types.Quote.t()} | {:error, term()} | {:refused, term()}
   def get_price(symbol, opts) do
-    native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
-    credentials = opts_credentials(opts)
+    with :ok <- validate_symbol(symbol) do
+      native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
+      credentials = opts_credentials(opts)
 
-    path =
-      if credentials,
-        do: "/products/#{native}/ticker",
-        else: "/market/products/#{native}/ticker"
+      path =
+        if credentials,
+          do: "/products/#{native}/ticker",
+          else: "/market/products/#{native}/ticker"
 
-    case request(:get, path, credentials, opts, %{"limit" => 1}) do
-      {:ok, %{body: body}} -> to_quote(body, symbol)
-      {:error, reason} -> classify(reason)
+      case request(:get, path, credentials, opts, %{"limit" => 1}) do
+        {:ok, %{body: body}} -> to_quote(body, symbol)
+        {:error, reason} -> classify(reason)
+      end
     end
   end
 
@@ -122,7 +124,8 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, [Types.Quote.t()]} | {:error, term()} | {:refused, term()}
   def get_historical_prices(symbol, timeframe, range, opts) do
     with {:ok, enum} <- granularity_enum(timeframe),
-         {:ok, params} <- candle_params(timeframe, range, enum) do
+         {:ok, params} <- candle_params(timeframe, range, enum),
+         :ok <- validate_symbol(symbol) do
       native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
 
       # The venue publishes the same candles twice: `/market/products/…` unauthenticated
@@ -1812,16 +1815,18 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_product(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_product(symbol, opts) do
-    native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
-    credentials = opts_credentials(opts)
+    with :ok <- validate_symbol(symbol) do
+      native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
+      credentials = opts_credentials(opts)
 
-    path =
-      if credentials, do: "/products/#{native}", else: "/market/products/#{native}"
+      path =
+        if credentials, do: "/products/#{native}", else: "/market/products/#{native}"
 
-    case request(:get, path, credentials, opts) do
-      {:ok, %{body: %{"product_id" => _id} = product}} -> {:ok, product}
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+      case request(:get, path, credentials, opts) do
+        {:ok, %{body: %{"product_id" => _id} = product}} -> {:ok, product}
+        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
     end
   end
 
@@ -1832,6 +1837,17 @@ defmodule DpExchange.Coinbase.Rest do
   # (a fake that accepted an order with no price, or a candle window the venue would
   # refuse), so the fake calls these instead. Each is the very check the real function runs
   # before it builds a request.
+
+  @doc """
+  The local check every symbol-taking read runs before it builds a path: a non-empty string,
+  else `{:error, {:invalid_symbol, value}}`.
+
+  `SymbolFormat.to_exchange_symbol/1` has no clause for a non-binary, so `nil` or `:btc`
+  raised `FunctionClauseError` in the caller's process, and `""` built `/products//ticker`.
+  Also what `place_order/3` and `close_position/3` apply to their symbol.
+  """
+  @spec validate_symbol(term()) :: :ok | {:error, {:invalid_symbol, term()}}
+  def validate_symbol(symbol), do: order_symbol(symbol)
 
   @doc """
   Whether `credentials` can sign a request — the same test the real private paths apply
@@ -2407,6 +2423,10 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp do_get_trades(symbol, limit, opts) do
+    with :ok <- validate_symbol(symbol), do: fetch_trades(symbol, limit, opts)
+  end
+
+  defp fetch_trades(symbol, limit, opts) do
     native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
     credentials = opts_credentials(opts)
 
@@ -2542,33 +2562,35 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_top_of_book(String.t(), keyword()) ::
           {:ok, Types.TopOfBook.t()} | {:error, term()} | {:refused, term()}
   def get_top_of_book(symbol, opts) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
-    credentials = opts_credentials(opts)
+    with :ok <- validate_symbol(symbol) do
+      native = SymbolFormat.to_exchange_symbol(symbol)
+      credentials = opts_credentials(opts)
 
-    if is_nil(credentials) do
-      {:error, {:missing_credentials, :coinbase}}
-    else
-      observed_at = DateTime.utc_now()
+      if is_nil(credentials) do
+        {:error, {:missing_credentials, :coinbase}}
+      else
+        observed_at = DateTime.utc_now()
 
-      case request(:get, "/best_bid_ask", credentials, opts, %{"product_ids" => native}) do
-        {:ok, %{body: %{"pricebooks" => [_first | _rest] = pricebooks}}} ->
-          select_pricebook(native, pricebooks, observed_at)
+        case request(:get, "/best_bid_ask", credentials, opts, %{"product_ids" => native}) do
+          {:ok, %{body: %{"pricebooks" => [_first | _rest] = pricebooks}}} ->
+            select_pricebook(native, pricebooks, observed_at)
 
-        # NOT a refusal — see the moduledoc's "An empty `pricebooks` array is silence, not
-        # a statement". This batch endpoint answers "nothing for this one" by omitting the
-        # product from the array rather than failing the request, which is silence a retry
-        # can resolve, not the venue naming the product unlisted. A genuine venue statement
-        # (this venue's own convention, measured on the sibling `/product_book` endpoint,
-        # is a distinguishable 404) still reaches `{:refused, :not_listed}` below through
-        # `classify/1`.
-        {:ok, %{body: %{"pricebooks" => []}}} ->
-          {:error, :empty_result}
+          # NOT a refusal — see the moduledoc's "An empty `pricebooks` array is silence, not
+          # a statement". This batch endpoint answers "nothing for this one" by omitting the
+          # product from the array rather than failing the request, which is silence a retry
+          # can resolve, not the venue naming the product unlisted. A genuine venue statement
+          # (this venue's own convention, measured on the sibling `/product_book` endpoint,
+          # is a distinguishable 404) still reaches `{:refused, :not_listed}` below through
+          # `classify/1`.
+          {:ok, %{body: %{"pricebooks" => []}}} ->
+            {:error, :empty_result}
 
-        {:ok, _unexpected} ->
-          {:error, :unexpected_response_shape}
+          {:ok, _unexpected} ->
+            {:error, :unexpected_response_shape}
 
-        {:error, reason} ->
-          classify(reason)
+          {:error, reason} ->
+            classify(reason)
+        end
       end
     end
   end
@@ -2654,7 +2676,8 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_order_book(String.t(), keyword()) ::
           {:ok, Types.OrderBook.t()} | {:error, term()} | {:refused, term()}
   def get_order_book(symbol, opts) do
-    with {:ok, limit, increment} <- book_options(opts) do
+    with :ok <- validate_symbol(symbol),
+         {:ok, limit, increment} <- book_options(opts) do
       native = SymbolFormat.to_exchange_symbol(symbol)
       credentials = opts_credentials(opts)
 
@@ -3618,14 +3641,20 @@ defmodule DpExchange.Coinbase.Rest do
       |> Keyword.put(:raw_status, true)
       |> Keyword.put_new(:limiter, Config.opt(opts, :limiter, DpExchange.Coinbase.RateLimiter))
 
-    method
-    |> HttpClient.request(
-      @base_url <> @api_path <> path,
-      headers,
-      Jason.encode!(body),
-      request_opts
-    )
-    |> split_status()
+    # `trade_incentive_metadata` is the caller's own term, sent as given, so it can be
+    # something Jason has no encoding for; that was a `Protocol.UndefinedError` raised in the
+    # caller's process on a money-moving call. Refused as a value, before anything is sent.
+    with {:ok, encoded} <- encode_body(body) do
+      method
+      |> HttpClient.request(@base_url <> @api_path <> path, headers, encoded, request_opts)
+      |> split_status()
+    end
+  end
+
+  defp encode_body(body) do
+    {:ok, Jason.encode!(body)}
+  rescue
+    _error in [Protocol.UndefinedError, Jason.EncodeError] -> {:error, :unencodable_body}
   end
 
   # A v4 UUID from the VM's own CSPRNG, rather than a dependency.

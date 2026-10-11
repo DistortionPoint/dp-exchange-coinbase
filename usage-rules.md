@@ -1065,6 +1065,13 @@ atom, `nil`, `""`, or an argument that is not a list) answers
 inside the feed, which is shared by every caller of the instance: the supervisor restarted
 it from its static options and every symbol every caller had subscribed was gone.
 
+**A subscriber that cannot be sent to is refused the same way.** `to:` on `subscribe/2` and
+`subscribe_notices/1` must be a pid or a registered name (an atom other than `nil`, `true`
+or `false`; `nil` means the caller). A string, an integer, `{:global, _}` or `{:via, _, _}`
+answers `{:error, {:invalid_subscriber, to}}` and nothing is recorded; `subscribe/2` checks
+the symbols first. `DpExchange.Coinbase.Fake` refuses identically. The `feed:` option, by
+contrast, may be any `GenServer.server()`, including `{:global, _}` and `{:via, _, _}`.
+
 ## `:websocket_url` in application config replaces the default socket endpoint
 
 `config :dp_exchange_coinbase, websocket_url: "wss://your-proxy.example/..."` sends every socket
