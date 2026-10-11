@@ -652,9 +652,13 @@ defmodule DpExchange.Coinbase do
   # `update_symbols(["btc-usd"])`, then a `BTC-USD` quote, and `coverage/1` was `%{}`.
   # Case is the one difference normalised here. Anything else that is not canonical is the
   # caller's to fix.
-  defp canonical_case(symbols) when is_list(symbols),
-    do: Enum.map(symbols, fn s -> if is_binary(s), do: String.upcase(s), else: s end)
+  #
+  # Walks the list itself rather than `Enum.map/2`, which raises on an improper list: that
+  # is `Feed.check_symbols/1`'s to refuse, as `{:invalid_symbols, value}`.
+  defp canonical_case([symbol | rest]) when is_binary(symbol),
+    do: [String.upcase(symbol) | canonical_case(rest)]
 
+  defp canonical_case([other | rest]), do: [other | canonical_case(rest)]
   defp canonical_case(other), do: other
 
   # --- health ------------------------------------------------------------

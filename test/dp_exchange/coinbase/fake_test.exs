@@ -486,9 +486,68 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert Task.await(task) == %{}
     end
 
-    test "notices arrive on their own channel" do
+    test "registering for notices sends none, as the real feed does" do
       assert :ok = Fake.subscribe_notices(to: self())
-      assert_received {:dp_exchange, :coinbase, %Notice{kind: :link_up}}
+      refute_received {:dp_exchange, :coinbase, %Notice{}}
+    end
+
+    test "a :to atom naming no process is skipped on delivery, not an ArgumentError" do
+      nobody = :coinbase_fake_nobody_registered_here
+
+      assert :ok = Fake.subscribe(~w(BTC-USD), to: nobody)
+      assert :ok = Fake.subscribe(~w(BTC-USD), to: nobody, channels: [:trades, :order_book])
+    end
+
+    test "a :to atom naming a registered process is delivered to" do
+      name = :coinbase_fake_registered_consumer
+      Process.register(self(), name)
+      on_exit(fn -> if Process.whereis(name), do: Process.unregister(name) end)
+
+      assert :ok = Fake.subscribe(~w(BTC-USD), to: name)
+      assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "BTC-USD"}}
+    end
+
+    test "coverage_by_kind omits every empty kind, :quotes included" do
+      assert Fake.coverage_by_kind() == %{}
+
+      Fake.subscribe(~w(BTC-USD), to: self(), channels: [:trades])
+      Fake.unsubscribe(~w(BTC-USD))
+      assert Fake.coverage_by_kind() == %{}
+    end
+
+    test "get_price refuses a credential the real path refuses, and takes none publicly" do
+      assert {:ok, _quote} = Fake.get_price("BTC-USD")
+      assert {:ok, _quote} = Fake.get_price("BTC-USD", credentials: %{})
+      assert {:ok, _quote} = Fake.get_price("BTC-USD", credentials: @credentials)
+
+      assert @missing == Fake.get_price("BTC-USD", credentials: %{api_key: "k"})
+      assert @missing == Fake.get_price("BTC-USD", credentials: %{api_key: " ", api_secret: "s"})
+
+      assert {:error, {:invalid_credentials, :coinbase}} ==
+               Fake.get_price("BTC-USD", credentials: %{api_key: "k ", api_secret: "s"})
+    end
+
+    test "blank, whitespace-only and padded credentials are refused alike by every call" do
+      secret = @credentials.api_secret
+      blank_secret = %{api_key: "k", api_secret: ""}
+
+      assert @missing == Fake.get_top_of_book("BTC-USD", credentials: blank_secret)
+      blank_key = %{@credentials | api_key: ""}
+      assert @missing == Fake.get_top_of_book("BTC-USD", credentials: blank_key)
+      assert @missing == Fake.get_balances(%{api_key: "k", api_secret: "  \n"}, [])
+
+      padded = %{api_key: "k", api_secret: secret <> "\n"}
+      assert {:error, {:invalid_credentials, :coinbase}} == Fake.get_balances(padded, [])
+    end
+
+    test "symbols that are blank after trim, or an improper list, are refused" do
+      for bad <- [[" "], ["BTC-USD", "\t"], ["BTC-USD" | "tail"]] do
+        assert {:error, {:invalid_symbols, _bad}} = Fake.subscribe(bad)
+        assert {:error, {:invalid_symbols, _bad}} = Fake.unsubscribe(bad)
+        assert {:error, {:invalid_symbols, _bad}} = Fake.update_symbols(bad)
+      end
+
+      assert {:error, {:invalid_symbols, nil}} = Fake.unsubscribe(nil)
     end
   end
 

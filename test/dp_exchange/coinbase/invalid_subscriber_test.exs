@@ -115,9 +115,9 @@ defmodule DpExchange.Coinbase.InvalidSubscriberTest do
       assert {:error, {:invalid_symbols, [""]}} = Fake.unsubscribe([""])
     end
 
-    test "Fake.subscribe_notices/1 still delivers to a valid pid" do
+    test "Fake.subscribe_notices/1 accepts a valid pid and, like the feed, sends nothing" do
       assert :ok = Fake.subscribe_notices(to: self())
-      assert_receive {:dp_exchange, :coinbase, %DpExchange.Core.Notice{kind: :link_up}}, 5_000
+      refute_receive {:dp_exchange, :coinbase, %DpExchange.Core.Notice{}}, 50
     end
   end
 end

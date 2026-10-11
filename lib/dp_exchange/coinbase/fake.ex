@@ -66,7 +66,7 @@ defmodule DpExchange.Coinbase.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Coinbase.{Feed, Prime, Rest, SymbolFormat}
-  alias DpExchange.Core.{Capabilities, Config, FakeInjection, Instrument, Notice, Types, Venue}
+  alias DpExchange.Core.{Capabilities, Config, FakeInjection, Fanout, Instrument, Types, Venue}
 
   @symbols ~w(BTC-USD BTC-USDC ETH-USD ETH-EUR)
 
@@ -118,9 +118,14 @@ defmodule DpExchange.Coinbase.Fake do
   def capabilities, do: DpExchange.Coinbase.capabilities()
 
   @impl true
-  def get_price(symbol, _opts \\ []) do
+  def get_price(symbol, opts \\ []) do
     with_injection(symbol, fn ->
-      with :ok <- Rest.validate_symbol(symbol), do: fake_quote(symbol)
+      # As `Rest.get_price/2`: the symbol, then a credential only if one was given — it is
+      # signed with when present, so a malformed one is refused rather than read as none.
+      with :ok <- Rest.validate_symbol(symbol),
+           :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
+        fake_quote(symbol)
+      end
     end)
   end
 
@@ -586,19 +591,19 @@ defmodule DpExchange.Coinbase.Fake do
         # one print — so the pushed quote says what the real one says.
         {:ok, quote_struct} ->
           streamed = %{quote_struct | volume_window: :rolling_24h}
-          send(target, {:dp_exchange, :coinbase, streamed})
+          deliver(target, {:dp_exchange, :coinbase, streamed})
 
         _refused ->
           :ok
       end
 
-      if :trades in channels, do: send(target, {:dp_exchange, :coinbase, trade_for(symbol)})
+      if :trades in channels, do: deliver(target, {:dp_exchange, :coinbase, trade_for(symbol)})
 
       # The level2 channel opens with a snapshot, which this fake pushed none of, so a
       # consumer's book handling had nothing to run against. Deltas are not modelled.
       if :order_book in channels do
         with {:ok, book} <- fake_order_book(symbol, []),
-             do: send(target, {:dp_exchange, :coinbase, book})
+             do: deliver(target, {:dp_exchange, :coinbase, book})
       end
     end
 
@@ -707,17 +712,28 @@ defmodule DpExchange.Coinbase.Fake do
   @spec coverage_by_kind(keyword()) :: %{Capabilities.data_kind() => %{String.t() => atom()}}
   def coverage_by_kind(_opts \\ []) do
     # A kind appears only once something of it was pushed, as before for `:trades`.
+    # Every kind, `:quotes` included, is omitted while empty — the real feed's rule.
     [quotes: subscribed(), trades: subscribed_trades(), order_book: subscribed_books()]
-    |> Enum.reject(fn {kind, symbols} -> kind != :quotes and MapSet.size(symbols) == 0 end)
+    |> Enum.reject(fn {_kind, symbols} -> MapSet.size(symbols) == 0 end)
     |> Map.new(fn {kind, symbols} -> {kind, Map.new(symbols, &{&1, :stream})} end)
   end
 
   @impl true
   def subscribe_notices(opts \\ []) do
-    with {:ok, target} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
-      send(target, {:dp_exchange, :coinbase, Notice.new(:link_up, :coinbase)})
-      :ok
+    # Registers and sends nothing: the real feed announces no `:link_up` on registration
+    # (only on an actual link change), so a consumer's test must not see one either.
+    with {:ok, _target} <- Feed.valid_subscriber(Config.opt(opts, :to, self())), do: :ok
+  end
+
+  # As the real `Core.Fanout` delivers: a pid that is gone, or an atom naming no registered
+  # process, is nobody and skipped — `send/2` to an unregistered atom raises ArgumentError.
+  defp deliver(target, message) do
+    case Fanout.resolve(target) do
+      nil -> :ok
+      pid -> send(pid, message)
     end
+
+    :ok
   end
 
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())
@@ -1583,8 +1599,11 @@ defmodule DpExchange.Coinbase.Fake do
   # Upper-cased on the way in, as the real facade does, so a lower-case subscription gets
   # the same answer here as against the venue. Without it the fake delivered nothing for
   # `btc-usd` while the real package delivered `BTC-USD` (checked 2026-09-28).
-  defp canonical_case(symbols) when is_list(symbols),
-    do: Enum.map(symbols, fn s -> if is_binary(s), do: String.upcase(s), else: s end)
+  # Walks the list itself: `Enum.map/2` raises on an improper list, which
+  # `Feed.check_symbols/1` refuses.
+  defp canonical_case([symbol | rest]) when is_binary(symbol),
+    do: [String.upcase(symbol) | canonical_case(rest)]
 
+  defp canonical_case([other | rest]), do: [other | canonical_case(rest)]
   defp canonical_case(other), do: other
 end

@@ -1875,13 +1875,30 @@ defmodule DpExchange.Coinbase.Rest do
 
   `nil`, `%{}`, and any map without a binary `:api_key` and `:api_secret` are
   `{:error, {:missing_credentials, :coinbase}}`, as `Auth.jwt/2` answers them. This does not
-  decode the secret: a key that is present but malformed fails later, at signing.
+  decode the secret: a key that is present but malformed fails later, at signing. A blank
+  or whitespace-only `api_key` or `api_secret` is `{:missing_credentials, :coinbase}` too, and
+  one padded with whitespace is `{:error, {:invalid_credentials, :coinbase}}` (see
+  `DpExchange.Coinbase.Auth.check_credentials/1`); the value is never echoed.
   """
-  @spec validate_credentials(term()) :: :ok | {:error, {:missing_credentials, :coinbase}}
+  @spec validate_credentials(term()) ::
+          :ok | {:error, {:missing_credentials | :invalid_credentials, :coinbase}}
   def validate_credentials(credentials) do
+    credentials |> normalise_credentials() |> Auth.check_credentials()
+  end
+
+  @doc """
+  The credential check for a call that has a public form, such as `get_price/2`.
+
+  No credential (`nil` or `%{}`) is `:ok`: the call takes the public path. Anything else
+  is signed with, so it is checked exactly as `validate_credentials/1` checks it, and a
+  malformed map is refused rather than silently read as anonymous.
+  """
+  @spec validate_optional_credentials(term()) ::
+          :ok | {:error, {:missing_credentials | :invalid_credentials, :coinbase}}
+  def validate_optional_credentials(credentials) do
     case normalise_credentials(credentials) do
-      %{api_key: key, api_secret: secret} when is_binary(key) and is_binary(secret) -> :ok
-      _unusable -> {:error, {:missing_credentials, :coinbase}}
+      nil -> :ok
+      present -> Auth.check_credentials(present)
     end
   end
 

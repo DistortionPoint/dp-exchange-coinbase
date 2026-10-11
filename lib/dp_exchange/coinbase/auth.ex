@@ -120,8 +120,53 @@ defmodule DpExchange.Coinbase.Auth do
   @spec jwt(map(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def jwt(credentials, opts \\ [])
 
-  def jwt(%{api_key: api_key, api_secret: api_secret}, opts)
+  def jwt(credentials, opts) do
+    with :ok <- check_credentials(credentials) do
+      sign_jwt(credentials.api_key, credentials.api_secret, opts)
+    end
+  end
+
+  @doc """
+  Whether `credentials` carries a usable `api_key` and `api_secret`, before any signing.
+
+  * not a map with binary `:api_key` and `:api_secret`, or either one empty or
+    whitespace-only: `{:error, {:missing_credentials, :coinbase}}`. A blank `api_key` used
+    to sign a token with `kid: ""`, and a blank `api_secret` answered
+    `{:unsupported_key_size, 0}`, which sent the reader to check a key length that was
+    never the problem.
+  * either one with leading or trailing whitespace (a `.env` value with its newline):
+    `{:error, {:invalid_credentials, :coinbase}}`. Refused rather than trimmed and signed,
+    so what is signed is what the caller configured. The value is never echoed.
+
+  The one definition of "can sign" for `jwt/2` and for
+  `DpExchange.Coinbase.Rest.validate_credentials/1`, and so for `DpExchange.Coinbase.Fake`.
+  """
+  @spec check_credentials(term()) ::
+          :ok | {:error, {:missing_credentials | :invalid_credentials, :coinbase}}
+  def check_credentials(%{api_key: api_key, api_secret: api_secret})
       when is_binary(api_key) and is_binary(api_secret) do
+    cond do
+      String.trim(api_key) == "" or String.trim(api_secret) == "" ->
+        {:error, {:missing_credentials, :coinbase}}
+
+      padded?(api_key) or (padded?(api_secret) and not pem?(api_secret)) ->
+        {:error, {:invalid_credentials, :coinbase}}
+
+      true ->
+        :ok
+    end
+  end
+
+  def check_credentials(_credentials), do: {:error, {:missing_credentials, :coinbase}}
+
+  defp padded?(value), do: String.trim(value) != value
+
+  # A PEM block always ends in a newline; `decode_private_key/1` names it for what it is
+  # (`:unsupported_key_format`) rather than calling it padded.
+  defp pem?("-----BEGIN" <> _rest), do: true
+  defp pem?(_secret), do: false
+
+  defp sign_jwt(api_key, api_secret, opts) do
     now = DateTime.utc_now() |> DateTime.to_unix(:second)
     nonce = 16 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
 
@@ -153,8 +198,6 @@ defmodule DpExchange.Coinbase.Auth do
       {:ok, "#{signing_input}.#{signature}"}
     end
   end
-
-  def jwt(_credentials, _opts), do: {:error, {:missing_credentials, :coinbase}}
 
   defp maybe_put_uri(claims, nil), do: claims
   defp maybe_put_uri(claims, uri) when is_binary(uri), do: Map.put(claims, "uri", uri)

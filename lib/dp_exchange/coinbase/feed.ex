@@ -1655,6 +1655,8 @@ defmodule DpExchange.Coinbase.Feed do
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
+    # Idempotent: the credentials are wrapped before `GenServer` records its init argument.
+    opts = Credentials.wrap_opt(opts)
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
@@ -1694,13 +1696,32 @@ defmodule DpExchange.Coinbase.Feed do
 
   def valid_subscriber(other), do: {:error, {:invalid_subscriber, other}}
 
-  @spec unsubscribe(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
-  def unsubscribe(feed \\ __MODULE__, symbols),
-    do: GenServer.call(feed, {:unsubscribe, symbols}, @call_timeout)
+  @doc """
+  Stops delivery for `symbols`.
 
+  Refuses in the caller, as `subscribe/3` does, with `{:error, {:invalid_symbols, term}}`
+  (see `check_symbols/1`). It used to validate only inside the feed process, so with no feed
+  running `unsubscribe(nil)` answered the facade's `:ok` where `subscribe(nil)` refused.
+  """
+  @spec unsubscribe(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
+  def unsubscribe(feed \\ __MODULE__, symbols) do
+    with :ok <- check_symbols(symbols) do
+      GenServer.call(feed, {:unsubscribe, symbols}, @call_timeout)
+    end
+  end
+
+  @doc """
+  Replaces the subscribed symbol set with `symbols`.
+
+  Refuses in the caller with `{:error, {:invalid_symbols, term}}`, exactly as
+  `unsubscribe/2` and `subscribe/3` do, whether or not the feed is running.
+  """
   @spec update_symbols(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
-  def update_symbols(feed \\ __MODULE__, symbols),
-    do: GenServer.call(feed, {:update_symbols, symbols}, @call_timeout)
+  def update_symbols(feed \\ __MODULE__, symbols) do
+    with :ok <- check_symbols(symbols) do
+      GenServer.call(feed, {:update_symbols, symbols}, @call_timeout)
+    end
+  end
 
   # NOTE — reads carry `@call_timeout` explicitly, exactly as the writes above do.
   #
@@ -2412,17 +2433,30 @@ defmodule DpExchange.Coinbase.Feed do
   # Public so `subscribe/3` can refuse in the caller, and so `DpExchange.Coinbase.Fake`
   # refuses exactly as the real feed does.
   @doc """
-  `:ok` for a list of non-empty strings, else `{:error, {:invalid_symbols, term}}`.
+  `:ok` for a proper list of strings that are not blank after trimming, else
+  `{:error, {:invalid_symbols, term}}`. A whitespace-only string (`" "`) is blank, and an
+  improper list is refused whole rather than raising.
   """
   @spec check_symbols(term()) :: :ok | {:error, {:invalid_symbols, term()}}
   def check_symbols(symbols) when is_list(symbols) do
-    case Enum.reject(symbols, &(is_binary(&1) and &1 != "")) do
+    case invalid_symbols(symbols, []) do
+      :improper -> {:error, {:invalid_symbols, symbols}}
       [] -> :ok
-      invalid -> {:error, {:invalid_symbols, Enum.take(invalid, 5)}}
+      invalid -> {:error, {:invalid_symbols, invalid |> Enum.reverse() |> Enum.take(5)}}
     end
   end
 
   def check_symbols(other), do: {:error, {:invalid_symbols, other}}
+
+  defp invalid_symbols([], invalid), do: invalid
+
+  defp invalid_symbols([symbol | rest], invalid) do
+    if is_binary(symbol) and String.trim(symbol) != "",
+      do: invalid_symbols(rest, invalid),
+      else: invalid_symbols(rest, [symbol | invalid])
+  end
+
+  defp invalid_symbols(_improper_tail, _invalid), do: :improper
 
   defp subscribe_symbols(symbols, subscriber, state) do
     wanted = MapSet.union(state.wanted, MapSet.new(symbols))

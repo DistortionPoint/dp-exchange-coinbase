@@ -20,6 +20,38 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Found by a cross-venue consistency audit against the family conventions.
+
+- **BREAKING: `unsubscribe/2` and `update_symbols/2` validated symbols only inside the feed.**
+  With no feed running, `unsubscribe(nil)` answered `:ok` and `update_symbols(nil)` answered
+  `{:error, :feed_not_started}`, where `subscribe(nil)` refused. All three now answer
+  `{:error, {:invalid_symbols, value}}` in the caller, before `:feed_not_started`.
+- **BREAKING: a whitespace-only symbol (`[" "]`) was accepted** by `subscribe/2`,
+  `unsubscribe/2` and `update_symbols/2` (the check was only `!= ""`). It is now
+  `{:error, {:invalid_symbols, [" "]}}`. An improper list is refused the same way instead of
+  raising in `canonical_case/1`.
+- **BREAKING: a blank `api_key` signed a token with `kid: ""`, and a blank `api_secret`
+  answered `{:unsupported_key_size, 0}`.** Blank or whitespace-only is now
+  `{:error, {:missing_credentials, :coinbase}}`; a value padded with whitespace is
+  `{:error, {:invalid_credentials, :coinbase}}` (never trimmed, never echoed). One check,
+  `Auth.check_credentials/1`, serves `Auth.jwt/2`, `Rest.validate_credentials/1`, the Fake
+  and the supervisor's ceiling choice (a blank key no longer buys the authenticated ceiling).
+- **Fake: `subscribe_notices/1` sent a `:link_up` on registration** the real feed does not
+  send. It now registers and sends nothing.
+- **Fake: delivery to a `to:` atom naming no process raised `ArgumentError`.** It is skipped,
+  as `Core.Fanout` skips it.
+- **Fake: `coverage_by_kind/1` always carried a `:quotes` key**, empty or not. Empty kinds
+  are omitted, as the real feed omits them.
+- **Fake: `get_price/2` ignored `credentials:`** where the real call signs with a given
+  credential. It now refuses a malformed one with the real validator
+  (`Rest.validate_optional_credentials/1`), and `get_top_of_book/2` refuses a blank
+  `api_secret` through the shared check.
+- `Feed.start_link/1` now wraps raw credentials (`Credentials.wrap_opt/1`, idempotent), so
+  the OTP init argument never prints them. Conventions 11 (verified TLS on
+  `ssl_options: nil`, `socket.ex`) and 12 (`Supervisor`) were already in place.
+
 ## [0.3.110] - 2026-10-11
 
 ### Fixed

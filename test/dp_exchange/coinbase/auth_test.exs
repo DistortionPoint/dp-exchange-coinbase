@@ -104,6 +104,37 @@ defmodule DpExchange.Coinbase.AuthTest do
     end
   end
 
+  describe "blank and padded credentials" do
+    @missing {:error, {:missing_credentials, :coinbase}}
+    @invalid {:error, {:invalid_credentials, :coinbase}}
+
+    test "a blank or whitespace-only key or secret is missing, not signed with kid: \"\"" do
+      for blank <- ["", " ", "\t\n"] do
+        assert @missing == Auth.jwt(%{@credentials | api_key: blank})
+        assert @missing == Auth.jwt(%{@credentials | api_secret: blank})
+        assert @missing == Auth.rest_headers(:get, "/x", nil, %{@credentials | api_key: blank})
+        assert @missing == Auth.check_credentials(%{@credentials | api_secret: blank})
+      end
+    end
+
+    test "a padded key or secret is refused, never trimmed and signed, never echoed" do
+      paddeds = [%{@credentials | api_key: " key"}, %{@credentials | api_secret: @seed <> "\n"}]
+
+      for padded <- paddeds do
+        assert @invalid == Auth.jwt(padded)
+        assert @invalid == Auth.check_credentials(padded)
+      end
+    end
+
+    test "non-maps and maps missing a field are missing" do
+      for bad <- [nil, %{}, %{api_key: "k"}, %{api_key: 1, api_secret: 2}, "key"] do
+        assert @missing == Auth.check_credentials(bad)
+      end
+
+      assert :ok == Auth.check_credentials(@credentials)
+    end
+  end
+
   describe "rest_headers/4" do
     test "returns a bearer token scoped to the call" do
       assert {:ok, [{"Authorization", "Bearer " <> token}, {"Content-Type", "application/json"}]} =

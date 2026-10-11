@@ -272,6 +272,14 @@ A credential that cannot produce a signature — a malformed `api_secret`, or a 
 `{:error, :invalid_base64}`, `{:error, {:unsupported_key_size, n}}`,
 `{:error, :unsupported_key_format}`, or `{:error, {:missing_credentials, :coinbase}}`.
 
+A **blank or whitespace-only** `api_key` or `api_secret` is `{:missing_credentials,
+:coinbase}` as well (it used to sign `kid: ""`, or answer `{:unsupported_key_size, 0}`). A
+value with **leading or trailing whitespace**, such as a `.env` value with its newline, is
+refused `{:error, {:invalid_credentials, :coinbase}}` rather than trimmed and signed; the
+value is never echoed. The Fake refuses identically (it shares `Auth.check_credentials/1`),
+and `get_price/2` in the Fake refuses a malformed `credentials:` the way the real call does,
+while still taking none (`nil` or `%{}`) as the public path.
+
 Only Ed25519 keys sign: `api_secret` is the Base64 of a 32-byte seed or a 64-byte
 seed-plus-public-key. A PEM block (the form an ECDSA key takes) answers
 `:unsupported_key_format`, which is the key type being refused rather than an encoding
@@ -1063,9 +1071,14 @@ all three cases, which means "not observed". Treat `:feed_timeout` as transient 
 Treat the other two as a feed your supervision tree has to bring back.
 
 **A symbol list that cannot be sent is refused, and nothing changes.** `subscribe/2`,
-`unsubscribe/2` and `update_symbols/2` take a list of non-empty strings. Anything else (an
-atom, `nil`, `""`, or an argument that is not a list) answers
-`{:error, {:invalid_symbols, invalid}}` before the feed's state is touched. It used to raise
+`unsubscribe/2` and `update_symbols/2` take a proper list of strings that are not blank
+after trimming. Anything else (an atom, `nil`, `""`, `" "`, an improper list, or an argument
+that is not a list) answers `{:error, {:invalid_symbols, invalid}}` before the feed's state is
+touched, **in the caller and before `:feed_not_started`**, so a malformed argument answers the
+same whether or not the feed runs (`unsubscribe(nil)` with no feed is a refusal, not `:ok`).
+The Fake registers for notices without sending any `:link_up` (the real feed sends none on
+registration), skips a `to:` atom that names no process, and omits empty kinds from
+`coverage_by_kind/1`, `:quotes` included. It used to raise
 inside the feed, which is shared by every caller of the instance: the supervisor restarted
 it from its static options and every symbol every caller had subscribed was gone.
 

@@ -779,6 +779,19 @@ defmodule DpExchange.CoinbaseTest do
       assert DpExchange.Coinbase.coverage(opts) == %{}
     end
 
+    test "bad symbols are refused first, whether or not a feed runs" do
+      opts = [feed: :"absent_feed_#{System.unique_integer([:positive])}"]
+
+      for bad <- [nil, :btc, [" "], ["BTC-USD", "\t"], [""], ["BTC-USD" | "tail"]] do
+        assert {:error, {:invalid_symbols, _bad}} = DpExchange.Coinbase.subscribe(bad, opts)
+        assert {:error, {:invalid_symbols, _bad}} = DpExchange.Coinbase.unsubscribe(bad, opts)
+        assert {:error, {:invalid_symbols, _bad}} = DpExchange.Coinbase.update_symbols(bad, opts)
+      end
+
+      assert {:error, {:invalid_symbols, nil}} = DpExchange.Coinbase.unsubscribe(nil, opts)
+      assert {:error, {:invalid_symbols, [" "]}} = DpExchange.Coinbase.update_symbols([" "], opts)
+    end
+
     test "with a feed that exits while answering" do
       name = :"dying_feed_#{System.unique_integer([:positive])}"
       test_pid = self()
