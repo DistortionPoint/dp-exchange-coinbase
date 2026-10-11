@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.102] - 2026-10-11
+
 ### Fixed
 
 - **The fake read back and cancelled a canned order, not the one that was placed.**
