@@ -3532,7 +3532,12 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  defp order_symbol(symbol) when is_binary(symbol) and symbol != "", do: :ok
+  # Blank after trimming is no product either (`Feed.check_symbols/1` refuses it too); a
+  # whitespace-only symbol built `/products/%20/ticker`.
+  defp order_symbol(symbol) when is_binary(symbol) do
+    if String.trim(symbol) == "", do: {:error, {:invalid_symbol, symbol}}, else: :ok
+  end
+
   defp order_symbol(symbol), do: {:error, {:invalid_symbol, symbol}}
 
   # `side |> to_string() |> String.upcase()` sent whatever it was given: `:hold` went out as

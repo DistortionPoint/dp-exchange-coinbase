@@ -311,6 +311,34 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert state.last_seq == 12
     end
 
+    test "an out_of_order notice after the window reports the count withheld before it" do
+      state = feed([numbered(10), numbered(11), numbered(5), numbered(12), numbered(4)], state())
+      assert state.out_of_order_suppressed == 1
+      _drained = collect([])
+
+      # The window has long passed, so the next late message is announced with the count.
+      elapsed = Map.put(state, :out_of_order_at, System.monotonic_time(:millisecond) - 60_000)
+      after_window = feed([numbered(3)], elapsed)
+
+      notices =
+        for {:dp_exchange, :coinbase, %Notice{details: %{reason: :out_of_order}} = notice} <-
+              Enum.reverse(collect([])),
+            do: notice
+
+      assert [%Notice{details: %{suppressed: 1, got: 3}}] = notices
+      assert after_window.out_of_order_suppressed == 0
+    end
+
+    test "a new connection clears the out_of_order throttle" do
+      state = feed([numbered(10), numbered(11), numbered(5), numbered(12), numbered(4)], state())
+      assert is_integer(state.out_of_order_at)
+
+      {:ok, reconnected} = Socket.handle_connect(%{}, state)
+
+      assert reconnected.out_of_order_at == nil
+      assert reconnected.out_of_order_suppressed == 0
+    end
+
     test "an unparseable value in a notice reason is quoted bounded" do
       long = String.duplicate("9", 100_000) <> "x"
       row = %{"product_id" => "BTC-USD", "price" => long}

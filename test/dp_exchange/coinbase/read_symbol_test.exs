@@ -18,7 +18,7 @@ defmodule DpExchange.Coinbase.ReadSymbolTest do
     api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="
   }
 
-  @bad_symbols [nil, "", :btc, 42, ["BTC-USD"]]
+  @bad_symbols [nil, "", " ", "\t\n", :btc, 42, ["BTC-USD"]]
 
   # A plug that reports any request it receives. None is expected.
   defp reporting(test_pid) do

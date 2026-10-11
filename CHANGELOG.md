@@ -20,6 +20,13 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A whitespace-only symbol passed `Rest.validate_symbol/1`.** The market-data reads (and
+  `place_order/3`, `close_position/3`) accepted `" "` and built `/products/%20/ticker`;
+  `Feed.check_symbols/1` already refused it. Blank after trimming is now
+  `{:error, {:invalid_symbol, value}}` on every one of them, and in `Fake`.
+
 ## [0.3.111] - 2026-10-11
 
 ### Fixed
