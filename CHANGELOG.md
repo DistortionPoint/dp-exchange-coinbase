@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.107] - 2026-10-11
+
 ### Fixed
 
 - **Error text quotes a venue body bounded.** An unexpected HTTP status put `inspect(body)`
