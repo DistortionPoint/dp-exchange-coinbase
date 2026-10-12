@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.113] - 2026-10-12
+
 ### Fixed
 
 Family trading conventions (tick P) applied to orders, in `Rest` and `Fake` alike.
