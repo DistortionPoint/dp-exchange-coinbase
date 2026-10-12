@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.123] - 2026-10-12
+
 - **Security: credentials never go over a plaintext socket.** `Socket.start_link/1` with
   credentials refuses a `ws://` or `http://` `:url` to a non-loopback host with
   `{:error, :insecure_websocket_url}`; a signed JWT (valid 120s) was sent in the clear.
