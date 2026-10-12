@@ -360,6 +360,28 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   @doc """
+  `delay_ms` shortened by a random amount of up to a quarter of itself, never lengthened.
+
+  **Every shard has its own socket, and the venue drops them all at once.** `Feed` opens up
+  to one socket per 30 `level2` symbols and per 100 `ticker` symbols (19 for a 406-symbol
+  scope), and a venue-side restart or a network fault closes every one of them in the same
+  instant. `reconnect_delay_ms/1` is a pure function of the attempt number, so all of them
+  then retried on identical schedules: 1s, 2s, 4s, 8s... together, a connect burst of the
+  whole fleet on every turn of the ladder. This package's own `Feed` staggers its opens by
+  `shard_spacing_ms` precisely because the venue limits connections to 8 per second per IP,
+  and the retry ladder undid that stagger at the one time a venue is already refusing
+  connections. A random shortening per socket spreads the turns apart.
+
+  Only shortened, so `reconnect_delay_ms/1` stays the ceiling it documents (30 seconds).
+  `0` stays `0`: attempt 1 is a live session that just dropped and reconnects at once.
+  """
+  @spec jittered_delay_ms(non_neg_integer()) :: non_neg_integer()
+  def jittered_delay_ms(delay_ms) when is_integer(delay_ms) and delay_ms < 4, do: delay_ms
+
+  def jittered_delay_ms(delay_ms) when is_integer(delay_ms),
+    do: delay_ms - :rand.uniform(div(delay_ms, 4))
+
+  @doc """
   Starts a connection.
 
   ## Options
@@ -377,6 +399,10 @@ defmodule DpExchange.Coinbase.Socket do
   def start_link(opts) do
     state = %{
       subscriber: Keyword.fetch!(opts, :subscriber),
+      # The process that started this socket (`Feed`, or a test), for `wait_to_reconnect/2`:
+      # the link to it is how this socket learns it was stopped, and a backoff has to keep
+      # listening for that.
+      parent: self(),
       # Wrapped immediately — see `Credentials`'s moduledoc. This process holds the pair
       # for as long as the socket is up, and a WebSockex crash prints its state via the
       # same OTP crash report `Feed`'s does.
@@ -630,13 +656,15 @@ defmodule DpExchange.Coinbase.Socket do
       end
 
     attempt = attempt_number + short_sessions
-    delay = reconnect_delay_ms(attempt)
+    # Jittered per socket — see `jittered_delay_ms/1`. The telemetry event below reports the
+    # delay actually slept, not the ladder's rung.
+    delay = attempt |> reconnect_delay_ms() |> jittered_delay_ms()
 
     Telemetry.link_reconnect_attempt(:coinbase, attempt, delay)
 
     # Blocks THIS socket process only, and only while it has no connection to serve anyway —
     # the same trade `dp_exchange_schwab.Socket` already makes.
-    if delay > 0, do: Process.sleep(delay)
+    wait_to_reconnect(state, delay)
 
     # No maintained book to wipe — see the moduledoc's "A reconnect has nothing to
     # wipe" section. The gap this disconnect opens in the delta stream is real and is now
@@ -654,6 +682,33 @@ defmodule DpExchange.Coinbase.Socket do
     # 325-subscribed/174-delivering shape `coverage/1` was written for. `report_link_down/1`
     # above is what lets `Feed` narrow coverage to exactly this shard.
     {:reconnect, Map.merge(state, %{connected_at: nil, short_sessions: short_sessions})}
+  end
+
+  # The backoff wait, which still hears its parent stop it.
+  #
+  # `WebSockex` traps exits and learns that its parent has gone (or that `Feed` stopped it)
+  # from an `{:EXIT, parent, reason}` message that only its own receive loops read. `Feed`
+  # opens one socket per shard as a linked child and stops it with `Process.exit(pid,
+  # :shutdown)` when `retire_shards/2` retires the shard (a reshard that shrinks the
+  # universe, `finalize_shard/4`, `maybe_finalize_vanished_shard/2`); a `Feed` restart
+  # orphans every shard's socket the same way. This wait used to be a bare `Process.sleep/1`
+  # of up to `@max_reconnect_delay_ms`, during which that message sat unread: a socket told
+  # to stop slept out the whole delay and then dialled the venue once more before it noticed,
+  # a stray connection from a socket nobody owns.
+  #
+  # Exiting with the parent's own reason is what `WebSockex` does when it reads the message
+  # itself (`terminate/4`). A state with no `:parent` (one a test built by hand) matches no
+  # exit and waits the full delay, exactly as the sleep did.
+  defp wait_to_reconnect(_state, 0), do: :ok
+
+  defp wait_to_reconnect(state, delay) do
+    parent = Map.get(state, :parent)
+
+    receive do
+      {:EXIT, ^parent, reason} when is_pid(parent) -> exit(reason)
+    after
+      delay -> :ok
+    end
   end
 
   # Connected, and for at least `@stable_session_ms`. A state with no `:connected_at` (no
@@ -1477,7 +1532,8 @@ defmodule DpExchange.Coinbase.Socket do
   # `fault_kind/1`), so a different bad value of the same kind is not a new fault. The set
   # is cleared on every connect, so a fault still present after a reconnect is reported
   # again, and it is capped at `@max_reported_faults` so a venue naming endless distinct
-  # subjects cannot grow it. Past the cap, new faults are reported every time, as before.
+  # subjects cannot grow it. At the cap the set starts over with only the new fault (see
+  # `remember_fault/3`), so each fault is reported at most once per fill of the set.
   defp report_quality(state, channel, detail, reason, extra) do
     subject = String.slice(to_string(detail), 0, 120)
     fault = {channel, subject, fault_kind(reason)}
@@ -1498,11 +1554,17 @@ defmodule DpExchange.Coinbase.Socket do
     end
   end
 
+  # At the cap the set starts over holding only the new fault. It used to stop remembering,
+  # which meant a fault first seen past the cap was notified on EVERY frame that carried it
+  # (`ticker` is several a second per product) — the per-frame flood the set exists to stop,
+  # returning on exactly the venue that is misbehaving most. Restarting keeps memory bounded
+  # and notifies each fault at most once per fill of the set; the cost is that an old fault
+  # forgotten by the restart may be reported once more.
   defp remember_fault(state, reported, fault) do
     if MapSet.size(reported) < @max_reported_faults do
       Map.put(state, :reported_faults, MapSet.put(reported, fault))
     else
-      state
+      Map.put(state, :reported_faults, MapSet.new([fault]))
     end
   end
 

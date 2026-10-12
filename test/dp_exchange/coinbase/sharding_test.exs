@@ -1741,6 +1741,78 @@ defmodule DpExchange.Coinbase.ShardingTest do
     end
   end
 
+  describe "a deferred :channel_reconcile does not trust its own snapshot" do
+    # `reconcile_shard_in_place/8` schedules `removed` and `added` as computed then, up to
+    # `(shards - 1) * shard_spacing_ms` ahead. A symbol unsubscribed inside that window was
+    # still subscribed at the venue when the message fired, and nothing ever released it.
+    test "a symbol no longer wanted is not subscribed when the stale message fires" do
+      socket = frame_reporting_socket(self())
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | wanted: MapSet.new(["A-USD"]),
+            shards: %{{"ticker", 0} => %{socket: socket, symbols: ["A-USD"]}}
+        }
+      end)
+
+      send(
+        feed,
+        {:channel_reconcile, {"ticker", 0}, socket, "ticker", ["C-USD"], ["A-USD", "B-USD"], nil}
+      )
+
+      assert_receive {:frame, "unsubscribe", ["C-USD"]}, 5_000
+      assert_receive {:frame, "subscribe", ids}, 5_000
+      assert ids == ["A-USD"]
+      refute_receive {:frame, _type, _ids}, 100
+    end
+
+    test "a symbol wanted again since is not unsubscribed when the stale message fires" do
+      socket = frame_reporting_socket(self())
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | wanted: MapSet.new(["A-USD", "B-USD"]),
+            shards: %{{"ticker", 0} => %{socket: socket, symbols: ["A-USD", "B-USD"]}}
+        }
+      end)
+
+      send(
+        feed,
+        {:channel_reconcile, {"ticker", 0}, socket, "ticker", ["B-USD", "C-USD"], [], nil}
+      )
+
+      assert_receive {:frame, "unsubscribe", ["C-USD"]}, 5_000
+      :sys.get_state(feed)
+      refute_receive {:frame, _type, _ids}, 100
+    end
+
+    test "the retry of a failed unsubscribe is cut to the shard's current symbols too" do
+      socket = frame_reporting_socket(self())
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | wanted: MapSet.new(["A-USD"]),
+            shards: %{{"ticker", 0} => %{socket: socket, symbols: ["A-USD"]}}
+        }
+      end)
+
+      send(
+        feed,
+        {:channel_reconcile, {"ticker", 0}, socket, "ticker", [], ["A-USD", "B-USD"], nil, 2}
+      )
+
+      assert_receive {:frame, "subscribe", ids}, 5_000
+      assert ids == ["A-USD"]
+      refute_receive {:frame, _type, _ids}, 100
+    end
+  end
+
   describe "a stranded unsubscribe is retried, not silently forgotten" do
     # The coordinator traced a real gap in the fix above: `reconcile_shard_in_place/7`
     # recorded `state.shards[key].symbols = wanted` unconditionally, so a permanently

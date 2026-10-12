@@ -2372,6 +2372,7 @@ defmodule DpExchange.Coinbase.Feed do
   # with nothing pending and one that is retrying a stranded release both flow through
   # the identical code.
   def handle_info({:channel_reconcile, key, socket, channel, removed, added, credentials}, state) do
+    {removed, added} = current_reconcile(state, key, socket, removed, added)
     attempt_channel_reconcile(key, socket, channel, removed, added, credentials, 1, state)
   end
 
@@ -2382,6 +2383,7 @@ defmodule DpExchange.Coinbase.Feed do
         {:channel_reconcile, key, socket, channel, removed, added, credentials, attempt},
         state
       ) do
+    {removed, added} = current_reconcile(state, key, socket, removed, added)
     attempt_channel_reconcile(key, socket, channel, removed, added, credentials, attempt, state)
   end
 
@@ -2500,6 +2502,34 @@ defmodule DpExchange.Coinbase.Feed do
   def handle_info(_other, state), do: {:noreply, state}
 
   # --- internal ------------------------------------------------------------
+
+  # **A deferred `:channel_reconcile` is a snapshot, and is not trusted when it fires** — the
+  # same defect `:resubscribe_shard` had (found 2026-10-10), in the message that predates it.
+  # `reconcile_shard_in_place/8` schedules `removed` and `added` as computed then, up to
+  # `(shards - 1) * shard_spacing_ms` ahead, and its retry chain re-sends the same lists
+  # `subscribe_retry_delay_ms` later. A later `unsubscribe/2` or `update_symbols/2` in that
+  # window sets `state.shards[key].symbols` to the new target, but the earlier message still
+  # held the old one: a symbol unsubscribed in between was subscribed at the venue anyway,
+  # nothing ever released it (the unconditional resubscribe only re-issues the shard's CURRENT
+  # symbols, and this shard no longer lists it), and on a `level2` socket it occupied one of
+  # the 30 slots the venue allows per session for as long as the socket lived.
+  #
+  # So, when the shard still exists on this very socket, `added` is cut to what it now wants
+  # and `removed` to what it no longer wants. A shard that is gone or holds another socket
+  # leaves the lists as they are: the dead-socket guards downstream already make that a no-op,
+  # and a message for a shard this state has never heard of is the caller's to send.
+  defp current_reconcile(state, key, socket, removed, added) do
+    case Map.get(state.shards, key) do
+      %{socket: ^socket, symbols: symbols} ->
+        wanted = MapSet.new(symbols)
+
+        {Enum.reject(removed, &MapSet.member?(wanted, &1)),
+         Enum.filter(added, &MapSet.member?(wanted, &1))}
+
+      _gone_or_replaced ->
+        {removed, added}
+    end
+  end
 
   # Re-issues the `level2` shard now when the interval since the last gap-triggered re-issue has
   # passed, otherwise schedules ONE trailing re-issue for when it ends. See the `:sequence_gap`

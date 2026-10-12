@@ -484,6 +484,31 @@ defmodule DpExchange.Coinbase.SocketTest do
       end
     end
 
+    test "a new fault past the full fault set is notified once, not on every frame" do
+      # 256 is `@max_reported_faults`. Without the restart at the cap, a fault first seen
+      # now is never remembered and every frame that carries it sends another notice.
+      full =
+        Map.put(
+          state(),
+          :reported_faults,
+          MapSet.new(1..256, &{"ticker", "OLD-#{&1}", :invalid_decimal})
+        )
+
+      bad =
+        update_in(@ticker["events"], fn [event] ->
+          [update_in(event["tickers"], fn [t] -> [Map.put(t, "price", "0")] end)]
+        end)
+
+      frame = {:text, Jason.encode!(bad)}
+
+      assert {:ok, state} = Socket.handle_frame(frame, full)
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+      assert MapSet.size(state.reported_faults) == 1
+
+      assert {:ok, _state} = Socket.handle_frame(frame, state)
+      refute_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+    end
+
     test "a level2 snapshot drops a zero-size level and keeps the delta's zero (MD5)" do
       row = fn side, price, size ->
         %{
@@ -1655,7 +1680,48 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert {:reconnect, _state} =
                Socket.handle_disconnect(%{reason: :closed, attempt_number: 3}, state())
 
-      assert System.monotonic_time(:millisecond) - started >= 2_000
+      # Jittered downward by up to a quarter (`Socket.jittered_delay_ms/1`): 1500..2000.
+      assert System.monotonic_time(:millisecond) - started >= 1_500
+    end
+
+    test "jittered_delay_ms/1 only ever shortens, by at most a quarter, and varies" do
+      # The reconnect ladder was a pure function of the attempt number, so every shard's socket
+      # (up to one per 30 level2 symbols), dropped together by one venue restart, retried on
+      # identical schedules: a connect burst of the whole fleet on every rung.
+      draws = for _draw <- 1..200, do: Socket.jittered_delay_ms(30_000)
+
+      assert Enum.all?(draws, &(&1 >= 22_500 and &1 < 30_000))
+      assert length(Enum.uniq(draws)) > 1
+    end
+
+    test "jittered_delay_ms/1 leaves an immediate reconnect immediate" do
+      assert Socket.jittered_delay_ms(0) == 0
+    end
+
+    test "handle_disconnect/2 sleeps and reports a jittered delay, not the ladder's rung" do
+      # Attempt 2 is the 1_000ms rung. Without the jitter the telemetry event reports exactly
+      # 1_000 every time; with it the value is strictly below the rung and within a quarter.
+      test_pid = self()
+      handler_id = "reconnect-jitter-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:dp_exchange, :link, :reconnect_attempt],
+        fn _event, _measurements, metadata, _config ->
+          if metadata.provider == :coinbase and self() == test_pid,
+            do: send(test_pid, {:reconnect_attempt, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:reconnect, _state} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 2}, state())
+
+      assert_receive {:reconnect_attempt, %{attempt: 2, delay_ms: delay_ms}}, 5_000
+      assert delay_ms >= 750
+      assert delay_ms < 1_000
     end
 
     test "a session that connected and dropped at once is not a healthy blip" do
@@ -1668,7 +1734,8 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert {:reconnect, after_drop} =
                Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, just_connected)
 
-      assert System.monotonic_time(:millisecond) - started >= 1_000
+      # The 1_000ms rung, jittered down by up to a quarter.
+      assert System.monotonic_time(:millisecond) - started >= 750
       assert after_drop.short_sessions == 1
       assert after_drop.connected_at == nil
     end
@@ -1693,7 +1760,7 @@ defmodule DpExchange.Coinbase.SocketTest do
                  %{state() | connected_at: nil, short_sessions: 1}
                )
 
-      assert System.monotonic_time(:millisecond) - started >= 2_000
+      assert System.monotonic_time(:millisecond) - started >= 1_500
       assert after_fail.short_sessions == 1
     end
 

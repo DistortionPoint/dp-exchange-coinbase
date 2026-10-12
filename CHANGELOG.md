@@ -20,6 +20,21 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **A deferred shard reconcile acted on a stale snapshot.** It carried the symbol lists computed
+  when it was scheduled (up to `(shards - 1) * shard_spacing_ms` earlier), and its unsubscribe
+  retry resent them too. A symbol unsubscribed in between was subscribed at the venue anyway,
+  where on `level2` it held one of the 30 session slots for the life of the socket; a symbol
+  wanted again was unsubscribed. Both lists are now cut to the shard's current symbols.
+- **A Socket in its reconnect backoff ignored its parent stopping it.** The wait, up to 30s, was a
+  bare sleep, so a socket `Feed` had retired (a reshard) or orphaned (a `Feed` restart) slept out
+  the delay and dialled the venue once more. The wait now exits with the parent's reason.
+- **Reconnect backoff is jittered per socket** (`Socket.jittered_delay_ms/1`: shortened by up to
+  a quarter, never lengthened; an immediate first reconnect stays immediate). Every shard's
+  socket, dropped together by one venue event, no longer retries on identical schedules. The
+  `link_reconnect_attempt` telemetry `delay_ms` reports the delay actually waited.
+- **Past the 256-fault cap, a new data-quality fault was notified on every frame.** The fault
+  set now starts over with only the new fault, so each fault is notified at most once per fill.
+
 ## [0.3.120] - 2026-10-12
 
 - Docs: every public facade function is documented in HexDocs (152 added); docs build is warning-free.
