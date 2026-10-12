@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.114] - 2026-10-12
+
 ### Fixed
 
 - **BREAKING: `{:invalid_symbols, v}` carries the caller's whole argument** from `subscribe`,
