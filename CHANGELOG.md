@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.118] - 2026-10-12
+
 Tick T: regression review of tick S, docs against code, hot paths.
 
 - **The Fake read a fills `:start` as exclusive.** The family range rule is `:start` inclusive; a
