@@ -20,6 +20,14 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Security: credentials never go over a plaintext socket.** `Socket.start_link/1` with
+  credentials refuses a `ws://` or `http://` `:url` to a non-loopback host with
+  `{:error, :insecure_websocket_url}`; a signed JWT (valid 120s) was sent in the clear.
+- **Security: an `api_key` that is not valid UTF-8 is refused by name**
+  (`{:error, {:invalid_credentials, :coinbase}}`). It raised `Jason.EncodeError` quoting the key
+  bytes in the caller's process and its crash report.
+- **A venue websocket `error` message is quoted bounded** (1,024 characters) in its notice.
+
 ## [0.3.122] - 2026-10-12
 
 - **Docs (`usage-rules.md` checked line by line against the code):** `:ssl_options` is not a

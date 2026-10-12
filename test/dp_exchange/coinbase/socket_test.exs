@@ -137,6 +137,22 @@ defmodule DpExchange.Coinbase.SocketTest do
     end
   end
 
+  describe "start_link/1 — credentials never go over a plaintext socket" do
+    @fake_credentials %{api_key: "test-key-not-real", api_secret: "test-secret-not-real"}
+
+    test "a ws:// URL for a remote host is refused when credentials are given, URL not echoed" do
+      urls = ["ws://example.invalid/", "http://user:pw@example.invalid/", "ws://10.0.0.1:80/"]
+
+      for url <- urls do
+        opts = [subscriber: self(), credentials: @fake_credentials, url: url]
+        result = Socket.start_link(opts)
+
+        assert result == {:error, :insecure_websocket_url}
+        refute inspect(result) =~ "example.invalid"
+      end
+    end
+  end
+
   describe "connection state becomes a notice, not a log line" do
     test "only a RE-connect is reported to the feed, so it can re-issue the shard at once" do
       # `Feed` subscribes a new shard itself after `start_link/1`; reporting the first
@@ -736,6 +752,19 @@ defmodule DpExchange.Coinbase.SocketTest do
 
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :degraded}}
       refute_received {:dp_exchange, :coinbase, %Notice{kind: :credentials_rejected}}
+    end
+
+    test "a huge venue error message is classified whole but quoted bounded" do
+      # The text went whole into a notice sent to every subscriber.
+      message = "authentication failure " <> String.duplicate("x", 100_000)
+
+      assert {:ok, _state} = frame(%{"type" => "error", "message" => message})
+
+      assert_received {:dp_exchange, :coinbase,
+                       %Notice{kind: :credentials_rejected, message: quoted}}
+
+      assert String.length(quoted) == 1_024
+      assert String.starts_with?(quoted, "authentication failure")
     end
 
     test "an error whose message is not a string is reported, and does not crash the socket" do

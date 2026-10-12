@@ -435,14 +435,31 @@ defmodule DpExchange.Coinbase.Socket do
     }
 
     opts = connection_opts(opts)
+    url = Config.opt(opts, :url, default_endpoint())
 
-    VendoredWebSockex.start_link(
-      Config.opt(opts, :url, default_endpoint()),
-      __MODULE__,
-      state,
-      opts
-    )
+    with :ok <- check_transport(url, state.credentials) do
+      VendoredWebSockex.start_link(url, __MODULE__, state, opts)
+    end
   end
+
+  # **Credentials never travel over a plaintext socket.** `:url` (and the `:websocket_url`
+  # application setting) is a test seam, but nothing stopped a consumer pointing it at
+  # `ws://` for a real host, and every authenticated subscribe then sent a live signed JWT
+  # in the clear to anyone on the path, valid for its two-minute window. Without credentials
+  # nothing secret is sent, so any URL is allowed; with them, only `wss://` (or `https://`)
+  # or a loopback host, which is where a test stands up its local socket. The refused URL is
+  # not echoed: it can carry userinfo.
+  defp check_transport(_url, nil), do: :ok
+
+  defp check_transport(url, _credentials) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme} when scheme in ["wss", "https"] -> :ok
+      %URI{host: host} when host in ["localhost", "127.0.0.1", "::1"] -> :ok
+      _plaintext_remote -> {:error, :insecure_websocket_url}
+    end
+  end
+
+  defp check_transport(_url, _credentials), do: :ok
 
   # The venue's own endpoint, unless the application config names another with
   # `:websocket_url`. The seam exists for tests. A tier-1 run sets it in `config/test.exs` to
@@ -867,7 +884,14 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   defp dispatch(%{"type" => "error", "message" => message}, state) when is_binary(message) do
-    notify(state, Notice.new(error_kind(message), :coinbase, message: message))
+    # Classified on the whole text, quoted bounded: the venue's `message` went whole into a
+    # notice sent to every subscriber, and a frame can be as large as the venue cares to
+    # make it. Same cut as the other venue strings quoted in this module (see `brief/1`).
+    notify(
+      state,
+      Notice.new(error_kind(message), :coinbase, message: String.slice(message, 0, 1_024))
+    )
+
     state
   end
 

@@ -126,6 +126,15 @@ defmodule DpExchange.Coinbase.AuthTest do
       end
     end
 
+    test "a key that is not UTF-8 is refused by name, not raised with its bytes quoted" do
+      # `Jason.encode!/1` on the `kid` raised `Jason.EncodeError` quoting the key.
+      bad = %{@credentials | api_key: "test-key-not-real-" <> <<255, 254>>}
+
+      assert @invalid == Auth.check_credentials(bad)
+      assert @invalid == Auth.jwt(bad)
+      assert @invalid == Auth.rest_headers(:get, "/x", nil, bad)
+    end
+
     test "non-maps and maps missing a field are missing" do
       for bad <- [nil, %{}, %{api_key: "k"}, %{api_key: 1, api_secret: 2}, "key"] do
         assert @missing == Auth.check_credentials(bad)

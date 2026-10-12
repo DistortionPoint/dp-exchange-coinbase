@@ -152,6 +152,13 @@ defmodule DpExchange.Coinbase.Auth do
       padded?(api_key) or (padded?(api_secret) and not pem?(api_secret)) ->
         {:error, {:invalid_credentials, :coinbase}}
 
+      # `api_key` goes into the JWT's JSON (`kid`, `sub`) and `Jason.encode!/1` RAISES on a
+      # binary that is not UTF-8, with a message that quotes the offending bytes: the
+      # configured key, in an exception in the caller's (or the Feed's) process and so in
+      # its crash report. Refused by name here, value not echoed.
+      not String.valid?(api_key) ->
+        {:error, {:invalid_credentials, :coinbase}}
+
       true ->
         :ok
     end
