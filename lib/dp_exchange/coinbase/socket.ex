@@ -80,8 +80,10 @@ defmodule DpExchange.Coinbase.Socket do
 
   A reconnect used to lose the maintained book, because the venue's own session went
   with it — `handle_disconnect/2` cleared every symbol's book, and the next `snapshot`
-  rebuilt it fresh. There is no book to lose now, so `handle_disconnect/2` clears
-  nothing beyond what it always cleared for delivery bookkeeping.
+  rebuilt it fresh. There is no book to lose now, so `handle_disconnect/2` wipes none. It
+  does tell `Feed` which link dropped (`report_link_down/1`), and `Feed` narrows
+  `coverage/1` to that shard, because a symbol that was delivering before the drop is not
+  evidence it is delivering after the reconnect.
 
   What was true then is still true, and now visible instead of silently absorbed:
   deltas delivered after a reconnect are **not contiguous** with deltas delivered
@@ -94,7 +96,7 @@ defmodule DpExchange.Coinbase.Socket do
   re-pull `get_order_book/2` (unaffected by any of this) or accept the venue's own
   fresh `snapshot` on resubscribe, not to keep applying deltas across a gap and hope
   they still line up. See `DpExchange.Core.Types.OrderBookDelta`'s own moduledoc and
-  this family's `usage-rules/feeds.md` for the full account of why those two signals
+  `dp_exchange_core`'s `usage-rules/feeds.md` for the full account of why those two signals
   are sufficient.
 
   ## An unreadable `level2` row refuses the whole event, and says so once

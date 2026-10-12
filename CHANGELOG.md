@@ -22,15 +22,34 @@ acceptable changelog line.
 
 Tick T: regression review of tick S, docs against code, hot paths.
 
+- **The Fake read a fills `:start` as exclusive.** The family range rule is `:start` inclusive; a
+  fill stamped exactly at `:start` is now kept, as `Rest` sends the bound to the venue.
+
 ### Changed
 
 - `Socket`: a `level2` snapshot drops zero-size levels in the same pass that files the rest by
   side (one pass over ~44,000 rows instead of two). Behaviour unchanged.
 
+### Fixed
+
+- `Rest.close_position/3` answered `{:ok, %Order{id: nil}}` for `success: true` with no
+  readable `order_id`, which `Core.Types.Order` does not allow and `usage-rules.md` already
+  said was `{:order_unconfirmed, ...}`. It is now
+  `{:error, {:order_unconfirmed, client_order_id, {:missing_required_field, :order_id}}}`,
+  as for `place_order/3` (DV5): the order MAY be live, and the id sent looks it up.
+
 ### Documentation
 
 - `usage-rules.md` now states that `get_trades/2`'s `:end` is exclusive and filtered
-  client-side, and that a `level2` gap inside the 5-second interval gets one trailing re-issue.
+  client-side, that a `level2` gap inside the 5-second interval gets one trailing re-issue,
+  the full list of writes sent once (adds `cancel_futures_sweep/2`, `cancel_order/3`,
+  `delete_portfolio/3`), that a read refuses only 400/401/403, and the required core floor
+  (`~> 0.3.70`).
+- Moduledocs and `@doc`s corrected to what the code does now: `Socket` (reconnect and
+  coverage), `Feed` (function arities, the optionally-authenticated `level2`, the gap
+  re-issue section, `:trades` kind), `Fake` (`coverage_by_kind/1` and streaming defaults),
+  `Credentials`, `Prime` (idempotency key is a UUID), and `Rest` (pagination errors, 4xx on a
+  write's first attempt, `get_order_book/2`'s `venue_time`, candle request errors).
 
 ## [0.3.117] - 2026-10-12
 

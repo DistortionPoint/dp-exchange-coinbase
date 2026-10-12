@@ -690,16 +690,19 @@ defmodule DpExchange.Coinbase do
   """
   def quantization(symbol), do: Rest.quantization(symbol, [])
 
-  # --- Declared but not yet implemented -----------------------------------
+  # --- The wider surface: futures, staking, conversion, portfolios, and the unsupported -----
   #
-  # Core 0.1.16 widened the facade to the surface the venues actually publish. These answer
-  # `{:error, :not_supported}` and are declared `:unsupported` in `capabilities/0`, so a
-  # consumer routing on the declaration is told the truth.
+  # Core 0.1.16 widened the facade to the surface the venues actually publish. The callbacks
+  # below that are in `@venue_does_not_serve` or `@not_ported` answer `{:error,
+  # :not_supported}` and are declared `:unsupported` in `capabilities/0`, so a consumer routing
+  # on the declaration is told the truth; the rest are implemented and declared
+  # `:experimental`.
   #
-  # **`:unsupported` here is a statement about this package, not about the venue.** That
+  # **`:unsupported` can mean either the venue's absence or this package's backlog.** That
   # distinction is the one Phase 1 had to correct after a package spent a year asserting a
-  # venue had no streaming API when it had fifteen services. Where the venue genuinely does
-  # not offer something, the comment beside it says so.
+  # venue had no streaming API when it had fifteen services. `venue_does_not_serve/0` lists
+  # the first kind; `@not_ported` (funding, contract stats) is the second. Where the venue
+  # genuinely does not offer something, the comment beside it says so.
 
   @doc """
   Open futures positions in the CFM account.

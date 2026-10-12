@@ -23,11 +23,13 @@ of two ways, and which one it is depends on what the endpoint gives it:
   or your own key inside `opts[:body]` for `claim_rewards/4`) if you want to correlate or
   to make your OWN re-issued call idempotent — a generated key covers the retries this
   package makes, not a second call you make yourself.
-- **Portfolio moves, futures sweeps, conversion commits, order edits and portfolio
-  creates are sent once**: `transfer_internal/4`, `schedule_futures_sweep/2`,
-  `commit_conversion/2`, `replace_order/4` and `create_account/1` (a portfolio create).
-  None has a key the venue honours. Before 0.3.49 they were retried, so a timed-out move could move the funds
-  twice. A transport error on one of these means **the outcome is unknown**: read the
+- **Portfolio moves, futures sweeps, conversion commits, order edits and cancels, portfolio
+  creates and deletes are sent once**: `transfer_internal/4`, `schedule_futures_sweep/2`,
+  `cancel_futures_sweep/2`, `commit_conversion/2`, `replace_order/4`, `cancel_order/3`,
+  `create_account/1` (a portfolio create) and `delete_portfolio/3`. None has a key the venue
+  honours. Before 0.3.49 they were retried, so a timed-out move could move the funds twice.
+  (`rename_account/3` and `set_intraday_margin_setting/3` repeat the same value, so they keep
+  the default retries.) A transport error on one of these means **the outcome is unknown**: read the
   portfolio, sweep, conversion or order back before issuing it again.
 - **BREAKING: `{:error, {:write_unconfirmed, key, reason}}` is the answer for an unconfirmed
   non-order write.** Returned by `transfer_internal/4`, `schedule_futures_sweep/2`,
@@ -86,7 +88,7 @@ of two ways, and which one it is depends on what the endpoint gives it:
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.50`.
+`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.70`.
 
 ```elixir
 # before
@@ -311,7 +313,8 @@ If you have better numbers, that field is where to correct them.
 ## Refusal versus error
 
 - `{:refused, :not_listed}` — Coinbase does not carry this symbol. Permanent. Stop asking.
-- `{:refused, {:venue_error, status, message}}` — a `400`, `401` or `403`: the venue
+- `{:refused, {:venue_error, status, message}}` — a `400`, `401` or `403` on a read (a write's
+  first attempt is refused for any 4xx but 429, see the first section): the venue
   received the request and declined it, in its own words. Permanent **for the request as
   sent** — a caller whose key was rotated signs again with the new one, which is a
   different request rather than a retry of this one. The message is cut at 2,048 characters.
@@ -437,13 +440,8 @@ One thing the option deliberately does not do:
   permanent zero coverage, which is indistinguishable from a venue outage. If you want no
   stream, do not start a feed.
 
-**`level2` no longer requires a credential to be attempted.** `SubscribeLevel2`'s JWT is
-documented "Optional here; recommended for connection reliability."
-(`docs/reference/coinbase/openapi/at-async.json`) — a credential-less feed still opens
-`level2` shards and subscribes unauthenticated; it is `user` (order fills) that genuinely
-needs one. A credential still buys you something on `level2`: the venue's own words say it
-helps "connection reliability", so pass one when you have it even if you only want the
-book.
+A credential-less feed still opens `level2` shards (see "Neither `:order_book` nor `:quotes`
+requires a credential to stream" above); it is `user` (order fills) that genuinely needs one.
 
 A kind this venue does not stream (`:candles`, say) also fails at `init/1` rather than being
 silently dropped.
@@ -821,7 +819,7 @@ exactly zero contracts is a flat or closed position and is skipped. They used to
 come back as `side: nil` / `quantity: nil` positions, which `Core.Types.Position` does not
 allow (`:long | :short`, positive size). `list_futures_positions/1` still returns the venue's
 rows untouched. The futures endpoints take no portfolio, so `portfolio:` on
-`get_positions/1`, `list_futures_positions/1` or `get_futures_position/2` is
+`get_positions/1`, `list_futures_positions/1` or `get_futures_position/3` is
 `{:error, {:unsupported_option, :portfolio}}`.
 
 `get_positions/1` returns CFM positions. Its `:realised_pnl` is `nil` and that is not an

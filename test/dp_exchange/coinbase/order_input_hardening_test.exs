@@ -235,10 +235,10 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
   end
 
   describe "place_order/3 and close_position/3 envelopes" do
-    test "success true with no success_response: unconfirmed to place, unidentified to close" do
+    test "success true with no success_response: unconfirmed to place and to close" do
       # `success` is the only field the spec requires of `NewOrderResponse`. A placement
-      # without an order id the caller can name is `{:order_unconfirmed, cid, reason}` (DV5),
-      # carrying the id sent so the order can be looked up.
+      # or a close without an order id the caller can name is `{:order_unconfirmed, cid,
+      # reason}` (DV5), carrying the id sent so the order can be looked up.
       reason = {:missing_required_field, :order_id}
 
       assert {:error, {:order_unconfirmed, client_order_id, ^reason}} =
@@ -250,12 +250,14 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
 
       assert byte_size(client_order_id) == 36
 
-      assert {:ok, %{id: nil, status: :pending}} =
+      assert {:error, {:order_unconfirmed, close_id, ^reason}} =
                Rest.close_position(
                  @credentials,
                  "BTC-USD",
                  opts(responding(%{"success" => true}))
                )
+
+      assert byte_size(close_id) == 36
     end
 
     test "an order id that is not a non-empty string is unconfirmed, with the id that was sent" do

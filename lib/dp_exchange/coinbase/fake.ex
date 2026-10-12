@@ -571,7 +571,7 @@ defmodule DpExchange.Coinbase.Fake do
   defp canonical_symbol(symbol), do: SymbolFormat.to_canonical_symbol(symbol)
 
   defp after_start?(_at, nil), do: true
-  defp after_start?(at, %DateTime{} = start), do: DateTime.compare(at, start) == :gt
+  defp after_start?(at, %DateTime{} = start), do: DateTime.compare(at, start) != :lt
 
   # `Rest.validate_fill_filters/1` has already refused any bound that is not a `DateTime`, so
   # there is no "unreadable bound" to wave through here.
@@ -584,9 +584,10 @@ defmodule DpExchange.Coinbase.Fake do
   #
   # `opts[:channels]` mirrors `DpExchange.Coinbase.Feed`'s `:channels` (see its moduledoc's
   # "`:trades` is opt-in" section), per call here because this fake has no connection to
-  # configure. `:trades` in the list also pushes one `Types.Trade` per carried symbol. The
-  # default is `[:quotes]` — exactly what this fake pushed before `:trades` existed; it
-  # has never pushed a book, which `coverage_by_kind/1` says.
+  # configure. `:trades` in the list also pushes one `Types.Trade` per carried symbol, and
+  # `:order_book` one `Types.OrderBook` snapshot (never a delta). The default is `[:quotes]`
+  # — exactly what this fake pushed before either existed — and `coverage_by_kind/1` reports
+  # only the kinds a call actually pushed.
   @impl true
   def subscribe(symbols, opts \\ []) do
     symbols = canonical_case(symbols)
@@ -711,16 +712,13 @@ defmodule DpExchange.Coinbase.Fake do
   @doc """
   `coverage/1`, split by kind — see `DpExchange.Coinbase.coverage_by_kind/1`.
 
-  `subscribe/2` above only ever pushes a `DpExchange.Core.Types.Quote` (it never
-  synthesises a `DpExchange.Core.Types.OrderBook`), so every symbol this fake reports
-  arrives under `:quotes` and `:quotes` alone — anything else would claim delivery this
-  fake never actually sends, which is exactly the "differently capable" divergence this
-  module's own moduledoc forbids. Less capable than the real venue here is honest; a
-  fabricated `:order_book` entry would not be.
-
-  `:trades` appears only for symbols a `subscribe/2` call named it for, through
-  `opts[:channels]`, and is absent otherwise — the same "only what arrived" rule the real
-  `Feed` follows.
+  `subscribe/2` pushes a `DpExchange.Core.Types.Quote` for every carried symbol, and
+  additionally one `DpExchange.Core.Types.Trade` and/or one `DpExchange.Core.Types.OrderBook`
+  snapshot when `opts[:channels]` names `:trades` and/or `:order_book` (the default is
+  `[:quotes]`). It never pushes an `OrderBookDelta`. A kind appears here only for the symbols
+  a `subscribe/2` call actually pushed it for, and a kind with no symbols is omitted — the
+  same "only what arrived" rule the real `Feed` follows. Claiming a kind this fake never
+  sent would be the "differently capable" divergence this module's own moduledoc forbids.
   """
   @impl true
   @spec coverage_by_kind(keyword()) :: %{Capabilities.data_kind() => %{String.t() => atom()}}
@@ -828,16 +826,18 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
-  # --- Declared but not yet implemented -----------------------------------
+  # --- The wider surface: futures, staking, conversion, portfolios, and the unsupported ----
   #
-  # Core 0.1.16 widened the facade to the surface the venues actually publish. These answer
-  # `{:error, :not_supported}` and are declared `:unsupported` in `capabilities/0`, so a
-  # consumer routing on the declaration is told the truth.
+  # Core 0.1.16 widened the facade to the surface the venues actually publish. The callbacks
+  # below that `DpExchange.Coinbase` declares `:unsupported` answer `{:error, :not_supported}`
+  # here as there, so a consumer routing on the declaration is told the truth; the rest are
+  # modelled in memory.
   #
-  # **`:unsupported` here is a statement about this package, not about the venue.** That
+  # **`:unsupported` can mean the venue's absence or this package's backlog.** That
   # distinction is the one Phase 1 had to correct after a package spent a year asserting a
-  # venue had no streaming API when it had fifteen services. Where the venue genuinely does
-  # not offer something, the comment beside it says so.
+  # venue had no streaming API when it had fifteen services. `DpExchange.Coinbase`'s
+  # `venue_does_not_serve/0` is the first kind. Where the venue genuinely does not offer
+  # something, the comment beside it says so.
 
   @impl true
   def get_positions(opts \\ []) do

@@ -49,9 +49,10 @@ defmodule DpExchange.Coinbase.Prime do
   `/portfolios//staking/initiate` and `"x/../y"` named a different path from the one the
   function promises.
 
-  An `opts[:idempotency_key]` that is given must be a non-empty string
-  (`{:error, {:invalid_idempotency_key, value}}`): the venue returns the first response for a
-  repeated key, so `""` made every later stake a copy of the first. And `opts[:extra]` fills in
+  An `opts[:idempotency_key]` that is given must be a UUID in the canonical 8-4-4-4-12 hex
+  form, as the spec requires (`{:error, {:invalid_idempotency_key, value}}`): the venue
+  returns the first response for a repeated key, so `""` made every later stake a copy of
+  the first. And `opts[:extra]` fills in
   fields this module does not know; it cannot replace `amount`, `currency_symbol`,
   `idempotency_key` or `transaction_ids`, which are the ones it validated.
 
@@ -525,7 +526,7 @@ defmodule DpExchange.Coinbase.Prime do
 
   defp valid_id(id, error), do: {:error, {error, id}}
 
-  # **A caller-supplied idempotency key must be a non-empty string.** `"" || generate()` is
+  # **A caller-supplied idempotency key must be a UUID (and so non-empty).** `"" || generate()` is
   # `""`, so `idempotency_key: ""` was sent, and the venue treats "the same key" as "the same
   # request" and returns the first response (`prime-spec.yaml`: "Subsequent requests using the
   # same key will not create new transactions"). Two different stakes sent with `""` were one

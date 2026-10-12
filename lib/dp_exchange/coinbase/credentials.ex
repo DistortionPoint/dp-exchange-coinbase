@@ -38,11 +38,12 @@ defmodule DpExchange.Coinbase.Credentials do
 
   ## Why `nil` stays `nil`
 
-  `Feed.init/1`'s `active_channels/1` and `Socket`'s `subscription_message/3` both branch
-  on "no credentials were supplied" by matching literal `nil` — Coinbase's credential-less
-  callers pass no `:credentials` option at all, and `Keyword.get/2` answers `nil` rather
-  than `%{}`. `wrap/1` preserves that: only a map gets struct-ified, so the "authenticated
-  channels are unreachable" branch still fires exactly when it always did.
+  `Socket`'s `subscription_message/3` (which sends `level2` with a JWT only when there is a
+  credential, and refuses `user` without one) and the supervisor's choice between the two
+  rate ceilings both branch on "no credentials were supplied" by matching literal `nil` —
+  Coinbase's credential-less callers pass no `:credentials` option at all, and
+  `Keyword.get/2` answers `nil` rather than `%{}`. `wrap/1` preserves that: only a map gets
+  struct-ified, so the no-credentials branches still fire exactly when they always did.
 
   ## The wrap lives in `child_spec/1`, so bypassing it bypasses the redaction
 

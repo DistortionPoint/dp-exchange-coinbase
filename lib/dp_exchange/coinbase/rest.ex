@@ -363,7 +363,7 @@ defmodule DpExchange.Coinbase.Rest do
 
         # `has_next: true` with no usable cursor is "there is more" with no way to ask for
         # it. Stopping returned the first page as the whole catalogue, every row real and the
-        # rest silently missing — the shape `next_cursor/1` refuses for `/accounts`.
+        # rest silently missing — the shape `next_cursor/2` refuses for `/accounts`.
         cond do
           not is_map(pagination) or pagination["has_next"] != true ->
             {:ok, collected |> Enum.reverse() |> Enum.concat()}
@@ -464,8 +464,11 @@ defmodule DpExchange.Coinbase.Rest do
   This endpoint pages at 49 by default and 250 at most, and a caller reading one page has
   *some* of its balances with nothing to say which are missing. A truncated balance list is
   the worst shape this family has: every number in it is real. So this follows `cursor`
-  until `has_next` is false, bounded by `@max_pages` — a server that always says `has_next`
-  would otherwise loop forever inside a facade call.
+  until `has_next` is false, bounded by `@max_account_pages` (50) — a server that always
+  says `has_next` would otherwise loop forever inside a facade call, and answers
+  `{:error, :history_truncated}` instead; a page that offers back the cursor it was fetched
+  with is `{:error, :pagination_cursor_repeated}`, and `has_next` with no cursor is
+  `{:error, :pagination_cursor_missing}`.
 
   `:timestamp` is when the request was made. A balance has no venue event time; see
   `Core.Types.Balance`.
@@ -1350,10 +1353,10 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  # "UNKNOWN" is the venue's own value and maps to nil rather than to a side. A position
-  # filed the wrong way round is the most expensive mistake available in this mapping.
-  # Refuses a position row this package cannot read, rather than reporting one that says
-  # nothing about what is held.
+  # "UNKNOWN" is the venue's own value and is refused rather than mapped to a side (see
+  # `position_side/1`). A position filed the wrong way round is the most expensive mistake
+  # available in this mapping. Refuses a position row this package cannot read, rather than
+  # reporting one that says nothing about what is held.
   #
   # `Core.Types.Position` enforces `:symbol`, `:side` and `:quantity`, and its `new/1` refuses
   # a `nil` in any of them. Nothing here called `new/1` — the struct is built literally, as
@@ -2212,8 +2215,10 @@ defmodule DpExchange.Coinbase.Rest do
 
   @doc """
   The local checks `get_historical_prices/4` runs before any request: a timeframe Coinbase
-  serves, a `:limit` of 1..#{@max_candles} and a boolean `:include_partial`
-  (`{:invalid_option, key, value}`), and a window of at most `max_candles/0` candles.
+  serves (`{:unsupported_timeframe, tf}`), a `:limit` of 1..#{@max_candles} and a boolean
+  `:include_partial` (`{:invalid_option, key, value}`), and a `range` that is a keyword list
+  of `DateTime` bounds forming a non-empty window (`{:invalid_range, _}`) of at most
+  `max_candles/0` candles (`{:range_too_wide, requested: n, max: m}`).
   """
   @spec validate_candle_request(String.t(), keyword(), keyword()) :: :ok | {:error, term()}
   def validate_candle_request(timeframe, range, opts) do
@@ -2924,8 +2929,8 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, %{body: %{"pricebooks" => [_first | _rest] = pricebooks}}} ->
             select_pricebook(native, pricebooks, observed_at)
 
-          # NOT a refusal — see the moduledoc's "An empty `pricebooks` array is silence, not
-          # a statement". This batch endpoint answers "nothing for this one" by omitting the
+          # NOT a refusal — see this function's doc, "An empty `pricebooks` array is silence,
+          # not a statement". This batch endpoint answers "nothing for this one" by omitting the
           # product from the array rather than failing the request, which is silence a retry
           # can resolve, not the venue naming the product unlisted. A genuine venue statement
           # (this venue's own convention, measured on the sibling `/product_book` endpoint,
@@ -3023,7 +3028,8 @@ defmodule DpExchange.Coinbase.Rest do
   arrived in, and after sorting both bests sit at the head where it is easier to see, not
   harder. What row order hid was the ordering a caller is entitled to rely on.
 
-  `timestamp` is the pricebook's own `time`. **A book the venue did not stamp is refused**:
+  `venue_time` is the pricebook's own `time` (`observed_at` is when this package read it).
+  **A book the venue did not stamp is refused**:
   a depth snapshot with the local clock on it cannot be told apart from a current one, and
   a stale book read as current is the most expensive kind of wrong number here.
   """
@@ -3460,9 +3466,11 @@ defmodule DpExchange.Coinbase.Rest do
   sent, **including one generated here**, so the caller can look the order up with
   `get_orders/2` before trying again. Errors decided before anything is sent (validation,
   credentials, our own rate limiter refusing, a signing failure) are plain `{:error, reason}`.
-  A 400/401/403/404 to the FIRST attempt is the venue answering without placing:
-  `{:refused, _}`; the same status answered to an internal retry (after a 5xx or a timeout
-  left an earlier attempt possibly placed) is `{:order_unconfirmed, ...}`. Our own rate
+  Any 4xx to the FIRST attempt except 429 (DV6; 404 is `{:refused, :not_found}`, the rest
+  `{:refused, {:venue_error, status, message}}`) is the venue answering without placing:
+  `{:refused, _}`. A 429 to the first attempt is throttling and a plain `{:error, _}`. The
+  same status answered to an internal retry (after a 5xx or a timeout left an earlier attempt
+  possibly placed) is `{:order_unconfirmed, ...}`. Our own rate
   limiter refusing is plain only when no attempt had been sent: the signer is counted per
   attempt, so a refusal of an internal retry after an earlier attempt left the process (say
   a 5xx) is `{:order_unconfirmed, ...}`.
@@ -4471,7 +4479,7 @@ defmodule DpExchange.Coinbase.Rest do
         # Same envelope and same reading as `all_accounts/5`: the venue's own `has_next`,
         # and a cursor that is actually a cursor. A venue that sends neither stops here,
         # which is what every response looked like before this walked at all. `has_next`
-        # without a cursor is an error (see `next_cursor/1`), and so is an empty page that
+        # without a cursor is an error (see `next_cursor/2`), and so is an empty page that
         # says `proof_token_required`: the history is withheld, not empty.
         with {:ok, step} <- order_step(body, orders, cursor) do
           case step do
@@ -4834,37 +4842,23 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   # `success: true` means the venue placed an order, so an unreadable `success_response`
-  # must not become an error: a caller reading `{:error, _}` would believe nothing was placed
-  # and act on that, with a live order at the venue. It used to raise instead, which told the
-  # caller the same wrong thing. The id is `nil` — exactly what an omitted `order_id` already
-  # produced — so the order is reported as accepted and unidentified, which is what is known.
+  # must not become a plain error: a caller reading `{:error, _}` would believe nothing was
+  # placed and act on that, with a live order at the venue. It used to raise instead, which
+  # told the caller the same wrong thing. It was then reported as `{:ok, %Order{id: nil}}`,
+  # which `Core.Types.Order` does not allow (it requires an id): since DV5 a close, like a
+  # placement, whose `success_response` names no readable `order_id` is
+  # `{:order_unconfirmed, client_order_id, {:missing_required_field, :order_id}}` — the order
+  # MAY be live, and the id sent is what to look it up with.
   defp success_order_id(%{"order_id" => id}) when is_binary(id) and id != "", do: id
   defp success_order_id(_unreadable), do: nil
 
   # A missing `success_response` is read the same way as an unreadable one: `success` is the
   # only field the spec requires of `ClosePositionResponse`'s envelope.
-  defp to_closing_order(%{"success" => true} = response, symbol, _client_order_id) do
-    success = Map.get(response, "success_response")
-
-    # The venue echoes the order it placed in `order_configuration`, which is the only
-    # statement of what this order *is* — the caller never said. Read from there rather
-    # than assumed, and `nil` for anything it does not name.
-    {type, tif, quantity} = closing_configuration(response["order_configuration"])
-
-    {:ok,
-     %Types.Order{
-       id: success_order_id(success),
-       symbol: symbol,
-       # **Not inferred.** A closing order's side is the opposite of the position's, and
-       # this package never read the position — the venue did. Filling in `:sell` because
-       # closing is usually selling is the substitution this family refuses.
-       side: nil,
-       order_type: type,
-       time_in_force: tif,
-       quantity: quantity,
-       status: :pending,
-       provider: :coinbase
-     }}
+  defp to_closing_order(%{"success" => true} = response, symbol, client_order_id) do
+    case response |> Map.get("success_response") |> success_order_id() do
+      nil -> unconfirmed(client_order_id, {:missing_required_field, :order_id})
+      id -> {:ok, closing_order(id, symbol, response)}
+    end
   end
 
   defp to_closing_order(%{"success" => false} = response, _symbol, client_order_id) do
@@ -4877,6 +4871,27 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp to_closing_order(_other, _symbol, client_order_id),
     do: unconfirmed(client_order_id, :unexpected_response_shape)
+
+  defp closing_order(id, symbol, response) do
+    # The venue echoes the order it placed in `order_configuration`, which is the only
+    # statement of what this order *is* — the caller never said. Read from there rather
+    # than assumed, and `nil` for anything it does not name.
+    {type, tif, quantity} = closing_configuration(response["order_configuration"])
+
+    %Types.Order{
+      id: id,
+      symbol: symbol,
+      # **Not inferred.** A closing order's side is the opposite of the position's, and
+      # this package never read the position — the venue did. Filling in `:sell` because
+      # closing is usually selling is the substitution this family refuses.
+      side: nil,
+      order_type: type,
+      time_in_force: tif,
+      quantity: quantity,
+      status: :pending,
+      provider: :coinbase
+    }
+  end
 
   # `@configurations` read backwards. The venue's single key names the type and the
   # time-in-force at once, so one lookup answers both — and a key this package does not know

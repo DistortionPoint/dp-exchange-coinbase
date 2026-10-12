@@ -196,7 +196,7 @@ defmodule DpExchange.Coinbase.ResponseShapeTest do
     test "an accepted order with an unreadable success_response is unconfirmed, not an error" do
       # `success: true` means an order MAY be live at the venue. A placement answers
       # `{:order_unconfirmed, cid, reason}` (DV5): never a plain error that reads as "nothing
-      # was placed", and never an `Order` without an id. A closing order keeps `id: nil`.
+      # was placed", and never an `Order` without an id. A closing order is the same.
       body = %{"success" => true, "success_response" => true}
 
       request = %{
@@ -212,8 +212,10 @@ defmodule DpExchange.Coinbase.ResponseShapeTest do
       assert {:error, {:order_unconfirmed, "mine-1", {:missing_required_field, :order_id}}} =
                Rest.place_order(@credentials, request, opts(body))
 
-      assert {:ok, %{id: nil, status: :pending}} =
+      assert {:error, {:order_unconfirmed, close_id, {:missing_required_field, :order_id}}} =
                Rest.close_position(@credentials, "BTC-USD", opts(body))
+
+      assert byte_size(close_id) == 36
     end
 
     test "a cancel result row that is not an object is not about the order" do
