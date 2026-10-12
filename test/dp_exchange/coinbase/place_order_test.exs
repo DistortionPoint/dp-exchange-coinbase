@@ -210,14 +210,93 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                place(limit_request(%{stop_price: Decimal.new("39000")}), never_sent())
     end
 
-    test "a quote size on a limit order" do
-      assert {:error, {:unexpected_field, :quote_size}} =
-               place(limit_request(%{quote_size: "10"}), never_sent())
+    test "a quote size on a stop-limit order (its leaf carries base_size only)" do
+      request =
+        limit_request(%{
+          order_type: :stop_limit,
+          stop_price: Decimal.new("39000"),
+          quote_size: "10"
+        })
+
+      assert {:error, {:unexpected_field, :quote_size}} = place(request, never_sent())
     end
 
-    test "post_only on a market order" do
+    test "post_only: true on a market order" do
       assert {:error, {:unexpected_field, :post_only}} =
                place(market_request(%{post_only: true}), never_sent())
+    end
+
+    test "post_only: false means absent where the leaf has no such field" do
+      me = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(accepted()))
+      end
+
+      for request <- [
+            market_request(%{post_only: false}),
+            limit_request(%{time_in_force: :fok, post_only: false}),
+            limit_request(%{
+              order_type: :stop_limit,
+              stop_price: Decimal.new("39000"),
+              post_only: false
+            })
+          ] do
+        assert {:ok, _order} = place(request, plug)
+        assert_receive {:sent, %{"order_configuration" => config}}, 5_000
+        [leaf] = Map.values(config)
+        refute Map.has_key?(leaf, "post_only")
+      end
+    end
+
+    test "post_only: true is still refused on limit FOK and stop-limit leaves" do
+      assert {:error, {:unexpected_field, :post_only}} =
+               place(limit_request(%{time_in_force: :fok, post_only: true}), never_sent())
+    end
+
+    test "a limit order is sized by quote_size under the leaf's quote_size key" do
+      me = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(accepted()))
+      end
+
+      for tif <- [:gtc, :fok] do
+        request =
+          limit_request(%{time_in_force: tif, quote_size: "10"}) |> Map.delete(:quantity)
+
+        assert {:ok, order} = place(request, plug)
+        assert order.quantity == nil
+        assert_receive {:sent, %{"order_configuration" => config}}, 5_000
+        [leaf] = Map.values(config)
+        assert leaf["quote_size"] == "10"
+        assert leaf["limit_price"] == "40000"
+        refute Map.has_key?(leaf, "base_size")
+      end
+    end
+
+    test "a limit order with both sizes or neither is refused before sending" do
+      assert {:error, :ambiguous_order_size} =
+               place(limit_request(%{quote_size: "10"}), never_sent())
+
+      assert {:error, {:missing_field, :quantity}} =
+               place(Map.delete(limit_request(), :quantity), never_sent())
+
+      assert {:error, {:invalid_quote_size, 10.0}} =
+               place(
+                 limit_request(%{quote_size: 10.0}) |> Map.delete(:quantity),
+                 never_sent()
+               )
     end
 
     test "the same checks run in preview_order/3" do
@@ -1164,6 +1243,29 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
 
       assert {:refused, {:venue_error, 400, "bad size"}} =
                place(limit_request(), responding(%{"message" => "bad size"}, 400))
+    end
+
+    test "a 4xx answered to an internal retry is unconfirmed, not a refusal" do
+      counter = :counters.new(1, [])
+
+      plug = fn conn ->
+        :counters.add(counter, 1, 1)
+
+        status = if :counters.get(counter, 1) == 1, do: 503, else: 400
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(status, Jason.encode!(%{"message" => "x"}))
+      end
+
+      assert {:error, {:order_unconfirmed, "retry-4xx", _reason}} =
+               Rest.place_order(@credentials, limit_request(%{client_order_id: "retry-4xx"}),
+                 plug: plug,
+                 retry_attempts: 3,
+                 retry_delay: 1
+               )
+
+      assert :counters.get(counter, 1) == 2
     end
 
     test "our own rate limiter refusing is decided before sending: a plain error" do

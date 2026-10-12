@@ -1314,21 +1314,30 @@ defmodule DpExchange.Coinbase.Rest do
   #   * `side` — the venue's own `UNKNOWN` (or anything else but `LONG` / `SHORT`) is
   #     `{:unknown_position_side, value}`, never a guess: a position filed the wrong way round
   #     is the most expensive mistake in this mapping.
-  #   * `quantity` — absent, unreadable, zero or negative `number_of_contracts` is
+  #   * `quantity` — absent, unreadable or negative `number_of_contracts` is
   #     `{:invalid_position_quantity, value}`. A venue sending a signed size would be a new
-  #     sign convention and is refused until measured, not normalised by guess.
+  #     sign convention and is refused until measured, not normalised by guess. Exactly zero
+  #     is a flat or closed position and the row is skipped.
   #   * `symbol` — a position naming no instrument cannot be sized, closed or reconciled.
   defp to_position(%{} = row) do
     with {:ok, symbol} <- required_position_field(row["product_id"], :symbol),
          {:ok, side} <- position_side(row["side"]),
          {:ok, quantity} <- position_quantity(row["number_of_contracts"]) do
-      {:ok, position_struct(row, symbol, side, quantity)}
+      flat_or_position(row, symbol, side, quantity)
     end
   end
 
   # A row that is not an object at all used to raise out of `row["product_id"]`. It is the
   # same unreadable row as one with no product, and refuses the reply the same way.
   defp to_position(_not_a_row), do: {:error, :unexpected_response_shape}
+
+  # Exactly zero contracts is a flat or closed position: skipped, as the family skips flat
+  # rows. Unlike an unreadable row it makes no claim about what is held, so omitting it
+  # cannot read as "you hold none" wrongly. A negative or unreadable count still refuses.
+  defp flat_or_position(_row, _symbol, _side, :flat), do: {:ok, :flat}
+
+  defp flat_or_position(row, symbol, side, quantity),
+    do: {:ok, position_struct(row, symbol, side, quantity)}
 
   # One unreadable row refuses the whole reply rather than leaving a gap in it. A position
   # list with an entry silently missing reads as "you hold none of that instrument", which is
@@ -1337,6 +1346,7 @@ defmodule DpExchange.Coinbase.Rest do
     rows
     |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
       case to_position(row) do
+        {:ok, :flat} -> {:cont, {:ok, acc}}
         {:ok, position} -> {:cont, {:ok, [position | acc]}}
         error -> {:halt, error}
       end
@@ -1379,13 +1389,21 @@ defmodule DpExchange.Coinbase.Rest do
   defp position_quantity(raw) do
     case amount_value(raw) do
       %Decimal{} = quantity ->
-        if usable_positive?(quantity),
-          do: {:ok, quantity},
-          else: {:error, {:invalid_position_quantity, raw}}
+        cond do
+          flat?(quantity) -> {:ok, :flat}
+          usable_positive?(quantity) -> {:ok, quantity}
+          true -> {:error, {:invalid_position_quantity, raw}}
+        end
 
       nil ->
         {:error, {:invalid_position_quantity, raw}}
     end
+  end
+
+  # Exactly zero contracts: a flat or closed position, not an unreadable one.
+  defp flat?(%Decimal{} = quantity) do
+    not Decimal.nan?(quantity) and not Decimal.inf?(quantity) and
+      Decimal.compare(quantity, Decimal.new(0)) == :eq
   end
 
   defp amount_value(nil), do: nil
@@ -3240,7 +3258,9 @@ defmodule DpExchange.Coinbase.Rest do
   sent, **including one generated here**, so the caller can look the order up with
   `get_orders/2` before trying again. Errors decided before anything is sent (validation,
   credentials, our own rate limiter refusing, a signing failure) are plain `{:error, reason}`.
-  A 400/401/403/404 is the venue answering without placing: `{:refused, _}`. Our own rate
+  A 400/401/403/404 to the FIRST attempt is the venue answering without placing:
+  `{:refused, _}`; the same status answered to an internal retry (after a 5xx or a timeout
+  left an earlier attempt possibly placed) is `{:order_unconfirmed, ...}`. Our own rate
   limiter refusing is plain only when no attempt had been sent: the signer is counted per
   attempt, so a refusal of an internal retry after an earlier attempt left the process (say
   a 5xx) is `{:order_unconfirmed, ...}`.
@@ -3250,14 +3270,23 @@ defmodule DpExchange.Coinbase.Rest do
   `:order_type` and `:time_in_force` are required (`{:error, {:missing_field, key}}`); there
   is no default. An unknown type is `{:error, {:unsupported_order_type, type}}`. A field the
   chosen leaf cannot carry is `{:error, {:unexpected_field, key}}`, never dropped: `:price`
-  or `:stop_price` on a market order, `:stop_price` or `:quote_size` on a limit order,
-  `:post_only`, `:end_time` and `:stop_direction` where the leaf has no such field. A GTD
-  order needs `:end_time` (`{:error, {:missing_field, :end_time}}`).
+  or `:stop_price` on a market order, `:stop_price` on a limit order, `:quote_size` on a
+  stop-limit order, `:post_only: true`, `:end_time` and `:stop_direction` where the leaf has
+  no such field. `post_only: false` is the venue's default, so on a leaf without the field it
+  means "absent" and is accepted and not sent. A GTD order needs `:end_time`
+  (`{:error, {:missing_field, :end_time}}`).
+
+  A market or limit order is sized by exactly one of `:quantity` (`base_size`) or
+  `:quote_size`; both is `{:error, :ambiguous_order_size}`, neither is
+  `{:error, :missing_order_size}` (market) or `{:error, {:missing_field, :quantity}}` (limit).
+  A quote-sized order's `Order.quantity` is `nil`. A stop-limit order needs `:quantity`.
 
   Checks run in this order, each before anything is sent: request is a map
   (`{:invalid_order_request, request}`), unknown keys (`{:unsupported_order_field, key}`),
-  symbol, side, type, time-in-force and the pair, quantity, price fields, `client_order_id`,
-  the remaining optional fields, credentials.
+  symbol, side, type, time-in-force and the pair, sizing (`quantity` / `quote_size`), fields
+  the leaf does not carry, price fields, the leaf's required fields (`price`, `stop_price`,
+  `end_time`), `end_time` and `post_only` values, `client_order_id`, the margin and routing
+  fields, credentials.
 
   ## Amounts
 
@@ -3486,9 +3515,9 @@ defmodule DpExchange.Coinbase.Rest do
   @leaf_fields %{
     {:market, :ioc} => [:quote_size],
     {:market, :fok} => [:quote_size],
-    {:limit, :gtc} => [:price, :post_only],
-    {:limit, :gtd} => [:price, :post_only, :end_time],
-    {:limit, :fok} => [:price],
+    {:limit, :gtc} => [:price, :quote_size, :post_only],
+    {:limit, :gtd} => [:price, :quote_size, :post_only, :end_time],
+    {:limit, :fok} => [:price, :quote_size],
     {:stop_limit, :gtc} => [:price, :stop_price, :stop_direction],
     {:stop_limit, :gtd} => [:price, :stop_price, :stop_direction, :end_time]
   }
@@ -3500,6 +3529,7 @@ defmodule DpExchange.Coinbase.Rest do
     allowed = Map.fetch!(@leaf_fields, {type, tif})
 
     with {:ok, sized} <- order_sizing(type, request),
+         sized = drop_inert_post_only(sized, allowed),
          :ok <- unexpected_fields(sized, allowed),
          {:ok, priced} <- normalise_amounts([:price, :stop_price], sized),
          :ok <- required_leaf_field(priced, allowed, :price),
@@ -3511,12 +3541,21 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  # A market order sizes in base (`quantity`) or quote (`quote_size`), exactly one; any other
-  # type needs a base `quantity`.
-  defp order_sizing(:market, request) do
+  # `post_only: false` is the venue's default, so on a leaf with no such field it means
+  # "absent" and sends nothing; `true` (or anything else) there stays `{:unexpected_field, _}`.
+  defp drop_inert_post_only(request, allowed) do
+    if :post_only not in allowed and Map.get(request, :post_only) == false,
+      do: Map.delete(request, :post_only),
+      else: request
+  end
+
+  # A market or limit order sizes in base (`quantity`) or quote (`quote_size`), exactly one
+  # (all five leaves of those two types carry both fields in the spec); a stop-limit leaf
+  # carries `base_size` only and needs a base `quantity`.
+  defp order_sizing(type, request) when type in [:market, :limit] do
     with {:ok, request} <- normalise_amounts([:quantity, :quote_size], request) do
       case {Map.get(request, :quantity), Map.get(request, :quote_size)} do
-        {nil, nil} -> {:error, :missing_order_size}
+        {nil, nil} -> {:error, missing_size_error(type)}
         {_quantity, nil} -> {:ok, request}
         {nil, _quote_size} -> {:ok, request}
         {_quantity, _quote_size} -> {:error, :ambiguous_order_size}
@@ -3529,6 +3568,9 @@ defmodule DpExchange.Coinbase.Rest do
       normalise_amounts([:quantity], request)
     end
   end
+
+  defp missing_size_error(:market), do: :missing_order_size
+  defp missing_size_error(:limit), do: {:missing_field, :quantity}
 
   defp unexpected_fields(request, allowed) do
     case Enum.find(@optional_fields, &(&1 not in allowed and Map.get(request, &1) != nil)) do
@@ -3620,27 +3662,29 @@ defmodule DpExchange.Coinbase.Rest do
   # Both sizes on a market order is two different orders: `quantity` silently won once, so
   # "spend $100" with a `quantity: 5` beside it bought five units at whatever they cost.
   # Refused in `order_sizing/2`, not chosen.
-  defp configuration_leaf(:market, request) do
-    case {Map.get(request, :quantity), Map.get(request, :quote_size)} do
-      {nil, quote_size} -> {:ok, %{"quote_size" => wire_number(quote_size)}}
-      {quantity, _none} -> {:ok, %{"base_size" => wire_number(quantity)}}
-    end
-  end
+  defp configuration_leaf(:market, request), do: {:ok, size_entry(request)}
 
   defp configuration_leaf(_type, request) do
     with {:ok, post_only} <- post_only(request),
          {:ok, direction} <- stop_direction(Map.get(request, :stop_direction)) do
       leaf =
-        %{
-          "base_size" => wire_number(Map.fetch!(request, :quantity)),
-          "limit_price" => wire_number(Map.fetch!(request, :price))
-        }
+        request
+        |> size_entry()
+        |> Map.put("limit_price", wire_number(Map.fetch!(request, :price)))
         |> put_unless_nil("stop_price", Map.get(request, :stop_price))
         |> put_unless_nil("post_only", post_only)
         |> put_unless_nil("stop_direction", direction)
         |> put_end_time(Map.get(request, :end_time))
 
       {:ok, leaf}
+    end
+  end
+
+  # `base_size` or `quote_size`, whichever `order_sizing/2` left (never both).
+  defp size_entry(request) do
+    case {Map.get(request, :quantity), Map.get(request, :quote_size)} do
+      {nil, quote_size} -> %{"quote_size" => wire_number(quote_size)}
+      {quantity, _none} -> %{"base_size" => wire_number(quantity)}
     end
   end
 
@@ -3847,14 +3891,27 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp tagged_write_error(reason, key, counted, build) do
     case classify(reason) do
-      {:refused, _reason} = refused ->
-        refused
+      # A 4xx answered to an internal RETRY (family convention W2): an earlier attempt of this
+      # same call already left the process (a 5xx or a timeout), and the venue objecting to
+      # the repeat does not say that attempt placed nothing. Only a first attempt's 4xx is a
+      # refusal.
+      {:refused, refusal} = refused ->
+        if attempts_made(counted) > 1, do: build.(key, refusal), else: refused
 
       {:error, inner} ->
         if pre_send_failure?(reason) and sent_attempts(counted) == 0,
           do: {:error, inner},
           else: build.(key, inner)
     end
+  end
+
+  # How many attempts of this call were signed and sent when a response (even a 4xx) came
+  # back: every signature of an attempt that got an answer was sent. `nil` is a write sent once.
+  defp attempts_made(nil), do: 1
+
+  defp attempts_made({calls, opts}) do
+    signed = :atomics.get(calls, 1)
+    if Config.opt(opts, :rate_limit_blocking, false), do: div(signed, 2), else: signed
   end
 
   # `Core.HttpClient` signs once per attempt, just before the limiter is asked (twice per
@@ -3955,14 +4012,14 @@ defmodule DpExchange.Coinbase.Rest do
   # package can supply. `place_order/3` and `close_position/3` carry `client_order_id` and
   # keep their retries.
   #
-  # `put_new`, as `Prime.claim_rewards/4` does: a caller who knows how to make the request
-  # safe to repeat can still raise `:retry_attempts` deliberately.
+  # `Keyword.put`, not `put_new`: "sent once" is a guarantee, so a caller's `retry_attempts: 3`
+  # cannot turn a transfer or a cancel into three sends.
   defp post_once(path, body, credentials, opts),
     do: post_json(path, body, credentials, once(opts))
 
   # The same one attempt for a `DELETE`, whose repeat after a lost answer is a 404 for a
   # deletion that happened.
-  defp once(opts), do: Keyword.put_new(opts, :retry_attempts, 1)
+  defp once(opts), do: Keyword.put(opts, :retry_attempts, 1)
 
   # **Every caller of this function is a write, and there is no public path for one.** So
   # unlike `request/5` there is no anonymous branch here: credentials that cannot sign

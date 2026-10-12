@@ -137,6 +137,24 @@ defmodule DpExchange.Coinbase.FakeTest do
                Fake.place_order(@credentials, Map.merge(market, %{quantity: "1", price: "1"}))
     end
 
+    test "a quote-sized limit order and post_only: false behave as on the real path" do
+      quote_sized = limit_order(%{quote_size: "10"}) |> Map.delete(:quantity)
+
+      assert {:ok, order} = Fake.place_order(@credentials, quote_sized)
+      assert order.quantity == nil
+
+      assert {:error, :ambiguous_order_size} =
+               Fake.place_order(@credentials, limit_order(%{quote_size: "10"}))
+
+      fok = %{time_in_force: :fok}
+
+      assert {:ok, _order} =
+               Fake.place_order(@credentials, limit_order(Map.put(fok, :post_only, false)))
+
+      assert {:error, {:unexpected_field, :post_only}} =
+               Fake.place_order(@credentials, limit_order(Map.put(fok, :post_only, true)))
+    end
+
     test "the placed order carries Decimals, as the real return does" do
       request = limit_order(%{quantity: "0.5", price: "40000.5"})
 

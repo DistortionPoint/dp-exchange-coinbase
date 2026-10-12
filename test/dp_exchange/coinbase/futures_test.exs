@@ -537,8 +537,47 @@ defmodule DpExchange.Coinbase.FuturesTest do
       assert Decimal.equal?(position.quantity, Decimal.new("3"))
     end
 
-    test "a missing, zero, negative or unreadable amount refuses the reply" do
-      for amount <- [:missing, "0", "-3", "abc", "NaN"] do
+    test "a row with exactly zero contracts is flat: skipped, the others are returned" do
+      body = %{
+        "positions" => [
+          position_row(%{"number_of_contracts" => "0"}),
+          position_row(%{"number_of_contracts" => "2"}),
+          position_row(%{"number_of_contracts" => "0.00"})
+        ]
+      }
+
+      assert {:ok, [position]} =
+               Rest.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
+
+      assert Decimal.equal?(position.quantity, Decimal.new("2"))
+
+      only_flat = %{"positions" => [position_row(%{"number_of_contracts" => "0"})]}
+
+      assert {:ok, []} =
+               Rest.get_positions(@credentials, plug: responding(only_flat), retry_attempts: 0)
+    end
+
+    test "a flat row does not excuse a bad row beside it, or a bad side on itself" do
+      bad_count = %{
+        "positions" => [
+          position_row(%{"number_of_contracts" => "0"}),
+          position_row(%{"number_of_contracts" => "-1"})
+        ]
+      }
+
+      assert {:error, {:invalid_position_quantity, "-1"}} =
+               Rest.get_positions(@credentials, plug: responding(bad_count), retry_attempts: 0)
+
+      bad_side = %{
+        "positions" => [position_row(%{"side" => "UNKNOWN", "number_of_contracts" => "0"})]
+      }
+
+      assert {:error, {:unknown_position_side, "UNKNOWN"}} =
+               Rest.get_positions(@credentials, plug: responding(bad_side), retry_attempts: 0)
+    end
+
+    test "a missing, negative or unreadable amount refuses the reply" do
+      for amount <- [:missing, "-3", "abc", "NaN"] do
         row =
           if amount == :missing,
             do: Map.delete(position_row(), "number_of_contracts"),

@@ -773,7 +773,8 @@ against the total is sizing against money that is not there.**
 **BREAKING: `get_positions/1` refuses a row it cannot read as a whole `Types.Position`.** A
 row whose `side` is not `LONG` or `SHORT` (the venue's `UNKNOWN` included) is
 `{:error, {:unknown_position_side, value}}`, and one whose `number_of_contracts` is absent,
-unreadable, zero or negative is `{:error, {:invalid_position_quantity, value}}`. They used to
+unreadable or negative is `{:error, {:invalid_position_quantity, value}}`. A row with
+exactly zero contracts is a flat or closed position and is skipped. They used to
 come back as `side: nil` / `quantity: nil` positions, which `Core.Types.Position` does not
 allow (`:long | :short`, positive size). `list_futures_positions/1` still returns the venue's
 rows untouched. The futures endpoints take no portfolio, so `portfolio:` on
@@ -879,20 +880,25 @@ refused.** No default: a request with no `:order_type` is `{:error, {:missing_fi
 `{:error, {:missing_field, :time_in_force}}` (it used to be GTC, and a market order with no
 tif was refused for a tif never named). An unknown type is `{:unsupported_order_type, type}`;
 a pair the venue has no key for is `{:unsupported_order_combination, type, tif}`. `:price`
-or `:stop_price` on a market order, `:stop_price` or `:quote_size` on a limit order, and
-`:post_only` / `:end_time` / `:stop_direction` where the leaf has no such field are
+or `:stop_price` on a market order, `:stop_price` on a limit order, `:quote_size` on a
+stop-limit order, and `:post_only: true` / `:end_time` / `:stop_direction` where the leaf has
+no such field are
 `{:error, {:unexpected_field, key}}` (they were silently dropped, or for `post_only` and
 `end_time` refused as `{:unsupported_order_field, key, {type, tif}}`). A GTD order needs
 `:end_time` (`{:missing_field, :end_time}`). A missing limit price is `{:missing_field,
 :price}` and a missing stop price `{:missing_field, :stop_price}` (were `:missing_limit_price`
-and `:missing_stop_price`). `post_only` is sent on the limit GTC and GTD leaves.
+and `:missing_stop_price`). `post_only` is sent on the limit GTC and GTD leaves;
+`post_only: false` elsewhere means absent and is accepted. Market and limit orders are sized
+by exactly one of `:quantity` or `:quote_size` (both: `:ambiguous_order_size`); a
+quote-sized order's `Order.quantity` is `nil`.
 
 **Amounts are refused unless finite and positive, and a float is refused.** `{:error,
 {:invalid_quantity | :invalid_quote_size | :invalid_price | :invalid_stop_price, value}}`
 (was `{:invalid_order_amount, field, value}`); a close's `:size` is `{:invalid_quantity, v}`.
 Pass a `Decimal`, an integer or a numeric string. The checks run in a fixed order: request is
-a map, unknown keys, symbol, side, type, time-in-force and the pair, quantity, price fields,
-`client_order_id` (non-blank), then credentials, then the wire.
+a map, unknown keys, symbol, side, type, time-in-force and the pair, sizing, fields the leaf
+does not carry, price fields, the leaf's required fields, `end_time` / `post_only` values,
+`client_order_id` (non-blank), margin fields, then credentials, then the wire.
 
 **Order ids are checked first.** `get_order/3`, `cancel_order/3` and `replace_order/4` answer
 `{:error, {:invalid_order_id, value}}` for `nil`, a non-string or a blank/whitespace-only id

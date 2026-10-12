@@ -20,6 +20,33 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **Limit orders (GTC, GTD, FOK) accept `:quote_size`** as the market leaves do, since all
+  three spec leaves carry it: exactly one of `:quantity` / `:quote_size` (both is
+  `:ambiguous_order_size`, neither `{:missing_field, :quantity}`), sent as `quote_size`, and
+  the returned `Order.quantity` is `nil`. `:quote_size` on a stop-limit order stays
+  `{:unexpected_field, :quote_size}`. `place_order/3`, `preview_order/3` and the Fake.
+- **`post_only: false` on a leaf without that field means absent**: accepted and not sent.
+  `post_only: true` there stays `{:unexpected_field, :post_only}`.
+- **A futures position row with exactly zero `number_of_contracts` is skipped** (flat or
+  closed). A negative or unreadable count and a side other than LONG/SHORT still refuse the
+  whole reply. Was `{:invalid_position_quantity, "0"}`.
+- **Writes sent once force `retry_attempts: 1`** (`Keyword.put`, was `put_new`): a caller's
+  `retry_attempts: 3` no longer turns a transfer, sweep, commit, portfolio create/delete,
+  order cancel or edit into several sends.
+- The `place_order/3` `@doc` and usage-rules now list the checks in the order the code runs
+  them (sizing, unexpected fields, price fields, leaf requirements, `end_time` / `post_only`,
+  then `client_order_id`, margin fields, credentials).
+
+### Fixed
+
+- **A 4xx answered to an internal retry of `place_order/3` or `close_position/3` is
+  `{:error, {:order_unconfirmed, client_order_id, reason}}`, not `{:refused, _}`** (family
+  convention W2, which `Prime`'s staking writes already followed). The first attempt may have
+  been placed (it was a 5xx or a timeout), so "the venue refused" was false. A 4xx on the
+  first attempt stays a refusal; the signer count decides which attempt it was.
+
 ## [0.3.114] - 2026-10-12
 
 ### Fixed

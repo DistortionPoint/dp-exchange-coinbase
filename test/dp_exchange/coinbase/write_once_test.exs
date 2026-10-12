@@ -110,14 +110,23 @@ defmodule DpExchange.Coinbase.WriteOnceTest do
     assert [_one] = requests()
   end
 
-  test "a caller can still ask for retries explicitly" do
+  # "Sent once" is a guarantee, not a default: the caller's retry_attempts cannot undo it.
+  test "a caller's retry_attempts: 3 still sends a transfer exactly once" do
     Rest.transfer_internal(
       @credentials,
       "USD",
       Decimal.new("1"),
-      opts(from: "a", to: "b", retry_attempts: 2)
+      opts(from: "a", to: "b", retry_attempts: 3)
     )
 
-    assert [_first, _second] = requests()
+    assert [_one] = requests()
+  end
+
+  test "a caller's retry_attempts: 3 still sends a cancel and a delete exactly once" do
+    Rest.cancel_order(@credentials, "order-1", opts(retry_attempts: 3))
+    assert [_one] = requests()
+
+    Rest.delete_portfolio(@credentials, "pf-1", opts(retry_attempts: 3))
+    assert [_one] = requests()
   end
 end
