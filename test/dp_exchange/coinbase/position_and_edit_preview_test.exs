@@ -165,12 +165,14 @@ defmodule DpExchange.Coinbase.PositionAndEditPreviewTest do
                )
     end
 
-    test "an unreadable body is an error rather than a silent success" do
-      assert {:error, :unexpected_response_shape} =
+    test "an unreadable body is unconfirmed, carrying the client_order_id sent" do
+      assert {:error, {:order_unconfirmed, id, :unexpected_response_shape}} =
                Rest.close_position(@credentials, "BTC-USD",
                  plug: responding(%{}),
                  retry_attempts: 0
                )
+
+      assert byte_size(id) == 36
     end
 
     test "size partial-closes when given, and is absent otherwise" do

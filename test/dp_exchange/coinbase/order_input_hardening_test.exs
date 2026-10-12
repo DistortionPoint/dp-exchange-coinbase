@@ -127,20 +127,28 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
   end
 
   describe "place_order/3 amounts" do
-    test "a float is sent in plain notation, never scientific" do
+    test "a decimal string is sent in plain notation, never scientific" do
       me = self()
 
-      request = limit_request(%{quantity: 1.0e-8, price: 0.1})
+      request = limit_request(%{quantity: "0.00000001", price: "0.1"})
 
       assert {:ok, _order} =
                Rest.place_order(@credentials, request, opts(capturing(accepted(), me)))
 
       assert_receive {:sent, _path, raw}
       leaf = Jason.decode!(raw)["order_configuration"]["limit_limit_gtc"]
-      # Numerically 1.0e-8; the digits after the point are the venue-readable plain form.
       refute leaf["base_size"] =~ ~r/e/i
-      assert Decimal.equal?(Decimal.new(leaf["base_size"]), Decimal.new("0.00000001"))
+      assert leaf["base_size"] == "0.00000001"
       assert leaf["limit_price"] == "0.1"
+    end
+
+    test "a float is refused: it has already lost digits" do
+      for {field, tag} <- [quantity: :invalid_quantity, price: :invalid_price] do
+        request = limit_request(%{field => 0.1})
+
+        assert {:error, {^tag, 0.1}} =
+                 Rest.place_order(@credentials, request, opts(never_sent()))
+      end
     end
 
     test "a value that is not a finite positive number is refused before sending" do
@@ -155,8 +163,9 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
             {:price, :free}
           ] do
         request = limit_request(%{field => bad})
+        tag = if field == :quantity, do: :invalid_quantity, else: :invalid_price
 
-        assert {:error, {:invalid_order_amount, ^field, ^bad}} =
+        assert {:error, {^tag, ^bad}} =
                  Rest.place_order(@credentials, request, opts(never_sent())),
                inspect({field, bad})
       end
@@ -171,10 +180,10 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
         quote_size: "x"
       }
 
-      assert {:error, {:invalid_order_amount, :quote_size, "x"}} =
+      assert {:error, {:invalid_quote_size, "x"}} =
                Rest.place_order(@credentials, market, opts(never_sent()))
 
-      assert {:error, {:invalid_order_amount, :stop_price, 0}} =
+      assert {:error, {:invalid_stop_price, 0}} =
                Rest.place_order(
                  @credentials,
                  limit_request(%{order_type: :stop_limit, stop_price: 0}),
@@ -256,11 +265,30 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
     test "a 200 with success false is a refusal carrying the venue's reason" do
       body = %{
         "success" => false,
+        "error_response" => %{"new_order_failure_reason" => "INSUFFICIENT_FUND"}
+      }
+
+      assert {:refused, {:order_rejected, "INSUFFICIENT_FUND"}} =
+               Rest.place_order(@credentials, limit_request(), opts(responding(body)))
+    end
+
+    test "DUPLICATE_CLIENT_ORDER_ID means an earlier attempt may have been placed" do
+      body = %{
+        "success" => false,
         "error_response" => %{"new_order_failure_reason" => "DUPLICATE_CLIENT_ORDER_ID"}
       }
 
-      assert {:refused, {:order_rejected, "DUPLICATE_CLIENT_ORDER_ID"}} =
+      assert {:error, {:order_unconfirmed, id, :duplicate_client_order_id}} =
                Rest.place_order(@credentials, limit_request(), opts(responding(body)))
+
+      assert byte_size(id) == 36
+
+      assert {:error, {:order_unconfirmed, "mine-1", :duplicate_client_order_id}} =
+               Rest.place_order(
+                 @credentials,
+                 limit_request(%{client_order_id: "mine-1"}),
+                 opts(responding(body))
+               )
     end
 
     test "close_position sends a plain-notation size and refuses a bad one or a bad id" do
@@ -276,7 +304,7 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
       assert_receive {:sent, _path, raw}
       assert Jason.decode!(raw)["size"] == "15"
 
-      assert {:error, {:invalid_order_amount, :size, "lots"}} =
+      assert {:error, {:invalid_quantity, "lots"}} =
                Rest.close_position(
                  @credentials,
                  "BTC-USD",
@@ -317,10 +345,10 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
     test "an amount that is not a finite positive number is refused" do
       changes = %{price: "cheap", quantity: Decimal.new("1")}
 
-      assert {:error, {:invalid_order_amount, :price, "cheap"}} =
+      assert {:error, {:invalid_price, "cheap"}} =
                Rest.replace_order(@credentials, "abc", changes, opts(never_sent()))
 
-      assert {:error, {:invalid_order_amount, :quantity, 0}} =
+      assert {:error, {:invalid_quantity, 0}} =
                Rest.preview_replace(
                  @credentials,
                  "abc",
@@ -332,13 +360,31 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
     test "an order id that names nothing is refused" do
       changes = %{price: 1, quantity: 1}
 
-      for bad <- [nil, "", :abc] do
-        assert {:error, {:invalid_id, :order_id, ^bad}} =
+      for bad <- [nil, "", "  ", :abc] do
+        assert {:error, {:invalid_order_id, ^bad}} =
                  Rest.replace_order(@credentials, bad, changes, opts(never_sent()))
       end
     end
 
-    test "a float is sent in plain notation" do
+    test "a float is refused, a decimal string is sent in plain notation" do
+      assert {:error, {:invalid_price, 1.0e-7}} =
+               Rest.replace_order(
+                 @credentials,
+                 "abc-123",
+                 %{price: 1.0e-7, quantity: 2},
+                 opts(never_sent())
+               )
+
+      assert {:error, {:invalid_quantity, 2.0}} =
+               Rest.preview_replace(
+                 @credentials,
+                 "abc-123",
+                 %{price: 1, quantity: 2.0},
+                 opts(never_sent())
+               )
+    end
+
+    test "a decimal string price is sent in plain notation" do
       me = self()
 
       plug = fn conn ->
@@ -354,7 +400,7 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
                Rest.replace_order(
                  @credentials,
                  "abc-123",
-                 %{price: 1.0e-7, quantity: 2},
+                 %{price: "0.0000001", quantity: 2},
                  opts(plug)
                )
 
@@ -367,11 +413,11 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
 
   describe "cancel_order/3 and get_order/3 ids" do
     test "an id that names no order is refused before anything is sent" do
-      for bad <- [nil, "", :abc, %{}] do
-        assert {:error, {:invalid_id, :order_id, ^bad}} =
+      for bad <- [nil, "", "  ", :abc, %{}] do
+        assert {:error, {:invalid_order_id, ^bad}} =
                  Rest.cancel_order(@credentials, bad, opts(never_sent()))
 
-        assert {:error, {:invalid_id, :order_id, ^bad}} =
+        assert {:error, {:invalid_order_id, ^bad}} =
                  Rest.get_order(@credentials, bad, opts(never_sent()))
       end
     end

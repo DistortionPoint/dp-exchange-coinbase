@@ -25,6 +25,40 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
     def record(_provider, _weight, _opts), do: :ok
   end
 
+  # Refuses every request the way a full bucket does: nothing leaves the process.
+  defmodule ThrottlingLimiter do
+    @moduledoc false
+    @behaviour DpExchange.Core.RateLimitBehaviour
+
+    @impl true
+    def acquire(_provider, _weight, _opts), do: {:error, :rate_limit_timeout}
+    @impl true
+    def check(_provider, _weight, _opts), do: {:rate_limited, 2_000}
+    @impl true
+    def record(_provider, _weight, _opts), do: :ok
+  end
+
+  # Lets the first request through and refuses every later one, per calling process.
+  defmodule RefuseAfterFirstLimiter do
+    @moduledoc false
+    @behaviour DpExchange.Core.RateLimitBehaviour
+
+    @impl true
+    def acquire(_provider, _weight, _opts) do
+      if Process.get(:first_acquire_done, false) do
+        {:error, :rate_limit_timeout}
+      else
+        Process.put(:first_acquire_done, true)
+        :ok
+      end
+    end
+
+    @impl true
+    def check(_provider, _weight, _opts), do: {:rate_limited, 2_000}
+    @impl true
+    def record(_provider, _weight, _opts), do: :ok
+  end
+
   setup do
     Config.put_override(:rate_limit_module, PermissiveLimiter)
     :ok
@@ -124,17 +158,110 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
         {:stop_limit, :gtd}
       ]
 
+      # Each leaf gets exactly the fields its own schema carries: a market order has no
+      # price, a limit order no stop price, and only a GTD order an expiry.
       for {type, tif} <- pairs do
-        request =
-          limit_request(%{
-            order_type: type,
-            time_in_force: tif,
-            stop_price: Decimal.new("39000")
-          })
-
-        assert {:ok, _order} = place(request, responding(accepted())),
+        assert {:ok, _order} = place(request_for(type, tif), responding(accepted())),
                "#{type}/#{tif} is in the table but did not build"
       end
+    end
+  end
+
+  defp never_sent, do: fn _conn -> raise "the venue must not be called" end
+
+  defp market_request(overrides \\ %{}) do
+    Map.merge(
+      %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: Decimal.new("0.5"),
+        order_type: :market,
+        time_in_force: :ioc
+      },
+      overrides
+    )
+  end
+
+  @expiry "2026-09-01T00:00:00Z"
+
+  defp request_for(:market, tif), do: market_request(%{time_in_force: tif})
+
+  defp request_for(:limit, :gtd),
+    do: limit_request(%{time_in_force: :gtd, end_time: @expiry})
+
+  defp request_for(:limit, tif), do: limit_request(%{time_in_force: tif})
+
+  defp request_for(:stop_limit, :gtd),
+    do: stop_request(%{time_in_force: :gtd, end_time: @expiry})
+
+  defp request_for(:stop_limit, tif), do: stop_request(%{time_in_force: tif})
+
+  describe "fields the type does not use are refused, never dropped" do
+    test "a price or a stop price on a market order" do
+      assert {:error, {:unexpected_field, :price}} =
+               place(market_request(%{price: Decimal.new("40000")}), never_sent())
+
+      assert {:error, {:unexpected_field, :stop_price}} =
+               place(market_request(%{stop_price: "1"}), never_sent())
+    end
+
+    test "a stop price on a limit order" do
+      assert {:error, {:unexpected_field, :stop_price}} =
+               place(limit_request(%{stop_price: Decimal.new("39000")}), never_sent())
+    end
+
+    test "a quote size on a limit order" do
+      assert {:error, {:unexpected_field, :quote_size}} =
+               place(limit_request(%{quote_size: "10"}), never_sent())
+    end
+
+    test "post_only on a market order" do
+      assert {:error, {:unexpected_field, :post_only}} =
+               place(market_request(%{post_only: true}), never_sent())
+    end
+
+    test "the same checks run in preview_order/3" do
+      assert {:error, {:unexpected_field, :price}} =
+               Rest.preview_order(@credentials, market_request(%{price: "1"}),
+                 plug: never_sent(),
+                 retry_attempts: 0
+               )
+    end
+  end
+
+  describe "order type and time-in-force are required, never defaulted" do
+    test "no order_type is {:missing_field, :order_type}, not a limit order" do
+      assert {:error, {:missing_field, :order_type}} =
+               place(Map.delete(limit_request(), :order_type), never_sent())
+    end
+
+    test "no time_in_force is {:missing_field, :time_in_force}, not GTC" do
+      assert {:error, {:missing_field, :time_in_force}} =
+               place(Map.delete(limit_request(), :time_in_force), never_sent())
+
+      # A market order with no tif was refused for a tif the caller never named.
+      assert {:error, {:missing_field, :time_in_force}} =
+               place(Map.delete(market_request(), :time_in_force), never_sent())
+    end
+
+    test "an unknown type is unsupported_order_type" do
+      for type <- [:stop, :trailing, "limit", 5] do
+        assert {:error, {:unsupported_order_type, ^type}} =
+                 place(limit_request(%{order_type: type}), never_sent())
+      end
+    end
+
+    test "a GTD order without its expiry is {:missing_field, :end_time}" do
+      assert {:error, {:missing_field, :end_time}} =
+               place(limit_request(%{time_in_force: :gtd}), never_sent())
+
+      stop = limit_request(%{order_type: :stop_limit, time_in_force: :gtd, stop_price: "1"})
+      assert {:error, {:missing_field, :end_time}} = place(stop, never_sent())
+    end
+
+    test "an end_time that is neither text nor a DateTime is refused" do
+      assert {:error, {:invalid_end_time, 5}} =
+               place(limit_request(%{time_in_force: :gtd, end_time: 5}), never_sent())
     end
   end
 
@@ -142,14 +269,14 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
     test "a limit order with no price is an error" do
       request = limit_request() |> Map.delete(:price)
 
-      assert {:error, :missing_limit_price} = place(request, responding(accepted()))
+      assert {:error, {:missing_field, :price}} = place(request, responding(accepted()))
     end
 
     test "a stop-limit with no stop price is an error" do
       request =
         limit_request(%{order_type: :stop_limit}) |> Map.delete(:stop_price)
 
-      assert {:error, :missing_stop_price} = place(request, responding(accepted()))
+      assert {:error, {:missing_field, :stop_price}} = place(request, responding(accepted()))
     end
 
     test "a market order with neither base nor quote size is an error" do
@@ -313,9 +440,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
         |> Plug.Conn.resp(200, Jason.encode!(accepted()))
       end
 
-      request =
-        limit_request(%{order_type: :market, time_in_force: :ioc, quote_size: Decimal.new("100")})
-        |> Map.delete(:quantity)
+      request = market_request(%{quote_size: Decimal.new("100")}) |> Map.delete(:quantity)
 
       assert {:ok, _order} = place(request, plug)
 
@@ -337,8 +462,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
         conn |> Plug.Conn.put_resp_content_type("application/json") |> Plug.Conn.resp(200, "{}")
       end
 
-      request =
-        limit_request(%{order_type: :market, time_in_force: :ioc, quote_size: Decimal.new("100")})
+      request = market_request(%{quote_size: Decimal.new("100")})
 
       assert {:error, :ambiguous_order_size} = place(request, plug)
       refute_received :sent
@@ -418,13 +542,13 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       # documented for FOK or stop-limit orders.
       exploding = fn _conn -> raise "must not send a field the leaf's schema does not carry" end
 
-      assert {:error, {:unsupported_order_field, :post_only, {:limit, :fok}}} =
+      assert {:error, {:unexpected_field, :post_only}} =
                place(
                  limit_request(%{time_in_force: :fok, post_only: true}),
                  exploding
                )
 
-      assert {:error, {:unsupported_order_field, :post_only, {:stop_limit, :gtc}}} =
+      assert {:error, {:unexpected_field, :post_only}} =
                place(
                  limit_request(%{
                    order_type: :stop_limit,
@@ -439,16 +563,16 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
     test "end_time on a leaf whose schema does not carry it is refused locally" do
       exploding = fn _conn -> raise "must not send a field the leaf's schema does not carry" end
 
-      assert {:error, {:unsupported_order_field, :end_time, {:limit, :fok}}} =
+      assert {:error, {:unexpected_field, :end_time}} =
                place(
                  limit_request(%{time_in_force: :fok, end_time: "2026-09-01T00:00:00Z"}),
                  exploding
                )
 
-      assert {:error, {:unsupported_order_field, :end_time, {:limit, :gtc}}} =
+      assert {:error, {:unexpected_field, :end_time}} =
                place(limit_request(%{end_time: "2026-09-01T00:00:00Z"}), exploding)
 
-      assert {:error, {:unsupported_order_field, :end_time, {:stop_limit, :gtc}}} =
+      assert {:error, {:unexpected_field, :end_time}} =
                place(
                  limit_request(%{
                    order_type: :stop_limit,
@@ -901,6 +1025,281 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       assert {:ok, order} = place(request, responding(accepted()))
       assert Decimal.equal?(order.quantity, Decimal.new("0.5"))
       assert Decimal.equal?(order.price, Decimal.new(40_000))
+    end
+  end
+
+  describe "the order of the local checks" do
+    test "a request that is not a map is refused, not a BadMapError" do
+      for bad <- [nil, [symbol: "BTC-USD"], "order"] do
+        assert {:error, {:invalid_order_request, ^bad}} = place(bad, never_sent())
+      end
+    end
+
+    test "unknown keys come before the symbol" do
+      assert {:error, {:unsupported_order_field, :bogus}} =
+               place(limit_request(%{symbol: nil, bogus: 1}), never_sent())
+    end
+
+    test "symbol, then side, then type, then the pair, then quantity, then prices" do
+      assert {:error, {:invalid_symbol, "  "}} =
+               place(limit_request(%{symbol: "  ", side: :hold}), never_sent())
+
+      assert {:error, {:invalid_side, :hold}} =
+               place(limit_request(%{side: :hold, order_type: :stop}), never_sent())
+
+      assert {:error, {:unsupported_order_type, :stop}} =
+               place(limit_request(%{order_type: :stop, time_in_force: :ioc}), never_sent())
+
+      assert {:error, {:unsupported_order_combination, :limit, :ioc}} =
+               place(limit_request(%{time_in_force: :ioc, quantity: 0}), never_sent())
+
+      assert {:error, {:invalid_quantity, 0}} =
+               place(limit_request(%{quantity: 0, price: "x"}), never_sent())
+
+      assert {:error, {:invalid_price, "x"}} =
+               place(limit_request(%{price: "x", client_order_id: ""}), never_sent())
+
+      assert {:error, {:invalid_client_order_id, "  "}} =
+               place(limit_request(%{client_order_id: "  "}), never_sent())
+    end
+
+    test "a string side is accepted case-insensitively" do
+      assert {:ok, %Types.Order{side: :buy}} =
+               place(limit_request(%{side: "BUY"}), responding(accepted()))
+    end
+
+    test "a float amount is refused: it has already lost digits" do
+      assert {:error, {:invalid_quantity, 0.5}} =
+               place(limit_request(%{quantity: 0.5}), never_sent())
+
+      assert {:error, {:invalid_price, 40_000.0}} =
+               place(limit_request(%{price: 40_000.0}), never_sent())
+
+      assert {:error, {:invalid_stop_price, 1.5}} =
+               place(stop_request(%{stop_price: 1.5}), never_sent())
+
+      market = market_request(%{quote_size: 10.0}) |> Map.delete(:quantity)
+      assert {:error, {:invalid_quote_size, 10.0}} = place(market, never_sent())
+    end
+
+    test "credentials are checked after the request, before anything is sent" do
+      assert {:error, {:missing_credentials, :coinbase}} =
+               Rest.place_order(%{}, limit_request(), plug: never_sent(), retry_attempts: 0)
+
+      assert {:error, {:invalid_quantity, 0}} =
+               Rest.place_order(%{}, limit_request(%{quantity: 0}),
+                 plug: never_sent(),
+                 retry_attempts: 0
+               )
+    end
+  end
+
+  describe "a write that may have reached the venue is {:order_unconfirmed, id, reason}" do
+    defp capturing(response_fun) do
+      me = self()
+
+      fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(raw)})
+        response_fun.(conn)
+      end
+    end
+
+    test "a 2xx that is not a map, or carries no success, proves nothing" do
+      for body <- [[], "ok", %{}, %{"success_response" => %{"order_id" => "x"}}] do
+        assert {:error, {:order_unconfirmed, "mine-1", :unexpected_response_shape}} =
+                 place(limit_request(%{client_order_id: "mine-1"}), responding(body))
+      end
+    end
+
+    test "a generated client_order_id is the one returned" do
+      plug = capturing(fn conn -> Plug.Conn.resp(conn, 200, "[]") end)
+
+      assert {:error, {:order_unconfirmed, id, :unexpected_response_shape}} =
+               place(limit_request(), plug)
+
+      assert_receive {:sent, %{"client_order_id" => ^id}}, 5_000
+      assert byte_size(id) == 36
+    end
+
+    test "retries exhausted on a 5xx: unconfirmed, with the id every attempt carried" do
+      plug =
+        capturing(fn conn ->
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(503, Jason.encode!(%{"message" => String.duplicate("x", 5_000)}))
+        end)
+
+      assert {:error, {:order_unconfirmed, id, {:exchange_error, :coinbase, text}}} =
+               Rest.place_order(@credentials, limit_request(),
+                 plug: plug,
+                 retry_attempts: 2,
+                 retry_delay: 1
+               )
+
+      assert is_binary(text) and byte_size(text) <= 256
+      assert_receive {:sent, %{"client_order_id" => ^id}}, 5_000
+      assert_receive {:sent, %{"client_order_id" => ^id}}, 5_000
+    end
+
+    test "DUPLICATE_CLIENT_ORDER_ID is unconfirmed, not a rejection" do
+      body = %{
+        "success" => false,
+        "error_response" => %{"new_order_failure_reason" => "DUPLICATE_CLIENT_ORDER_ID"}
+      }
+
+      assert {:error, {:order_unconfirmed, "mine-2", :duplicate_client_order_id}} =
+               place(limit_request(%{client_order_id: "mine-2"}), responding(body))
+    end
+
+    test "other rejections and the venue's 4xx answers stay refusals" do
+      assert {:refused, {:order_rejected, "INSUFFICIENT_FUND"}} =
+               place(
+                 limit_request(),
+                 responding(%{
+                   "success" => false,
+                   "error_response" => %{"new_order_failure_reason" => "INSUFFICIENT_FUND"}
+                 })
+               )
+
+      assert {:refused, {:venue_error, 400, "bad size"}} =
+               place(limit_request(), responding(%{"message" => "bad size"}, 400))
+    end
+
+    test "our own rate limiter refusing is decided before sending: a plain error" do
+      Config.put_override(:rate_limit_module, ThrottlingLimiter)
+
+      assert {:error, {:exchange_error, :coinbase, "Throttled by our own rate limiter" <> _rest}} =
+               place(limit_request(), never_sent())
+    end
+
+    test "the limiter refusing a retry after a 5xx was sent is unconfirmed, not plain" do
+      Config.put_override(:rate_limit_module, RefuseAfterFirstLimiter)
+      me = self()
+
+      plug = fn conn ->
+        send(me, :attempt_sent)
+        Plug.Conn.resp(conn, 503, Jason.encode!(%{"message" => "down"}))
+      end
+
+      assert {:error, {:order_unconfirmed, id, {:exchange_error, :coinbase, text}}} =
+               Rest.place_order(@credentials, limit_request(),
+                 plug: plug,
+                 retry_attempts: 3,
+                 retry_delay: 1
+               )
+
+      assert byte_size(id) == 36
+      assert text =~ "Throttled by our own rate limiter"
+      assert_receive :attempt_sent, 5_000
+      refute_received :attempt_sent
+
+      # The same for close_position/3, with the limiter's first-request allowance reset.
+      Process.put(:first_acquire_done, false)
+
+      assert {:error, {:order_unconfirmed, "close-2", {:exchange_error, :coinbase, _text}}} =
+               Rest.close_position(@credentials, "BTC-USD",
+                 client_order_id: "close-2",
+                 plug: plug,
+                 retry_attempts: 3,
+                 retry_delay: 1
+               )
+    end
+
+    test "a signing failure is a plain error, nothing was sent" do
+      assert {:error, :invalid_base64} =
+               Rest.place_order(
+                 %{@credentials | api_secret: "not base64 !!"},
+                 limit_request(),
+                 plug: never_sent(),
+                 retry_attempts: 0
+               )
+    end
+
+    test "close_position carries its client_order_id the same way" do
+      assert {:error, {:order_unconfirmed, "close-1", :unexpected_response_shape}} =
+               Rest.close_position(@credentials, "BTC-USD",
+                 client_order_id: "close-1",
+                 plug: responding([]),
+                 retry_attempts: 0
+               )
+    end
+  end
+
+  describe "replace_order/4 and the unconfirmed / unread answers" do
+    @edit %{price: Decimal.new("41000"), quantity: Decimal.new("0.5")}
+
+    defp replace(plug, order_id \\ "abc-123") do
+      Rest.replace_order(@credentials, order_id, @edit, plug: plug, retry_attempts: 0)
+    end
+
+    test "a 2xx that is not a success answer is unconfirmed, with no client_order_id" do
+      for body <- [[], %{}, "ok"] do
+        assert {:error, {:order_unconfirmed, nil, :unexpected_response_shape}} =
+                 replace(responding(body))
+      end
+    end
+
+    test "a 5xx on the edit is unconfirmed (sent once)" do
+      assert {:error, {:order_unconfirmed, nil, {:exchange_error, :coinbase, _text}}} =
+               replace(responding(%{"message" => "down"}, 503))
+    end
+
+    test "an accepted edit whose read-back fails is replace_accepted_unread" do
+      # JSON content type, or the body arrives undecoded as a string and reads as unusable.
+      plug = fn conn ->
+        conn = Plug.Conn.put_resp_content_type(conn, "application/json")
+
+        if conn.request_path =~ "edit",
+          do: Plug.Conn.resp(conn, 200, Jason.encode!(%{"success" => true})),
+          else: Plug.Conn.resp(conn, 404, Jason.encode!(%{"message" => "gone"}))
+      end
+
+      assert {:error, {:replace_accepted_unread, "abc-123", :not_found}} = replace(plug)
+    end
+
+    test "a refused edit stays a refusal and a blank id is refused locally" do
+      assert {:refused, {:venue_error, 400, "no"}} =
+               replace(responding(%{"message" => "no"}, 400))
+
+      for bad <- [nil, "", "  ", :abc] do
+        assert {:error, {:invalid_order_id, ^bad}} = replace(never_sent(), bad)
+      end
+    end
+  end
+
+  describe "orders that are not there are :not_found; transport keeps its tag" do
+    test "a 404 on an order read or cancel is {:refused, :not_found}" do
+      gone = responding(%{"message" => "gone"}, 404)
+      opts = [plug: gone, retry_attempts: 0]
+
+      assert {:refused, :not_found} = Rest.get_order(@credentials, "abc", opts)
+      assert {:refused, :not_found} = Rest.cancel_order(@credentials, "abc", opts)
+    end
+
+    test "a 404 on a symbol is still :not_listed" do
+      assert {:refused, :not_listed} =
+               Rest.get_price("NOPE-USD", plug: responding(%{}, 404), retry_attempts: 0)
+    end
+
+    test "a transport failure keeps Core's {:exchange_error, :coinbase, message} tag" do
+      assert {:error, {:exchange_error, :coinbase, message}} =
+               Rest.get_order(@credentials, "abc",
+                 plug: responding(%{"message" => "down"}, 503),
+                 retry_attempts: 0
+               )
+
+      assert is_binary(message)
+    end
+
+    test "an order id that is blank is refused before credentials and the wire" do
+      for bad <- [nil, "", "  ", :abc, %{}] do
+        assert {:error, {:invalid_order_id, ^bad}} =
+                 Rest.get_order(%{}, bad, plug: never_sent(), retry_attempts: 0)
+
+        assert {:error, {:invalid_order_id, ^bad}} =
+                 Rest.cancel_order(%{}, bad, plug: never_sent(), retry_attempts: 0)
+      end
     end
   end
 end

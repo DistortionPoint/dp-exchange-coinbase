@@ -54,7 +54,7 @@ defmodule DpExchange.Coinbase.Fake do
   Every private function checks its credential with `Rest.validate_credentials/1` (`nil`,
   `%{}` and a map that cannot sign are `{:error, {:missing_credentials, :coinbase}}`), after
   the injected outcome and after the same local argument checks, in the same order, as the
-  real function. The checks themselves are `Rest`'s (`validate_order_request/1`,
+  real function. The checks themselves are `Rest`'s (`order_plan/2`,
   `validate_order_edit/1`, `validate_candle_request/2`, ...), called rather than re-stated, so
   the two cannot drift. This fake used to inspect no credential at all, so a consumer that
   forgot them saw green tests and a production `:missing_credentials`.
@@ -449,9 +449,8 @@ defmodule DpExchange.Coinbase.Fake do
         nil -> {:ok, accounts}
         "8bfc20d7-f7c6-4422-bf07-8243ca4169fe" -> {:ok, accounts}
         # An id the venue does not hold. `{:ok, []}` would read as "this account has nothing".
-        # The venue answers 404, which `Rest` classifies `{:refused, :not_listed}` — the fake
-        # said `:not_found`, a reason the real package can never return.
-        _unknown -> {:refused, :not_listed}
+        # The venue answers 404, which `Rest` classifies `{:refused, :not_found}`.
+        _unknown -> {:refused, :not_found}
       end
     end)
   end
@@ -1038,13 +1037,13 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
-  # **An id this fake never quoted is the venue's 404**, `{:refused, :not_listed}` from
+  # **An id this fake never quoted is the venue's 404**, `{:refused, :not_found}` from
   # `Rest`'s `classify/1`. Every id used to commit and read back `:settled`, so a consumer's
   # test could commit a conversion it never quoted and pass (found 2026-10-10).
   defp fake_conversion(id) do
     case Map.fetch(conversions(), id) do
       {:ok, status} -> {:ok, status}
-      :error -> {:refused, :not_listed}
+      :error -> {:refused, :not_found}
     end
   end
 
@@ -1206,33 +1205,57 @@ defmodule DpExchange.Coinbase.Fake do
   def place_order(credentials, request, _opts \\ []) do
     with_injection(fn ->
       # The fake accepts what the venue accepts and refuses what it refuses, by running the
-      # real package's own checks in its order: the request (identity, the sparse
-      # type/time-in-force table, each leaf's required and refused fields), then the
-      # credential. This re-stated the table alone, so an order with no symbol raised
-      # `KeyError`, a limit order with no price was "placed", and `%{}` credentials passed —
-      # each refused by the real path.
-      with :ok <- Rest.validate_order_request(request),
+      # real package's own checks in its order (`Rest.order_plan/2`: request, keys, symbol,
+      # side, type, time-in-force, quantity, price fields, `client_order_id`), then the
+      # credential. It builds the order from the plan, so the side is the atom the real path
+      # returns (not the caller's `"buy"`) and the amounts are the real path's Decimals.
+      with {:ok, plan} <- Rest.order_plan(request, :place),
            :ok <- Rest.validate_credentials(credentials) do
-        placed = %Types.Order{
-          id: next_order_id(),
-          symbol: Map.fetch!(request, :symbol),
-          side: Map.fetch!(request, :side),
-          order_type: Map.get(request, :order_type, :limit),
-          time_in_force: Map.get(request, :time_in_force, :gtc),
-          # Decimals, as the real return: it casts the caller's value, string or float.
-          quantity: cast_decimal(Map.get(request, :quantity)),
-          price: cast_decimal(Map.get(request, :price)),
-          status: :pending,
-          provider: :coinbase
-        }
-
-        # Remembered (per process) as the working order a later read finds: placed, not
-        # filled. `get_order/3`, `get_orders/2` and `cancel_order/3` answer from this, so a
-        # place -> read -> cancel -> read test sees the order it placed, as on the venue.
-        remember_order(%{placed | status: :open, filled_quantity: Decimal.new("0")})
-        {:ok, placed}
+        place_planned(plan)
       end
     end)
+  end
+
+  # **The venue is idempotent on `client_order_id`**: re-sending a used id creates no second
+  # order and returns the original. A caller-supplied id seen before answers the order it
+  # first placed; a generated id is new every time.
+  defp place_planned(%{client_order_id_supplied?: true, client_order_id: id} = plan) do
+    case Map.fetch(client_orders(), id) do
+      {:ok, original} -> {:ok, original}
+      :error -> plan |> create_order() |> remember_client_order(id)
+    end
+  end
+
+  defp place_planned(plan), do: create_order(plan)
+
+  defp create_order(plan) do
+    placed = %Types.Order{
+      id: next_order_id(),
+      symbol: plan.symbol,
+      side: plan.side,
+      order_type: plan.order_type,
+      time_in_force: plan.time_in_force,
+      quantity: plan.quantity,
+      price: plan.price,
+      stop_price: plan.stop_price,
+      status: :pending,
+      provider: :coinbase
+    }
+
+    # Remembered (per process) as the working order a later read finds: placed, not
+    # filled. `get_order/3`, `get_orders/2` and `cancel_order/3` answer from this, so a
+    # place -> read -> cancel -> read test sees the order it placed, as on the venue.
+    remember_order(%{placed | status: :open, filled_quantity: Decimal.new("0")})
+    {:ok, placed}
+  end
+
+  @client_orders_key {__MODULE__, :client_orders}
+
+  defp client_orders, do: Process.get(@client_orders_key, %{})
+
+  defp remember_client_order({:ok, placed} = result, client_order_id) do
+    Process.put(@client_orders_key, Map.put(client_orders(), client_order_id, placed))
+    result
   end
 
   # A new id per placement. The fake issued the literal `fake-order-1` for every order, so
@@ -1278,7 +1301,7 @@ defmodule DpExchange.Coinbase.Fake do
   def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
   @impl true
   def cancel_order(credentials, order_id, _opts \\ []) do
-    with_checks(credentials, Rest.validate_id(order_id, :order_id), fn ->
+    with_checks(credentials, Rest.validate_order_id(order_id), fn ->
       # The fake refuses the same way the venue does: an order that is not open cannot be
       # cancelled, and saying :ok would let a consumer's retry logic go untested.
       cancel_found(find_order(order_id), order_id)
@@ -1303,12 +1326,12 @@ defmodule DpExchange.Coinbase.Fake do
 
   @impl true
   def get_order(credentials, order_id, _opts \\ []) do
-    with_checks(credentials, Rest.validate_id(order_id, :order_id), fn ->
+    with_checks(credentials, Rest.validate_order_id(order_id), fn ->
       case find_order(order_id) do
         {:ok, order} -> {:ok, order}
-        # The venue's 404, which `Rest` classifies `{:refused, :not_listed}`. This said
-        # `:not_found`, a reason the real package can never return.
-        :error -> {:refused, :not_listed}
+        # The venue's 404, which `Rest` classifies `{:refused, :not_found}` (`:not_listed`
+        # is for symbols only).
+        :error -> {:refused, :not_found}
       end
     end)
   end
@@ -1371,13 +1394,13 @@ defmodule DpExchange.Coinbase.Fake do
   def preview_order(credentials, request, _opts \\ []) do
     with_injection(fn ->
       # The same request checks `place_order/3` runs, then the credential — as the real path.
-      with :ok <- Rest.validate_order_request(request, :preview),
+      with {:ok, plan} <- Rest.order_plan(request, :preview),
            :ok <- Rest.validate_credentials(credentials) do
         {:ok,
          %{
            order_total: Decimal.new("20000.00"),
            commission_total: Decimal.new("10.00"),
-           base_size: cast_decimal(Map.get(request, :quantity)),
+           base_size: plan.quantity,
            quote_size: nil,
            best_bid: Decimal.new("39990"),
            best_ask: Decimal.new("40010"),
@@ -1419,7 +1442,7 @@ defmodule DpExchange.Coinbase.Fake do
             {:ok, remember_order(edited)}
 
           :error ->
-            {:refused, :not_listed}
+            {:refused, :not_found}
         end
       end
     end)

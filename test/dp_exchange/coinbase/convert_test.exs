@@ -308,8 +308,8 @@ defmodule DpExchange.Coinbase.ConvertTest do
       assert {:error, :from_and_to_required} = Fake.get_conversion("t-1", auth)
 
       # Only an id it quoted: anything else is the venue's 404.
-      assert {:refused, :not_listed} = Fake.commit_conversion("t-1", accounts)
-      assert {:refused, :not_listed} = Fake.get_conversion("t-1", accounts)
+      assert {:refused, :not_found} = Fake.commit_conversion("t-1", accounts)
+      assert {:refused, :not_found} = Fake.get_conversion("t-1", accounts)
 
       assert {:ok, %{status: :quoted}} = Fake.get_conversion(id, accounts)
       assert {:ok, %{status: :committed}} = Fake.commit_conversion(id, accounts)

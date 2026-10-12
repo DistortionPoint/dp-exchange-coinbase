@@ -29,9 +29,27 @@ of two ways, and which one it is depends on what the endpoint gives it:
   None has a key the venue honours. Before 0.3.49 they were retried, so a timed-out move could move the funds
   twice. A transport error on one of these means **the outcome is unknown**: read the
   portfolio, sweep, conversion or order back before issuing it again.
-- **`{:error, {:edit_accepted_refetch_failed, order_id, reason}}` from `replace_order/4`
+- **`{:error, {:replace_accepted_unread, order_id, reason}}` from `replace_order/4`
   means the edit WAS applied.** The read-back of the order failed afterwards. Do not edit
-  again; read the order with `get_order/3`.
+  again; read the order with `get_order/3`. (It was `:edit_accepted_refetch_failed`.)
+- **`{:error, {:order_unconfirmed, client_order_id, reason}}` from `place_order/3`,
+  `close_position/3` and `replace_order/4` means the order MAY exist.** It is returned when
+  the request may have reached the venue and success is not proven: a transport error or
+  timeout after sending (including retries exhausted), a 5xx, a `2xx` that is not a map or
+  carries no `success`, and `DUPLICATE_CLIENT_ORDER_ID` (an earlier attempt, possibly this
+  call's own internal retry, was placed). `client_order_id` is the id actually sent,
+  **including one this package generated**; for `replace_order/4` it is `nil` (an edit has
+  none). Look the order up with `get_orders/2` before sending again, and send the SAME
+  `client_order_id` to retry. Errors decided before sending (validation, credentials, our
+  own rate limiter, a signing failure) stay plain `{:error, reason}`; a `400`/`401`/`403`/`404`
+  is the venue answering and stays `{:refused, _}`. Before this a retries-exhausted place
+  returned a bare `{:error, "Request failed..."}` with no id, a success-less `2xx` returned
+  `{:error, :unexpected_response_shape}`, and a duplicate-id answer was
+  `{:refused, {:order_rejected, "DUPLICATE_CLIENT_ORDER_ID"}}`.
+- **Transport failures keep Core's tag**: `{:error, {:exchange_error, :coinbase, message}}`.
+  They used to arrive as the bare message string.
+- **A `404` on an order, account, portfolio or conversion is `{:refused, :not_found}`.**
+  `{:refused, :not_listed}` is for symbols only.
 - **No credentials means no private call.** `nil` and `%{}` both mean none: a private
   endpoint answers `{:error, {:missing_credentials, :coinbase}}` locally, and a public
   market-data call carrying `%{}` takes the unsigned `/market` path.
@@ -700,8 +718,10 @@ suite as the real adapter.
 **The fake remembers the orders it placed, per process.** `place_order/3` issues a new id
 each time; `get_order/3` and `get_orders/2` return that order with its own symbol, side,
 size and price, `cancel_order/3` marks it cancelled so the next read says `:cancelled`, and
-an id the fake never issued answers as the venue does (`{:refused, :not_listed}` on a read,
-`{:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}}` on a cancel). Before anything is
+an id the fake never issued answers as the venue does (`{:refused, :not_found}` on a read,
+`{:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}}` on a cancel). A caller-supplied
+`client_order_id` sent twice returns the ORIGINAL order, as the idempotent venue does, not
+a second one; the side comes back as the atom, not the string you sent. Before anything is
 placed, `fake-order-1` is a canned open BTC-USD order.
 
 **`get_top_of_book/2` errors without `opts[:credentials]`, in the fake too** — the one
@@ -719,7 +739,7 @@ first (an order missing its symbol or a limit price, an edit missing a field, a 
 missing `:from`/`:to`). Pass `credentials: ...` in `opts` where the call has no credential
 argument. The fake also narrows `get_orders/2` by `:status`/`:symbol` and
 `get_trade_history/2` by `:symbol`, `:order_id`, `:start` and `:end`, and an unknown order or
-account is `{:refused, :not_listed}` (the venue's 404), not `:not_found`.
+account is `{:refused, :not_found}` (the venue's 404); `:not_listed` is for symbols only.
 
 **Do not point tests at the live venue.** This package's own tier-2 tests do that, tagged
 and excluded, run by hand. A venue that sees a package polling it on a timer will
@@ -795,6 +815,32 @@ accept the contract's keys plus `quote_size`, `stop_price`, `stop_direction`, `p
 `sor_preference` and (place only) `preview_id`. Any other key, including `reduce_only` and
 the schema's unbuilt `attached_order_configuration`, is
 `{:error, {:unsupported_order_field, key}}`, never silently dropped.
+
+**`:order_type` and `:time_in_force` are required, and a field the type does not use is
+refused.** No default: a request with no `:order_type` is `{:error, {:missing_field,
+:order_type}}` (it used to be a limit order), none with no `:time_in_force` is
+`{:error, {:missing_field, :time_in_force}}` (it used to be GTC, and a market order with no
+tif was refused for a tif never named). An unknown type is `{:unsupported_order_type, type}`;
+a pair the venue has no key for is `{:unsupported_order_combination, type, tif}`. `:price`
+or `:stop_price` on a market order, `:stop_price` or `:quote_size` on a limit order, and
+`:post_only` / `:end_time` / `:stop_direction` where the leaf has no such field are
+`{:error, {:unexpected_field, key}}` (they were silently dropped, or for `post_only` and
+`end_time` refused as `{:unsupported_order_field, key, {type, tif}}`). A GTD order needs
+`:end_time` (`{:missing_field, :end_time}`). A missing limit price is `{:missing_field,
+:price}` and a missing stop price `{:missing_field, :stop_price}` (were `:missing_limit_price`
+and `:missing_stop_price`). `post_only` is sent on the limit GTC and GTD leaves.
+
+**Amounts are refused unless finite and positive, and a float is refused.** `{:error,
+{:invalid_quantity | :invalid_quote_size | :invalid_price | :invalid_stop_price, value}}`
+(was `{:invalid_order_amount, field, value}`); a close's `:size` is `{:invalid_quantity, v}`.
+Pass a `Decimal`, an integer or a numeric string. The checks run in a fixed order: request is
+a map, unknown keys, symbol, side, type, time-in-force and the pair, quantity, price fields,
+`client_order_id` (non-blank), then credentials, then the wire.
+
+**Order ids are checked first.** `get_order/3`, `cancel_order/3` and `replace_order/4` answer
+`{:error, {:invalid_order_id, value}}` for `nil`, a non-string or a blank/whitespace-only id
+(was `{:invalid_id, :order_id, value}`; `"  "` used to be sent percent-encoded), before
+credentials and the wire.
 
 The other five are Coinbase-specific — no generic callback fits them, so they
 are plain functions on `DpExchange.Coinbase` instead:

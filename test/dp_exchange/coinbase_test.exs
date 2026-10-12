@@ -353,6 +353,8 @@ defmodule DpExchange.CoinbaseTest do
       request = %{
         symbol: "BTC-USD",
         side: :buy,
+        order_type: :limit,
+        time_in_force: :gtc,
         quantity: Decimal.new("0.5"),
         price: Decimal.new("40000")
       }
@@ -398,7 +400,7 @@ defmodule DpExchange.CoinbaseTest do
     end
 
     test "reading an unknown order refuses" do
-      assert {:refused, :not_listed} = Fake.get_order(@fake_credentials, "no-such-order")
+      assert {:refused, :not_found} = Fake.get_order(@fake_credentials, "no-such-order")
     end
 
     test "listing returns the fake's orders" do
@@ -412,6 +414,8 @@ defmodule DpExchange.CoinbaseTest do
       request = %{
         symbol: "BTC-USD",
         side: :buy,
+        order_type: :limit,
+        time_in_force: :gtc,
         quantity: Decimal.new("0.5"),
         price: Decimal.new("40000")
       }
@@ -597,6 +601,8 @@ defmodule DpExchange.CoinbaseTest do
       request = %{
         symbol: "BTC-USD",
         side: :buy,
+        order_type: :limit,
+        time_in_force: :gtc,
         quantity: Decimal.new("0.5"),
         price: Decimal.new("40000")
       }
@@ -745,6 +751,8 @@ defmodule DpExchange.CoinbaseTest do
       request = %{
         symbol: "BTC-USD",
         side: :buy,
+        order_type: :limit,
+        time_in_force: :gtc,
         quantity: Decimal.new("0.5"),
         price: Decimal.new("40000")
       }

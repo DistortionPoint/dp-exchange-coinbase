@@ -87,7 +87,7 @@ defmodule DpExchange.Coinbase.OrderSurfaceHardeningTest do
         assert {:error, {:invalid_order_request, ^bad}} =
                  Rest.preview_order(@credentials, bad, opts(never_sent()))
 
-        assert {:error, {:invalid_order_request, ^bad}} = Rest.validate_order_request(bad)
+        assert {:error, {:invalid_order_request, ^bad}} = Rest.order_plan(bad, :place)
       end
     end
 
@@ -106,8 +106,8 @@ defmodule DpExchange.Coinbase.OrderSurfaceHardeningTest do
 
   describe "an amount with an absurd scale" do
     test "an order price, size or stop of 1E+999999999 is refused, not rendered" do
-      for field <- [:price, :quantity] do
-        assert {:error, {:invalid_order_amount, ^field, _value}} =
+      for {field, tag} <- [price: :invalid_price, quantity: :invalid_quantity] do
+        assert {:error, {^tag, _value}} =
                  Rest.place_order(
                    @credentials,
                    limit_request(%{field => @huge}),
@@ -117,7 +117,7 @@ defmodule DpExchange.Coinbase.OrderSurfaceHardeningTest do
     end
 
     test "a float whose plain notation would be hundreds of digits is refused" do
-      assert {:error, {:invalid_order_amount, :price, 1.0e300}} =
+      assert {:error, {:invalid_price, 1.0e300}} =
                Rest.place_order(
                  @credentials,
                  limit_request(%{price: 1.0e300}),
@@ -126,7 +126,7 @@ defmodule DpExchange.Coinbase.OrderSurfaceHardeningTest do
     end
 
     test "an edit with an absurd price is refused" do
-      assert {:error, {:invalid_order_amount, :price, _value}} =
+      assert {:error, {:invalid_price, _value}} =
                Rest.replace_order(
                  @credentials,
                  "abc-123",
@@ -233,13 +233,15 @@ defmodule DpExchange.Coinbase.OrderSurfaceHardeningTest do
       end
 
       assert {:error, {:invalid_leverage, 0}} =
-               Rest.validate_order_request(limit_request(%{leverage: 0}))
+               Rest.order_plan(limit_request(%{leverage: 0}), :place)
     end
   end
 
   describe "schedule_futures_sweep/2 amounts" do
     test "a present amount that is not a finite positive number is refused" do
-      for bad <- ["", "abc", 0, "0", -5, "-1", @huge, Decimal.new("NaN"), %{}] do
+      # A float is refused on this money-moving amount as on an order field: it has already
+      # lost digits before it gets here.
+      for bad <- ["", "abc", 0, "0", -5, "-1", @huge, Decimal.new("NaN"), %{}, 150.0, 1.5e-8] do
         sweep_opts = [usd_amount: bad] ++ opts(never_sent())
 
         assert {:error, {:invalid_amount, ^bad}} =
@@ -253,7 +255,7 @@ defmodule DpExchange.Coinbase.OrderSurfaceHardeningTest do
       assert {:ok, _result} =
                Rest.schedule_futures_sweep(
                  @credentials,
-                 [usd_amount: 1.5e2] ++ opts(capturing(%{"success" => true}, me))
+                 [usd_amount: "150.0"] ++ opts(capturing(%{"success" => true}, me))
                )
 
       assert_receive {:sent, _path, raw}, @wait
@@ -428,8 +430,8 @@ defmodule DpExchange.Coinbase.OrderSurfaceHardeningTest do
         price: Decimal.new("1")
       }
 
-      assert :ok = Rest.validate_order_request(core)
-      assert :ok = Rest.validate_order_request(core, :preview)
+      assert {:ok, _plan} = Rest.order_plan(core, :place)
+      assert {:ok, _plan} = Rest.order_plan(core, :preview)
     end
 
     test "retail_portfolio_id, preview_id and sor_preference are sent when valid" do

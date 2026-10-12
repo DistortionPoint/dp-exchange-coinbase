@@ -268,15 +268,17 @@ defmodule DpExchange.Coinbase do
       supports_order_preview: true,
       supports_order_replace: true,
 
-      # `Rest.order_configuration/1`'s own `@configurations` cross-product, read back —
-      # not invented here. Left undeclared, this defaulted to `[]`, which reads as
-      # "this venue accepts no order type at all" on a package where `{:place_order, 3}`
-      # is `:experimental` and actually builds three. Found by a cross-package audit;
-      # `dp_exchange_robinhood` defaulted the same two fields the same way for the same
-      # reason. `:stop` and `:post_only` are not here: the venue's `@configurations` has
-      # no `:stop` entry (only `:stop_limit`) and Advanced Trade has no post-only flag in
-      # this endpoint's schema — declaring either would be a claim this package cannot
-      # honour.
+      # `Rest`'s own `@configurations` cross-product, read back — not invented here. Left
+      # undeclared, this defaulted to `[]`, which reads as "this venue accepts no order
+      # type at all" on a package where `{:place_order, 3}` is `:experimental` and
+      # actually builds three. Found by a cross-package audit; `dp_exchange_robinhood`
+      # defaulted the same two fields the same way for the same reason. `:stop` is not
+      # here: the venue's `@configurations` has no `:stop` entry (only `:stop_limit`), and
+      # a `:stop` request is refused `{:unsupported_order_type, :stop}`. `post_only` is a
+      # per-order flag, not an order type: `place_order/3` sends it on the limit GTC and
+      # GTD leaves (`LimitLimitGtc`, `LimitLimitGtd`) and refuses it
+      # (`{:unexpected_field, :post_only}`) on every other leaf. This comment used to say
+      # the endpoint had no post-only flag, while `Rest` was sending one.
       supported_order_types: [:market, :limit, :stop_limit],
       supported_time_in_force: [:ioc, :fok, :gtc, :gtd],
       # `level2` was recognised and decoded but never subscribed — `Socket` already had

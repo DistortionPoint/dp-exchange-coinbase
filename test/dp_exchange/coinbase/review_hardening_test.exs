@@ -165,7 +165,7 @@ defmodule DpExchange.Coinbase.ReviewHardeningTest do
         end
       end
 
-      assert {:error, {:edit_accepted_refetch_failed, "abc-123", _reason}} =
+      assert {:error, {:replace_accepted_unread, "abc-123", _reason}} =
                Rest.replace_order(
                  @credentials,
                  "abc-123",

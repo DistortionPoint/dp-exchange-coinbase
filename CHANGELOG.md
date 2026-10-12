@@ -20,6 +20,66 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Family trading conventions (tick P) applied to orders, in `Rest` and `Fake` alike.
+
+- **BREAKING: an unconfirmed write is `{:error, {:order_unconfirmed, client_order_id, reason}}`.**
+  `place_order/3`, `close_position/3` and `replace_order/4`. Old -> new: retries exhausted
+  returned a bare `{:error, "Request failed..."}` and the generated `client_order_id` was lost;
+  a `2xx` that is not a map or has no `success` returned `{:error, :unexpected_response_shape}`
+  with no id; a `DUPLICATE_CLIENT_ORDER_ID` answer (after an internal retry, the earlier
+  attempt may have been placed) returned `{:refused, {:order_rejected, ...}}`. The id is the one
+  actually sent, generated ones included; `replace_order/4` carries `nil`. Validation,
+  credentials, our own rate limiter and signing failures stay plain `{:error, _}` when nothing
+  was sent; a venue `400`/`401`/`403`/`404` stays `{:refused, _}`. The signer is counted per
+  attempt, so a limiter refusal of an internal retry after an earlier attempt was sent (say a
+  5xx) is `{:order_unconfirmed, ...}`, not plain.
+- **BREAKING: `:order_type` and `:time_in_force` are required.** Old: absent type defaulted to
+  `:limit`, absent tif to `:gtc` (and a market order with no tif was refused for a tif never
+  named). New: `{:error, {:missing_field, :order_type | :time_in_force}}`; an unknown type is
+  `{:unsupported_order_type, type}`. A GTD order without `:end_time` is `{:missing_field,
+  :end_time}` (an `end_time` that is neither text nor a `DateTime` is `{:invalid_end_time, v}`).
+- **BREAKING: a field the type does not use is `{:error, {:unexpected_field, key}}`.** Old:
+  `:price` / `:stop_price` on a market order, `:stop_price` or `:quote_size` on a limit order,
+  and `:post_only` / `:stop_direction` on market were silently dropped; `post_only` / `end_time`
+  on a leaf without them were `{:unsupported_order_field, key, {type, tif}}`.
+- **BREAKING: order validation tags and order.** `{:missing_limit_price}` / `:missing_stop_price`
+  are `{:missing_field, :price | :stop_price}`; `{:invalid_order_amount, field, v}` is
+  `{:invalid_quantity | :invalid_quote_size | :invalid_price | :invalid_stop_price, v}` (a
+  close's `:size` is `{:invalid_quantity, v}`); **floats are refused** (they had been accepted
+  via `Decimal.from_float/1`); a blank `client_order_id` is refused (`"  "` was sent). Checks run
+  as request-is-a-map, unknown keys, symbol, side, type, time-in-force/pair, quantity, prices,
+  `client_order_id`, remaining optional fields, credentials, wire; credentials are now checked
+  explicitly before the wire by `place_order/3`, `preview_order/3`, `close_position/3` and
+  `replace_order/4`.
+- **BREAKING: floats are refused on the other money amounts that share the order parser**:
+  `schedule_futures_sweep/2` `:usd_amount` (`{:invalid_amount, 150.0}`; pass a `Decimal`,
+  integer or numeric string), a close's `:size` and `:leverage`. Fail closed: a float has lost
+  digits before it arrives.
+- **Every `Rest.validate_id/2` id (payment method, portfolio, trade, product, account uuid)
+  is refused when blank after trimming**, `Fake` included (`Fake.get_payment_method("  ")`
+  returned `:ok`). `Rest.validate_order_request/2` is removed; `Rest.order_plan/2` is the one
+  validator and has callers in `Rest` and `Fake`.
+- **BREAKING: `{:invalid_order_id, v}`** replaces `{:invalid_id, :order_id, v}` on `get_order/3`,
+  `cancel_order/3`, `replace_order/4` and `preview_replace/4`; an id blank after trimming is
+  refused (`"  "` was sent percent-encoded).
+- **BREAKING: a 404 on anything but a symbol is `{:refused, :not_found}`.** `{:refused,
+  :not_listed}` stays for the symbol reads (price, candles, trades, book, top of book, product,
+  symbols, futures position). Orders, accounts, payment methods, portfolios, conversions and
+  the rest used to say `:not_listed`.
+- **BREAKING: a transport failure keeps Core's tag.** `{:error, {:exchange_error, :coinbase,
+  message}}`; `classify/1` used to strip it to the bare message string.
+- **BREAKING: `{:edit_accepted_refetch_failed, order_id, reason}` is
+  `{:replace_accepted_unread, order_id, reason}`.**
+- **A comment in `Capabilities` said the endpoint had no post-only flag** while `Rest` sends
+  `post_only` on the limit GTC/GTD leaves; corrected. (`post_only` is a per-order flag, not an
+  order type, so `supported_order_types` is unchanged.)
+- **Fake: shares the real validator** (`Rest.order_plan/2`, which now also checks
+  `client_order_id`); returns the side as the atom (`"buy"` was echoed raw); a re-sent
+  caller-supplied `client_order_id` returns the original order instead of a second one; an
+  unknown order or conversion or account is `{:refused, :not_found}`.
+
 ## [0.3.112] - 2026-10-11
 
 ### Fixed

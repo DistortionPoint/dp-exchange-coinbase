@@ -110,7 +110,7 @@ defmodule DpExchange.Coinbase.Rest do
 
       case request(:get, path, credentials, opts, %{"limit" => 1}) do
         {:ok, %{body: body}} -> to_quote(body, symbol)
-        {:error, reason} -> classify(reason)
+        {:error, reason} -> classify(reason, :symbol)
       end
     end
   end
@@ -140,7 +140,7 @@ defmodule DpExchange.Coinbase.Rest do
 
       case request(:get, path, credentials, opts, params) do
         {:ok, %{body: body}} -> to_candles(body, symbol, timeframe)
-        {:error, reason} -> classify(reason)
+        {:error, reason} -> classify(reason, :symbol)
       end
     end
   end
@@ -326,7 +326,7 @@ defmodule DpExchange.Coinbase.Rest do
         {:error, :unexpected_response_shape}
 
       {:error, reason} ->
-        classify(reason)
+        classify(reason, :symbol)
     end
   end
 
@@ -500,7 +500,8 @@ defmodule DpExchange.Coinbase.Rest do
   defp segment(id) when is_binary(id), do: URI.encode(id, &URI.char_unreserved?/1)
 
   @doc """
-  Whether `id` can name one resource in a request path — a non-empty string.
+  Whether `id` can name one resource in a request path — a string that is not blank after
+  trimming (`"  "` names nothing either).
 
   `""` would turn `/payment_methods/{id}` into the list endpoint and answer the wrong
   question, and a `nil`, number or map interpolated into a path names nothing at all (and the
@@ -508,7 +509,10 @@ defmodule DpExchange.Coinbase.Rest do
   process for one). `name` labels the refusal: `{:error, {:invalid_id, name, id}}`.
   """
   @spec validate_id(term(), atom()) :: :ok | {:error, {:invalid_id, atom(), term()}}
-  def validate_id(id, _name) when is_binary(id) and id != "", do: :ok
+  def validate_id(id, name) when is_binary(id) do
+    if String.trim(id) == "", do: {:error, {:invalid_id, name, id}}, else: :ok
+  end
+
   def validate_id(id, name), do: {:error, {:invalid_id, name, id}}
 
   # Pages are collected AS PAGES and concatenated once, not folded with `acc ++ page`.
@@ -1225,7 +1229,7 @@ defmodule DpExchange.Coinbase.Rest do
     case request(:get, "/cfm/positions/#{segment(product_id)}", credentials, opts) do
       {:ok, %{body: %{"position" => position}}} when is_map(position) -> {:ok, position}
       {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+      {:error, reason} -> classify(reason, :symbol)
     end
   end
 
@@ -1373,7 +1377,10 @@ defmodule DpExchange.Coinbase.Rest do
 
   `opts[:usd_amount]` names the amount. **Omitting it sweeps every available excess dollar**
   — that is the venue's documented default, not this package's, and it is stated here
-  because a caller that thought a missing amount meant "nothing" would move the lot.
+  because a caller that thought a missing amount meant "nothing" would move the lot. A
+  present amount must be a `Decimal`, an integer or a numeric string, finite and positive
+  (`{:error, {:invalid_amount, v}}`); **a float is refused**, as on every order field: it
+  has already lost digits before it reaches this call.
 
   A `200` carrying `success: false` is `{:refused, :sweep_not_scheduled}`, not an `:ok`.
   """
@@ -1845,7 +1852,7 @@ defmodule DpExchange.Coinbase.Rest do
       case request(:get, path, credentials, opts) do
         {:ok, %{body: %{"product_id" => _id} = product}} -> {:ok, product}
         {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-        {:error, reason} -> classify(reason)
+        {:error, reason} -> classify(reason, :symbol)
       end
     end
   end
@@ -1899,22 +1906,6 @@ defmodule DpExchange.Coinbase.Rest do
     case normalise_credentials(credentials) do
       nil -> :ok
       present -> Auth.check_credentials(present)
-    end
-  end
-
-  @doc """
-  The local checks `place_order/3` and `preview_order/3` run on a request before sending:
-  identity (symbol, side, quantity), then the sparse order-type and time-in-force table,
-  then each leaf's required and refused fields, then the remaining keys: every key must be
-  one this package reads (`{:error, {:unsupported_order_field, key}}` otherwise).
-  `mode` is `:place` (the default) or `:preview`, which does not accept `:preview_id`.
-  """
-  @spec validate_order_request(term(), :place | :preview) :: :ok | {:error, term()}
-  def validate_order_request(request, mode \\ :place) do
-    with {:ok, _symbol, _side} <- order_identity(request),
-         {:ok, _configuration} <- order_configuration(request),
-         {:ok, _margin} <- margin_fields(request, mode) do
-      :ok
     end
   end
 
@@ -1984,7 +1975,8 @@ defmodule DpExchange.Coinbase.Rest do
 
   @doc """
   The local checks `replace_order/4` and `preview_replace/4` run on `changes`: only `:price`
-  and `:quantity`, and both, each a finite positive number.
+  and `:quantity`, and both, each a finite positive number (`{:invalid_price, v}` /
+  `{:invalid_quantity, v}`; a float is refused).
   """
   @spec validate_order_edit(term()) :: :ok | {:error, term()}
   def validate_order_edit(changes) do
@@ -1996,8 +1988,8 @@ defmodule DpExchange.Coinbase.Rest do
 
   @doc """
   `validate_order_edit/1` preceded by the order id check `replace_order/4` and
-  `preview_replace/4` run first: the id is a non-empty string
-  (`{:error, {:invalid_id, :order_id, v}}`), `nil` having sent `"order_id": null`.
+  `preview_replace/4` run first (`validate_order_id/1`, `{:error, {:invalid_order_id, v}}`),
+  `nil` having sent `"order_id": null`.
   """
   @spec validate_order_edit(term(), term()) :: :ok | {:error, term()}
   def validate_order_edit(order_id, changes) do
@@ -2008,7 +2000,7 @@ defmodule DpExchange.Coinbase.Rest do
   The local checks `close_position/3` runs before any request: `symbol` is a non-empty
   string (`{:invalid_symbol, v}`), `opts[:client_order_id]` is absent or a non-empty string
   (`{:invalid_client_order_id, v}`) and `opts[:size]` is absent or a finite positive number
-  (`{:invalid_order_amount, :size, v}`).
+  (`{:invalid_quantity, v}`; a float is refused).
   """
   @spec validate_close_request(term(), keyword()) :: :ok | {:error, term()}
   def validate_close_request(symbol, opts) do
@@ -2368,24 +2360,31 @@ defmodule DpExchange.Coinbase.Rest do
   #
   # The other four venue packages in this family all pass `raw_status: true` and match the
   # status exactly. This one now does too, and the statuses are named rather than inferred.
-  defp classify({:http_status, 404, _body}), do: {:refused, :not_listed}
+  #
+  # **`:not_listed` is for symbols only.** A 404 on an order, an account, a portfolio or a
+  # conversion is `{:refused, :not_found}` (`classify(reason)` with no kind); the symbol
+  # reads say `classify(reason, :symbol)`. One answer per kind of thing that can be missing.
+  #
+  # **A transport failure keeps Core's `{:exchange_error, :coinbase, message}` tag.** This
+  # used to strip it to the bare message string, so the same failure read differently here
+  # than on every sibling venue, and a caller could not tell a venue answer from a local one.
+  defp classify(reason, kind \\ :resource)
+
+  defp classify({:http_status, 404, _body}, :symbol), do: {:refused, :not_listed}
+  defp classify({:http_status, 404, _body}, :resource), do: {:refused, :not_found}
 
   # Permanent for the request as sent. A caller whose key was rotated signs again with the
   # new one, which is a different request rather than a retry of this one.
-  defp classify({:http_status, status, body}) when status in [400, 401, 403],
+  defp classify({:http_status, status, body}, _kind) when status in [400, 401, 403],
     do: {:refused, refusal(status, body)}
 
-  defp classify({:http_status, status, body}),
+  defp classify({:http_status, status, body}, _kind),
     do:
       {:error,
        {:exchange_error, :coinbase,
         "HTTP #{status}: #{inspect(body, limit: 50, printable_limit: 2_048)}"}}
 
-  defp classify({:exchange_error, _venue, message}) when is_binary(message),
-    do: {:error, message}
-
-  defp classify(message) when is_binary(message), do: {:error, message}
-  defp classify(reason), do: {:error, reason}
+  defp classify(reason, _kind), do: {:error, reason}
 
   # The venue's own words where it gave any, so a caller can see why it refused rather
   # than only that it did.
@@ -2489,7 +2488,7 @@ defmodule DpExchange.Coinbase.Rest do
         {:error, :unexpected_response_shape}
 
       {:error, reason} ->
-        classify(reason)
+        classify(reason, :symbol)
     end
   end
 
@@ -2635,7 +2634,7 @@ defmodule DpExchange.Coinbase.Rest do
             {:error, :unexpected_response_shape}
 
           {:error, reason} ->
-            classify(reason)
+            classify(reason, :symbol)
         end
       end
     end
@@ -2745,7 +2744,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:error, :unexpected_response_shape}
 
         {:error, reason} ->
-          classify(reason)
+          classify(reason, :symbol)
       end
     end
   end
@@ -3105,21 +3104,45 @@ defmodule DpExchange.Coinbase.Rest do
   be a non-empty string: `""` is not an id, and sending it would give the venue one shared
   key for every such order.
 
-  **A retry that finds the id already used may come back refused.** The spec says a
-  non-unique id creates no order and returns the original, but also lists
-  `DUPLICATE_CLIENT_ORDER_ID` among the failure reasons. A `{:refused, {:order_rejected,
-  "DUPLICATE_CLIENT_ORDER_ID"}}` for an id this caller already sent means the first attempt
-  may have been placed: look the order up with `get_orders/2` before sending it again.
+  ## An answer that does not prove the order: `{:order_unconfirmed, client_order_id, reason}`
+
+  Any outcome where the request MAY have reached the venue and success is not proven is
+  `{:error, {:order_unconfirmed, client_order_id, reason}}` (`reason` bounded), never a bare
+  `{:error, _}` and never `{:refused, _}`: a transport error or timeout after sending (the
+  retries exhausted included), a 5xx, a `2xx` whose body is not a map or carries no `success`,
+  and `DUPLICATE_CLIENT_ORDER_ID` (the id was already used, so an earlier attempt, possibly
+  this call's own internal retry, may have been placed). `client_order_id` is the id actually
+  sent, **including one generated here**, so the caller can look the order up with
+  `get_orders/2` before trying again. Errors decided before anything is sent (validation,
+  credentials, our own rate limiter refusing, a signing failure) are plain `{:error, reason}`.
+  A 400/401/403/404 is the venue answering without placing: `{:refused, _}`. Our own rate
+  limiter refusing is plain only when no attempt had been sent: the signer is counted per
+  attempt, so a refusal of an internal retry after an earlier attempt left the process (say
+  a 5xx) is `{:order_unconfirmed, ...}`.
+
+  ## Required fields, and fields the type does not use
+
+  `:order_type` and `:time_in_force` are required (`{:error, {:missing_field, key}}`); there
+  is no default. An unknown type is `{:error, {:unsupported_order_type, type}}`. A field the
+  chosen leaf cannot carry is `{:error, {:unexpected_field, key}}`, never dropped: `:price`
+  or `:stop_price` on a market order, `:stop_price` or `:quote_size` on a limit order,
+  `:post_only`, `:end_time` and `:stop_direction` where the leaf has no such field. A GTD
+  order needs `:end_time` (`{:error, {:missing_field, :end_time}}`).
+
+  Checks run in this order, each before anything is sent: request is a map
+  (`{:invalid_order_request, request}`), unknown keys (`{:unsupported_order_field, key}`),
+  symbol, side, type, time-in-force and the pair, quantity, price fields, `client_order_id`,
+  the remaining optional fields, credentials.
 
   ## Amounts
 
   `:quantity`, `:quote_size`, `:price` and `:stop_price` are accepted as a `Decimal`, an
-  integer, a float or a numeric string, and are refused with
-  `{:error, {:invalid_order_amount, field, value}}` unless they are finite and positive.
-  They are always sent in plain (never scientific) notation. `:side` must be `:buy` or
-  `:sell` (a string spelling is accepted); anything else is
-  `{:error, {:invalid_side, value}}` rather than being upcased and sent. A request that is
-  not a map is `{:error, {:invalid_order_request, request}}`.
+  integer or a numeric string and refused unless they are finite and positive:
+  `{:error, {:invalid_quantity | :invalid_quote_size | :invalid_price | :invalid_stop_price,
+  value}}`. **A float is refused**: it has already lost digits. Amounts are always sent in
+  plain (never scientific) notation. `:side` must be `:buy` or `:sell` (a string spelling is
+  accepted, case-insensitively); anything else is `{:error, {:invalid_side, value}}`. A
+  symbol that is not text or is blank is `{:error, {:invalid_symbol, value}}`.
 
   ## Perpetuals: `:leverage` and `:margin_type`
 
@@ -3135,30 +3158,34 @@ defmodule DpExchange.Coinbase.Rest do
   @spec place_order(map(), term(), keyword()) ::
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
   def place_order(credentials, request, opts) do
-    with {:ok, symbol, side} <- order_identity(request),
-         {:ok, configuration} <- order_configuration(request),
-         {:ok, margin} <- margin_fields(request, :place),
-         {:ok, client_order_id} <- client_order_id(Map.get(request, :client_order_id)) do
+    with {:ok, plan} <- order_plan(request, :place),
+         :ok <- validate_credentials(credentials) do
       body =
-        Map.merge(margin, %{
-          "client_order_id" => client_order_id,
-          "product_id" => SymbolFormat.to_exchange_symbol(symbol),
-          "side" => side |> to_string() |> String.upcase(),
-          "order_configuration" => configuration
+        Map.merge(plan.margin, %{
+          "client_order_id" => plan.client_order_id,
+          "product_id" => SymbolFormat.to_exchange_symbol(plan.symbol),
+          "side" => plan.side |> to_string() |> String.upcase(),
+          "order_configuration" => plan.configuration
         })
 
-      case post_json("/orders", body, credentials, opts) do
-        {:ok, %{body: response}} -> to_placed_order(response, request, side)
-        {:error, reason} -> classify(reason)
+      calls = :atomics.new(1, signed: false)
+
+      case post_json("/orders", body, credentials, opts, &counting(&1, calls)) do
+        {:ok, %{body: response}} -> to_placed_order(response, plan)
+        {:error, reason} -> write_error(reason, plan.client_order_id, {calls, opts})
       end
     end
   end
 
   # The venue requires the id and dedupes on it. Absent, one is generated; present, it must
-  # be a usable string. `"" || generate()` kept the empty string, and a non-string reached
-  # `Jason` as whatever it was.
+  # be a usable string. `"" || generate()` kept the empty string, a whitespace-only one is no
+  # id either, and a non-string reached `Jason` as whatever it was.
   defp client_order_id(nil), do: {:ok, generate_client_order_id()}
-  defp client_order_id(id) when is_binary(id) and id != "", do: {:ok, id}
+
+  defp client_order_id(id) when is_binary(id) do
+    if String.trim(id) == "", do: {:error, {:invalid_client_order_id, id}}, else: {:ok, id}
+  end
+
   defp client_order_id(other), do: {:error, {:invalid_client_order_id, other}}
 
   # `leverage` and `margin_type` of `NewOrderRequest` / `OrderPreviewRequest`, sent only when
@@ -3193,11 +3220,8 @@ defmodule DpExchange.Coinbase.Rest do
 
   @sor_preferences ["SOR_PREFERENCE_UNSPECIFIED", "SOR_ENABLED", "SOR_DISABLED"]
 
-  defp margin_fields(request, mode) do
-    allowed = if mode == :place, do: [:preview_id | @request_keys], else: @request_keys
-
-    with :ok <- known_request_keys(request, allowed),
-         {:ok, leverage} <- leverage_field(Map.get(request, :leverage)),
+  defp margin_fields(request) do
+    with {:ok, leverage} <- leverage_field(Map.get(request, :leverage)),
          {:ok, margin_type} <- margin_type_field(Map.get(request, :margin_type)),
          {:ok, portfolio} <- string_field(request, :retail_portfolio_id),
          {:ok, preview_id} <- string_field(request, :preview_id),
@@ -3249,7 +3273,7 @@ defmodule DpExchange.Coinbase.Rest do
   defp margin_type_field(value), do: {:error, {:invalid_margin_type, value}}
 
   # The sparse cross-product, written out. A pair absent from this table is absent from the
-  # venue, and `order_configuration/1` refuses rather than reaching for a neighbour.
+  # venue, and `order_tif_field/2` refuses rather than reaching for a neighbour.
   @configurations %{
     {:market, :ioc} => "market_market_ioc",
     {:market, :fok} => "market_market_fok",
@@ -3260,22 +3284,154 @@ defmodule DpExchange.Coinbase.Rest do
     {:stop_limit, :gtd} => "stop_limit_stop_limit_gtd"
   }
 
-  defp order_configuration(request) do
-    type = Map.get(request, :order_type, :limit)
-    tif = Map.get(request, :time_in_force, :gtc)
+  @doc """
+  The validated, normalised form of an order request: every check `place_order/3` and
+  `preview_order/3` run before sending, in their order, and what they would send.
 
-    case Map.fetch(@configurations, {type, tif}) do
-      {:ok, key} -> build_configuration(key, type, tif, request)
-      :error -> {:error, {:unsupported_order_combination, type, tif}}
+  `mode` is `:place` or `:preview` (which does not accept `:preview_id`). On success the map
+  carries `:symbol`, `:side` (an atom), `:order_type`, `:time_in_force`, `:quantity`,
+  `:price` and `:stop_price` (Decimals or `nil`), `:client_order_id` (the caller's, or a
+  generated one) with `:client_order_id_supplied?`, and the wire `:configuration` and
+  `:margin`. `DpExchange.Coinbase.Fake` builds its orders from this so it answers what the
+  real path would send.
+  """
+  @spec order_plan(term(), :place | :preview) :: {:ok, map()} | {:error, term()}
+  def order_plan(request, _mode) when not is_map(request),
+    do: {:error, {:invalid_order_request, request}}
+
+  def order_plan(request, mode) do
+    allowed = if mode == :place, do: [:preview_id | @request_keys], else: @request_keys
+
+    with :ok <- known_request_keys(request, allowed),
+         {:ok, symbol} <- order_symbol_field(request),
+         {:ok, side} <- order_side_field(request),
+         {:ok, type} <- order_type_field(request),
+         {:ok, tif} <- order_tif_field(request, type),
+         {:ok, normalised} <- leaf_amounts(type, tif, request),
+         {:ok, client_order_id} <- client_order_id(Map.get(request, :client_order_id)),
+         {:ok, margin} <- margin_fields(request),
+         {:ok, leaf} <- configuration_leaf(type, normalised) do
+      {:ok,
+       %{
+         symbol: symbol,
+         side: side,
+         order_type: type,
+         time_in_force: tif,
+         quantity: Map.get(normalised, :quantity),
+         price: Map.get(normalised, :price),
+         stop_price: Map.get(normalised, :stop_price),
+         client_order_id: client_order_id,
+         client_order_id_supplied?: Map.get(request, :client_order_id) != nil,
+         configuration: %{Map.fetch!(@configurations, {type, tif}) => leaf},
+         margin: margin
+       }}
     end
   end
 
-  @amount_fields [:quantity, :quote_size, :price, :stop_price]
+  # `:order_type` is required, never defaulted: a missing type used to become a limit order,
+  # and a request with no price and no type is not a market order either.
+  @order_types [:market, :limit, :stop_limit]
+
+  defp order_type_field(request) do
+    case Map.get(request, :order_type) do
+      nil -> {:error, {:missing_field, :order_type}}
+      type when type in @order_types -> {:ok, type}
+      other -> {:error, {:unsupported_order_type, other}}
+    end
+  end
+
+  # Every leaf this venue names carries a duration in its key, so `:time_in_force` is
+  # required for every type; a pair the venue does not name is refused, not neighboured.
+  defp order_tif_field(request, type) do
+    case Map.get(request, :time_in_force) do
+      nil ->
+        {:error, {:missing_field, :time_in_force}}
+
+      tif ->
+        if Map.has_key?(@configurations, {type, tif}),
+          do: {:ok, tif},
+          else: {:error, {:unsupported_order_combination, type, tif}}
+    end
+  end
+
+  # What each leaf's own schema carries beyond the base size. A field outside its leaf's list
+  # that the caller named is `{:unexpected_field, key}`: it used to be dropped without a word
+  # (`price` on a market order, `stop_price` on a limit), so the order placed was not the one
+  # asked for. `post_only`/`end_time`/`stop_direction` were refused per leaf with a 3-tuple.
+  @leaf_fields %{
+    {:market, :ioc} => [:quote_size],
+    {:market, :fok} => [:quote_size],
+    {:limit, :gtc} => [:price, :post_only],
+    {:limit, :gtd} => [:price, :post_only, :end_time],
+    {:limit, :fok} => [:price],
+    {:stop_limit, :gtc} => [:price, :stop_price, :stop_direction],
+    {:stop_limit, :gtd} => [:price, :stop_price, :stop_direction, :end_time]
+  }
+  @optional_fields [:price, :stop_price, :quote_size, :post_only, :end_time, :stop_direction]
+
+  # Sizing, then the fields the leaf does not carry, then price fields, then the rest of the
+  # leaf's own fields. Returns the request with its amounts as `Decimal`s.
+  defp leaf_amounts(type, tif, request) do
+    allowed = Map.fetch!(@leaf_fields, {type, tif})
+
+    with {:ok, sized} <- order_sizing(type, request),
+         :ok <- unexpected_fields(sized, allowed),
+         {:ok, priced} <- normalise_amounts([:price, :stop_price], sized),
+         :ok <- required_leaf_field(priced, allowed, :price),
+         :ok <- required_leaf_field(priced, allowed, :stop_price),
+         :ok <- required_leaf_field(priced, allowed, :end_time),
+         :ok <- valid_end_time(Map.get(priced, :end_time)),
+         {:ok, _post_only} <- post_only(priced) do
+      {:ok, priced}
+    end
+  end
+
+  # A market order sizes in base (`quantity`) or quote (`quote_size`), exactly one; any other
+  # type needs a base `quantity`.
+  defp order_sizing(:market, request) do
+    with {:ok, request} <- normalise_amounts([:quantity, :quote_size], request) do
+      case {Map.get(request, :quantity), Map.get(request, :quote_size)} do
+        {nil, nil} -> {:error, :missing_order_size}
+        {_quantity, nil} -> {:ok, request}
+        {nil, _quote_size} -> {:ok, request}
+        {_quantity, _quote_size} -> {:error, :ambiguous_order_size}
+      end
+    end
+  end
+
+  defp order_sizing(_type, request) do
+    with {:ok, _quantity} <- required_field(request, :quantity, {:missing_field, :quantity}) do
+      normalise_amounts([:quantity], request)
+    end
+  end
+
+  defp unexpected_fields(request, allowed) do
+    case Enum.find(@optional_fields, &(&1 not in allowed and Map.get(request, &1) != nil)) do
+      nil -> :ok
+      field -> {:error, {:unexpected_field, field}}
+    end
+  end
+
+  defp required_leaf_field(request, allowed, field) do
+    if field in allowed and Map.get(request, field) == nil,
+      do: {:error, {:missing_field, field}},
+      else: :ok
+  end
+
+  defp valid_end_time(nil), do: :ok
+  defp valid_end_time(%DateTime{}), do: :ok
+
+  defp valid_end_time(value) when is_binary(value) do
+    if String.trim(value) == "", do: {:error, {:invalid_end_time, value}}, else: :ok
+  end
+
+  defp valid_end_time(value), do: {:error, {:invalid_end_time, value}}
 
   # Every money field is parsed to a finite, positive `Decimal` before anything is built.
   # `wire_number/1` used to `to_string/1` whatever it was given: a float `1.0e-8` went out as
   # `"1.0e-8"` (an exponent the venue does not read), `"abc"` and `""` went out as-is, and
   # `0` or a negative size was sent for the venue to reject on a field it might not name.
+  # A float is refused outright now: it has lost digits before it gets here.
   defp normalise_amounts([], map), do: {:ok, map}
 
   defp normalise_amounts([field | rest], map) do
@@ -3292,12 +3448,18 @@ defmodule DpExchange.Coinbase.Rest do
       value ->
         case order_amount(value) do
           %Decimal{} = amount -> {:ok, Map.put(map, field, amount)}
-          nil -> {:error, {:invalid_order_amount, field, value}}
+          nil -> {:error, amount_error(field, value)}
         end
     end
   end
 
-  defp order_amount(value) when is_float(value), do: order_amount(Decimal.from_float(value))
+  defp amount_error(:quantity, value), do: {:invalid_quantity, value}
+  defp amount_error(:size, value), do: {:invalid_quantity, value}
+  defp amount_error(:quote_size, value), do: {:invalid_quote_size, value}
+  defp amount_error(:price, value), do: {:invalid_price, value}
+  defp amount_error(:stop_price, value), do: {:invalid_stop_price, value}
+
+  defp order_amount(value) when is_float(value), do: nil
 
   defp order_amount(value) do
     case decimal(value) do
@@ -3319,119 +3481,41 @@ defmodule DpExchange.Coinbase.Rest do
       Decimal.positive?(amount)
   end
 
-  defp build_configuration(key, type, tif, request) do
-    with {:ok, request} <- normalise_amounts(@amount_fields, request),
-         {:ok, leaf} <- configuration_leaf(type, tif, request) do
-      {:ok, %{key => leaf}}
-    end
-  end
-
-  # A market order sizes in base or quote; a limit order needs a price. Missing either is an
-  # error rather than a default, because a default here is a different order.
+  # The wire leaf, built from the amounts `leaf_amounts/3` already normalised and checked.
   #
   # Coinbase's per-leaf schemas do not all carry the same optional fields. `post_only` exists
   # on `LimitLimitGtc` and `LimitLimitGtd` but not `LimitLimitFok` or either stop-limit leaf;
   # `end_time` exists on `LimitLimitGtd` and `StopLimitStopLimitGtd` only; `stop_direction`
   # exists on both stop-limit leaves and nowhere else
   # (docs/reference/coinbase/openapi/at-spec.yaml:7765-7783 for the three limit leaves,
-  # :9596-9650 for the two stop-limit leaves). This used to add `post_only` and `end_time` to
-  # every limit or stop-limit leaf regardless of time-in-force, through one
-  # `configuration_leaf(:limit, request)` clause and one `configuration_leaf(:stop_limit,
-  # request)` clause shared across every `tif`. A caller's `post_only` on an FOK order, or an
-  # `end_time` on a GTC one, was sent inside a leaf whose own schema does not declare that
-  # field — not refused, not visibly dropped, just present in a shape the venue never
-  # documented. Splitting per `{type, tif}` means each leaf only ever carries the fields its
-  # own schema names, and a caller asking for a field a leaf cannot carry is refused locally
-  # rather than silently ignored.
-  defp configuration_leaf(:market, _tif, request) do
-    # Both sizes is two different orders. `quantity` silently won, so "spend $100" with a
-    # `quantity: 5` beside it bought five units at whatever they cost. Refused, not chosen.
+  # :9596-9650 for the two stop-limit leaves). `@leaf_fields` records that per `{type, tif}`
+  # and `unexpected_fields/2` refuses a field outside it, so a field present here is one the
+  # leaf's own schema names; this function only has to render what is there.
+  #
+  # Both sizes on a market order is two different orders: `quantity` silently won once, so
+  # "spend $100" with a `quantity: 5` beside it bought five units at whatever they cost.
+  # Refused in `order_sizing/2`, not chosen.
+  defp configuration_leaf(:market, request) do
     case {Map.get(request, :quantity), Map.get(request, :quote_size)} do
-      {nil, nil} -> {:error, :missing_order_size}
       {nil, quote_size} -> {:ok, %{"quote_size" => wire_number(quote_size)}}
-      {quantity, nil} -> {:ok, %{"base_size" => wire_number(quantity)}}
-      {_quantity, _quote_size} -> {:error, :ambiguous_order_size}
+      {quantity, _none} -> {:ok, %{"base_size" => wire_number(quantity)}}
     end
   end
 
-  defp configuration_leaf(:limit, :fok, request) do
-    with {:ok, price} <- required_field(request, :price, :missing_limit_price),
-         :ok <- refuse_unsupported_field(request, :post_only, :limit, :fok),
-         :ok <- refuse_unsupported_field(request, :end_time, :limit, :fok) do
-      {:ok, limit_leaf(request, price)}
-    end
-  end
-
-  defp configuration_leaf(:limit, :gtc, request) do
-    with {:ok, price} <- required_field(request, :price, :missing_limit_price),
-         {:ok, post_only} <- post_only(request),
-         :ok <- refuse_unsupported_field(request, :end_time, :limit, :gtc) do
-      {:ok, put_unless_nil(limit_leaf(request, price), "post_only", post_only)}
-    end
-  end
-
-  defp configuration_leaf(:limit, :gtd, request) do
-    with {:ok, price} <- required_field(request, :price, :missing_limit_price),
-         {:ok, post_only} <- post_only(request) do
+  defp configuration_leaf(_type, request) do
+    with {:ok, post_only} <- post_only(request),
+         {:ok, direction} <- stop_direction(Map.get(request, :stop_direction)) do
       leaf =
-        request
-        |> limit_leaf(price)
+        %{
+          "base_size" => wire_number(Map.fetch!(request, :quantity)),
+          "limit_price" => wire_number(Map.fetch!(request, :price))
+        }
+        |> put_unless_nil("stop_price", Map.get(request, :stop_price))
         |> put_unless_nil("post_only", post_only)
-        |> put_end_time(Map.get(request, :end_time))
-
-      {:ok, leaf}
-    end
-  end
-
-  defp configuration_leaf(:stop_limit, :gtc, request) do
-    with {:ok, price} <- required_field(request, :price, :missing_limit_price),
-         {:ok, stop} <- required_field(request, :stop_price, :missing_stop_price),
-         {:ok, direction} <- stop_direction(Map.get(request, :stop_direction)),
-         :ok <- refuse_unsupported_field(request, :post_only, :stop_limit, :gtc),
-         :ok <- refuse_unsupported_field(request, :end_time, :stop_limit, :gtc) do
-      leaf = put_unless_nil(stop_limit_leaf(request, price, stop), "stop_direction", direction)
-      {:ok, leaf}
-    end
-  end
-
-  defp configuration_leaf(:stop_limit, :gtd, request) do
-    with {:ok, price} <- required_field(request, :price, :missing_limit_price),
-         {:ok, stop} <- required_field(request, :stop_price, :missing_stop_price),
-         {:ok, direction} <- stop_direction(Map.get(request, :stop_direction)),
-         :ok <- refuse_unsupported_field(request, :post_only, :stop_limit, :gtd) do
-      leaf =
-        request
-        |> stop_limit_leaf(price, stop)
         |> put_unless_nil("stop_direction", direction)
         |> put_end_time(Map.get(request, :end_time))
 
       {:ok, leaf}
-    end
-  end
-
-  defp limit_leaf(request, price) do
-    %{
-      "base_size" => wire_number(Map.fetch!(request, :quantity)),
-      "limit_price" => wire_number(price)
-    }
-  end
-
-  defp stop_limit_leaf(request, price, stop) do
-    %{
-      "base_size" => wire_number(Map.fetch!(request, :quantity)),
-      "limit_price" => wire_number(price),
-      "stop_price" => wire_number(stop)
-    }
-  end
-
-  # A caller who explicitly asked for a field a leaf's own schema does not carry is refused
-  # locally rather than sent — see the note above `configuration_leaf/3` for why silently
-  # dropping it, the old behaviour on the leaves that DO carry it, is not the right answer
-  # for the leaves that never could.
-  defp refuse_unsupported_field(request, field, type, tif) do
-    case Map.get(request, field) do
-      nil -> :ok
-      _value -> {:error, {:unsupported_order_field, field, {type, tif}}}
     end
   end
 
@@ -3513,22 +3597,19 @@ defmodule DpExchange.Coinbase.Rest do
   defp put_raw_unless_nil(map, _key, nil), do: map
   defp put_raw_unless_nil(map, key, value), do: Map.put(map, key, value)
 
-  # The fields every order names, and `:quantity` for every type but a market order (which
-  # may be sized by `quote_size` instead — see `configuration_leaf/3`). `Map.fetch!/2` raised
-  # `KeyError` in the caller's process for each of them, on a money-moving call.
-  #
-  # A request that is not a map (`nil`, a keyword list) raised `BadMapError` from the first
-  # `Map.get/2` below, in the caller's process, on a money-moving call.
-  defp order_identity(request) when not is_map(request),
-    do: {:error, {:invalid_order_request, request}}
-
-  defp order_identity(request) do
+  # The fields every order names. `Map.fetch!/2` raised `KeyError` in the caller's process
+  # for each of them, on a money-moving call; a request that is not a map is refused by
+  # `order_plan/2` before any of these run.
+  defp order_symbol_field(request) do
     with {:ok, symbol} <- required_field(request, :symbol, {:missing_field, :symbol}),
-         {:ok, side} <- required_field(request, :side, {:missing_field, :side}),
-         :ok <- sized(request),
-         :ok <- order_symbol(symbol),
-         {:ok, side} <- order_side(side) do
-      {:ok, symbol, side}
+         :ok <- order_symbol(symbol) do
+      {:ok, symbol}
+    end
+  end
+
+  defp order_side_field(request) do
+    with {:ok, side} <- required_field(request, :side, {:missing_field, :side}) do
+      order_side(side)
     end
   end
 
@@ -3556,14 +3637,6 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp order_side(side), do: {:error, {:invalid_side, side}}
 
-  defp sized(%{order_type: :market}), do: :ok
-  defp sized(%{order_type: "market"}), do: :ok
-
-  defp sized(request) do
-    with {:ok, _quantity} <- required_field(request, :quantity, {:missing_field, :quantity}),
-         do: :ok
-  end
-
   defp required_field(request, key, error) do
     case Map.get(request, key) do
       nil -> {:error, error}
@@ -3583,29 +3656,118 @@ defmodule DpExchange.Coinbase.Rest do
   # The same holds when `success_response` is missing altogether: `success` is the only field
   # the spec requires on `NewOrderResponse` (at-spec.yaml:8177-8198), and an absent object is
   # no more evidence that nothing was placed than an unreadable one.
-  defp to_placed_order(%{"success" => true} = response, request, side) do
+  defp to_placed_order(%{"success" => true} = response, plan) do
     {:ok,
      %Types.Order{
        id: response |> Map.get("success_response") |> success_order_id(),
-       symbol: Map.get(request, :symbol),
-       side: side,
-       order_type: Map.get(request, :order_type, :limit),
-       time_in_force: Map.get(request, :time_in_force, :gtc),
-       # As Decimals, the type `Order` declares: the caller's raw value (a string, a float)
-       # was echoed as it came.
-       quantity: request |> Map.get(:quantity) |> decimal(),
-       price: request |> Map.get(:price) |> decimal(),
-       stop_price: request |> Map.get(:stop_price) |> decimal(),
+       symbol: plan.symbol,
+       side: plan.side,
+       order_type: plan.order_type,
+       time_in_force: plan.time_in_force,
+       # Decimals, the type `Order` declares; normalised by `order_plan/2`.
+       quantity: plan.quantity,
+       price: plan.price,
+       stop_price: plan.stop_price,
        status: :pending,
        provider: :coinbase
      }}
   end
 
-  defp to_placed_order(%{"success" => false} = response, _request, _side) do
-    {:refused, {:order_rejected, failure_reason(response)}}
+  # `DUPLICATE_CLIENT_ORDER_ID` is the venue saying the id was used before, which after an
+  # internal retry means THIS call's earlier attempt may have been placed. Refusing it as a
+  # rejection told the caller nothing was placed and invited a second order under a new id.
+  defp to_placed_order(%{"success" => false} = response, plan) do
+    reason = failure_reason(response)
+
+    if duplicate_client_order_id?(reason),
+      do: unconfirmed(plan.client_order_id, :duplicate_client_order_id),
+      else: {:refused, {:order_rejected, reason}}
   end
 
-  defp to_placed_order(_other, _request, _side), do: {:error, :unexpected_response_shape}
+  # A 2xx that is not a map, or is a map without `success`, proves nothing either way: the
+  # request reached the venue and what came back cannot be read as a yes or a no.
+  defp to_placed_order(_other, plan),
+    do: unconfirmed(plan.client_order_id, :unexpected_response_shape)
+
+  defp duplicate_client_order_id?(reason) when is_binary(reason),
+    do: String.contains?(reason, "DUPLICATE_CLIENT_ORDER_ID")
+
+  defp duplicate_client_order_id?(_reason), do: false
+
+  # **Unconfirmed writes.** The outcome of a write that may have reached the venue without
+  # proof that it did or did not act: carries the `client_order_id` actually sent (nil where
+  # the write has none) so the caller can look the order up before trying again.
+  defp unconfirmed(client_order_id, reason),
+    do: {:error, {:order_unconfirmed, client_order_id, bounded_reason(reason)}}
+
+  # An error from `post_json/4` for a write. A venue answer in the 4xx refusal set is a
+  # refusal; a failure decided BEFORE anything left this process (our own rate limiter, a
+  # signing or encoding failure) is a plain error; anything else may have reached the venue.
+  #
+  # `counted` is `{calls, opts}`, `calls` being the `counting/2` counter of this call's
+  # signer, or `nil` for a write sent once. A pre-send failure is plain only when NO attempt
+  # was sent before it: the same limiter refusal on a retry, after a first attempt left the
+  # process, is unconfirmed.
+  defp write_error(reason, client_order_id, counted) do
+    case classify(reason) do
+      {:refused, _reason} = refused ->
+        refused
+
+      {:error, inner} ->
+        if pre_send_failure?(reason) and sent_attempts(counted) == 0,
+          do: {:error, inner},
+          else: unconfirmed(client_order_id, inner)
+    end
+  end
+
+  # `Core.HttpClient` signs once per attempt, just before the limiter is asked (twice per
+  # attempt with a blocking limiter), so the count tells how many attempts really left the
+  # process: the last signature of a pre-send failure was never sent.
+  defp counting(signer, calls) do
+    fn ->
+      :atomics.add(calls, 1, 1)
+      signer.()
+    end
+  end
+
+  defp sent_attempts(nil), do: 0
+
+  defp sent_attempts({calls, opts}) do
+    signed = :atomics.get(calls, 1)
+
+    if Config.opt(opts, :rate_limit_blocking, false),
+      do: div(signed, 2),
+      else: max(signed - 1, 0)
+  end
+
+  defp pre_send_failure?({:exchange_error, _venue, :rate_limit_timeout}), do: true
+
+  defp pre_send_failure?({:exchange_error, _venue, "Throttled by our own rate limiter" <> _rest}),
+    do: true
+
+  defp pre_send_failure?({:exchange_error, _venue, "Rate limiter unavailable"}), do: true
+  defp pre_send_failure?({:exchange_error, _venue, _reason}), do: false
+  defp pre_send_failure?({:http_status, _status, _body}), do: false
+  defp pre_send_failure?({:response_too_large, _limit}), do: false
+  # What is left is raised before the request: the header function's signing error or
+  # `:unencodable_body`.
+  defp pre_send_failure?(_local), do: true
+
+  @max_unconfirmed_text 256
+
+  defp bounded_reason(reason) when is_atom(reason), do: reason
+
+  defp bounded_reason(reason) when is_binary(reason),
+    do: String.slice(reason, 0, @max_unconfirmed_text)
+
+  defp bounded_reason({:exchange_error, venue, message}) when is_atom(venue),
+    do: {:exchange_error, venue, bounded_reason(message)}
+
+  defp bounded_reason(reason) do
+    reason
+    |> inspect(limit: 20, printable_limit: 200)
+    |> String.slice(0, @max_unconfirmed_text)
+  end
 
   # `NewOrderErrorResponse` (place_order's and close_position's shared error shape — both
   # `NewOrderResponse.error_response` and `ClosePositionResponse.error_response` are the
@@ -3644,8 +3806,8 @@ defmodule DpExchange.Coinbase.Rest do
   # The body is **not** signed: this venue's JWT is scoped to the method and URI, so the
   # signature does not cover the payload (see `Auth.rest_headers/4`, whose body argument is
   # ignored on purpose).
-  defp post_json(path, body, credentials, opts),
-    do: json_request(:post, path, body, credentials, opts)
+  defp post_json(path, body, credentials, opts, wrap \\ &Function.identity/1),
+    do: json_request(:post, path, body, credentials, opts, wrap)
 
   # One attempt, for a write the venue cannot tell from its own repeat. `Core.HttpClient`
   # retries a 5xx or a transport error three times by default, and neither says whether the
@@ -3673,8 +3835,9 @@ defmodule DpExchange.Coinbase.Rest do
   # refuse locally, by name, rather than producing an unauthenticated POST for the venue
   # to reject as an opaque 401. A malformed `api_secret` reaching `place_order/3` used to
   # do exactly that.
-  defp json_request(method, path, body, credentials, opts) do
-    send_json_request(method, path, signer(method, @api_path <> path, credentials), body, opts)
+  defp json_request(method, path, body, credentials, opts, wrap \\ &Function.identity/1) do
+    signer = wrap.(signer(method, @api_path <> path, credentials))
+    send_json_request(method, path, signer, body, opts)
   end
 
   defp send_json_request(method, path, headers, body, opts) do
@@ -3737,19 +3900,18 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec cancel_order(map(), String.t(), keyword()) ::
           {:ok, :cancelled} | {:error, term()} | {:refused, term()}
-  def cancel_order(credentials, order_id, opts) when is_binary(order_id) and order_id != "" do
-    # Once, as `post_once/4` says: a cancel that took effect before a lost answer, retried,
-    # comes back "not there to cancel", a refusal for an order this call did cancel.
-    case post_once("/orders/batch_cancel", %{"order_ids" => [order_id]}, credentials, opts) do
-      {:ok, %{body: body}} -> cancel_result(body, order_id)
-      {:error, reason} -> classify(reason)
+  def cancel_order(credentials, order_id, opts) do
+    # `[nil]` or `[""]` is a batch that names no order; the venue's per-row answer for it
+    # would be `order_not_in_response` at best. Refused before anything is sent.
+    with :ok <- validate_order_id(order_id) do
+      # Once, as `post_once/4` says: a cancel that took effect before a lost answer, retried,
+      # comes back "not there to cancel", a refusal for an order this call did cancel.
+      case post_once("/orders/batch_cancel", %{"order_ids" => [order_id]}, credentials, opts) do
+        {:ok, %{body: body}} -> cancel_result(body, order_id)
+        {:error, reason} -> classify(reason)
+      end
     end
   end
-
-  # `[nil]` or `[""]` is a batch that names no order; the venue's per-row answer for it
-  # would be `order_not_in_response` at best. Refused before anything is sent.
-  def cancel_order(_credentials, order_id, _opts),
-    do: {:error, {:invalid_id, :order_id, order_id}}
 
   defp cancel_result(%{"results" => results}, order_id) when is_list(results) do
     # A row that is not an object cannot be about this order; it used to raise here.
@@ -3778,18 +3940,17 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec get_order(map(), String.t(), keyword()) ::
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
-  def get_order(credentials, order_id, opts) when is_binary(order_id) and order_id != "" do
-    case request(:get, "/orders/historical/#{segment(order_id)}", credentials, opts) do
-      {:ok, %{body: %{"order" => order}}} when is_map(order) -> to_order(order)
-      {:ok, %{body: _other}} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+  def get_order(credentials, order_id, opts) do
+    # `""` would build `/orders/historical/`, a different endpoint, `"  "` an id of spaces,
+    # and `nil` or a map would be interpolated into the path. None names an order.
+    with :ok <- validate_order_id(order_id) do
+      case request(:get, "/orders/historical/#{segment(order_id)}", credentials, opts) do
+        {:ok, %{body: %{"order" => order}}} when is_map(order) -> to_order(order)
+        {:ok, %{body: _other}} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
     end
   end
-
-  # `""` would build `/orders/historical/`, a different endpoint, and `nil` or a map would
-  # be interpolated into the path. None names an order.
-  def get_order(_credentials, order_id, _opts),
-    do: {:error, {:invalid_id, :order_id, order_id}}
 
   @doc """
   Orders, most recent first.
@@ -4099,14 +4260,13 @@ defmodule DpExchange.Coinbase.Rest do
   @spec preview_order(map(), term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_order(credentials, request, opts) do
-    with {:ok, symbol, side} <- order_identity(request),
-         {:ok, configuration} <- order_configuration(request),
-         {:ok, margin} <- margin_fields(request, :preview) do
+    with {:ok, plan} <- order_plan(request, :preview),
+         :ok <- validate_credentials(credentials) do
       body =
-        Map.merge(margin, %{
-          "product_id" => SymbolFormat.to_exchange_symbol(symbol),
-          "side" => side |> to_string() |> String.upcase(),
-          "order_configuration" => configuration
+        Map.merge(plan.margin, %{
+          "product_id" => SymbolFormat.to_exchange_symbol(plan.symbol),
+          "side" => plan.side |> to_string() |> String.upcase(),
+          "order_configuration" => plan.configuration
         })
 
       case post_json("/orders/preview", body, credentials, opts) do
@@ -4211,7 +4371,8 @@ defmodule DpExchange.Coinbase.Rest do
   @spec close_position(map(), String.t(), keyword()) ::
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
   def close_position(credentials, symbol, opts) do
-    with {:ok, client_order_id, size} <- close_request(symbol, opts) do
+    with {:ok, client_order_id, size} <- close_request(symbol, opts),
+         :ok <- validate_credentials(credentials) do
       body =
         %{
           "client_order_id" => client_order_id,
@@ -4219,9 +4380,11 @@ defmodule DpExchange.Coinbase.Rest do
         }
         |> put_unless_nil("size", size)
 
-      case post_json("/orders/close_position", body, credentials, opts) do
-        {:ok, %{body: response}} -> to_closing_order(response, symbol)
-        {:error, reason} -> classify(reason)
+      calls = :atomics.new(1, signed: false)
+
+      case post_json("/orders/close_position", body, credentials, opts, &counting(&1, calls)) do
+        {:ok, %{body: response}} -> to_closing_order(response, symbol, client_order_id)
+        {:error, reason} -> write_error(reason, client_order_id, {calls, opts})
       end
     end
   end
@@ -4236,7 +4399,7 @@ defmodule DpExchange.Coinbase.Rest do
 
   # A missing `success_response` is read the same way as an unreadable one: `success` is the
   # only field the spec requires of `ClosePositionResponse`'s envelope.
-  defp to_closing_order(%{"success" => true} = response, symbol) do
+  defp to_closing_order(%{"success" => true} = response, symbol, _client_order_id) do
     success = Map.get(response, "success_response")
 
     # The venue echoes the order it placed in `order_configuration`, which is the only
@@ -4260,11 +4423,16 @@ defmodule DpExchange.Coinbase.Rest do
      }}
   end
 
-  defp to_closing_order(%{"success" => false} = response, _symbol) do
-    {:refused, {:close_rejected, failure_reason(response)}}
+  defp to_closing_order(%{"success" => false} = response, _symbol, client_order_id) do
+    reason = failure_reason(response)
+
+    if duplicate_client_order_id?(reason),
+      do: unconfirmed(client_order_id, :duplicate_client_order_id),
+      else: {:refused, {:close_rejected, reason}}
   end
 
-  defp to_closing_order(_other, _symbol), do: {:error, :unexpected_response_shape}
+  defp to_closing_order(_other, _symbol, client_order_id),
+    do: unconfirmed(client_order_id, :unexpected_response_shape)
 
   # `@configurations` read backwards. The venue's single key names the type and the
   # time-in-force at once, so one lookup answers both — and a key this package does not know
@@ -4307,17 +4475,25 @@ defmodule DpExchange.Coinbase.Rest do
 
   A `200` carrying `success: false` is a refusal, as everywhere else on this venue.
 
-  **`{:error, {:edit_accepted_refetch_failed, order_id, reason}}` means the edit WAS
+  **`{:error, {:replace_accepted_unread, order_id, reason}}` means the edit WAS
   applied.** The venue accepted it, then the read-back of the order failed with `reason`.
   Do not retry the edit; read the order with `get_order/3` to learn its state.
+
+  **`{:error, {:order_unconfirmed, nil, reason}}` means the edit MAY have been applied**: the
+  request was sent and the answer was a transport failure, a 5xx or a `2xx` that is not a
+  readable `success` (sent once, never retried). The first element is `nil` because an edit
+  carries no `client_order_id`; read the order with `get_order/3` before editing again. Errors
+  decided before sending (validation, credentials, our own rate limiter) are plain
+  `{:error, reason}`.
   """
   @spec replace_order(map(), String.t(), term(), keyword()) ::
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
   def replace_order(credentials, order_id, changes, opts) do
-    with {:ok, body} <- edit_body(order_id, changes) do
+    with {:ok, body} <- edit_body(order_id, changes),
+         :ok <- validate_credentials(credentials) do
       case post_once("/orders/edit", body, credentials, opts) do
         {:ok, %{body: response}} -> edit_result(response, order_id, credentials, opts)
-        {:error, reason} -> classify(reason)
+        {:error, reason} -> write_error(reason, nil, nil)
       end
     end
   end
@@ -4339,8 +4515,19 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  defp edit_order_id(order_id) when is_binary(order_id) and order_id != "", do: :ok
-  defp edit_order_id(order_id), do: {:error, {:invalid_id, :order_id, order_id}}
+  defp edit_order_id(order_id), do: validate_order_id(order_id)
+
+  @doc """
+  The order-id check `get_order/3`, `cancel_order/3` and `replace_order/4` run first, before
+  the account option and credentials: an id that is `nil`, not text, or blank after trimming
+  is `{:error, {:invalid_order_id, value}}`. `"  "` used to be sent percent-encoded.
+  """
+  @spec validate_order_id(term()) :: :ok | {:error, {:invalid_order_id, term()}}
+  def validate_order_id(order_id) when is_binary(order_id) do
+    if String.trim(order_id) == "", do: {:error, {:invalid_order_id, order_id}}, else: :ok
+  end
+
+  def validate_order_id(order_id), do: {:error, {:invalid_order_id, order_id}}
 
   # `Map.keys/1` raised `BadMapError` for `nil` or a keyword list, in the caller's process.
   defp editable_changes(changes) when not is_map(changes),
@@ -4386,10 +4573,12 @@ defmodule DpExchange.Coinbase.Rest do
     # caller an edit that took effect had failed, and a caller retrying it edits twice or
     # cancels the order believing it unchanged. Found 2026-10-10 by reading this clause. The
     # refetch failure is wrapped, naming the order, so it cannot be mistaken for a failed edit.
+    # (`:replace_accepted_unread` is the family's name for it; it was
+    # `:edit_accepted_refetch_failed`.)
     case get_order(credentials, order_id, opts) do
       {:ok, _order} = ok -> ok
-      {:error, reason} -> {:error, {:edit_accepted_refetch_failed, order_id, reason}}
-      {:refused, reason} -> {:error, {:edit_accepted_refetch_failed, order_id, reason}}
+      {:error, reason} -> {:error, {:replace_accepted_unread, order_id, reason}}
+      {:refused, reason} -> {:error, {:replace_accepted_unread, order_id, reason}}
     end
   end
 
@@ -4397,8 +4586,10 @@ defmodule DpExchange.Coinbase.Rest do
     {:refused, {:edit_rejected, edit_failure(response)}}
   end
 
+  # A 2xx that is neither a `success: true` nor a `success: false` map proves nothing: the
+  # edit reached the venue and may have been applied.
   defp edit_result(_other, _order_id, _credentials, _opts),
-    do: {:error, :unexpected_response_shape}
+    do: unconfirmed(nil, :unexpected_response_shape)
 
   # `EditOrderError` (one entry of `EditOrderResponse.errors`) carries `edit_failure_reason`
   # and, as a second field, `preview_failure_reason`

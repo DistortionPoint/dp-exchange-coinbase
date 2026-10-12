@@ -100,9 +100,9 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
     end
 
     test "the fake refuses the same ids in the same shapes" do
-      for bad <- [nil, 1, %{}, ""] do
-        assert Fake.get_order(@credentials, bad) == {:error, {:invalid_id, :order_id, bad}}
-        assert Fake.cancel_order(@credentials, bad) == {:error, {:invalid_id, :order_id, bad}}
+      for bad <- [nil, 1, %{}, "", "  "] do
+        assert Fake.get_order(@credentials, bad) == {:error, {:invalid_order_id, bad}}
+        assert Fake.cancel_order(@credentials, bad) == {:error, {:invalid_order_id, bad}}
 
         assert Fake.get_payment_method(@credentials, bad) ==
                  {:error, {:invalid_id, :payment_method_id, bad}}
@@ -371,8 +371,8 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
             {[], nil, {:error, {:invalid_symbol, nil}}},
             {[], "", {:error, {:invalid_symbol, ""}}},
             {[client_order_id: ""], "BIT-28JUL23-CDE", {:error, {:invalid_client_order_id, ""}}},
-            {[size: "abc"], "BIT-28JUL23-CDE", {:error, {:invalid_order_amount, :size, "abc"}}},
-            {[size: 0], "BIT-28JUL23-CDE", {:error, {:invalid_order_amount, :size, 0}}}
+            {[size: "abc"], "BIT-28JUL23-CDE", {:error, {:invalid_quantity, "abc"}}},
+            {[size: 0], "BIT-28JUL23-CDE", {:error, {:invalid_quantity, 0}}}
           ] do
         assert expected == Rest.close_position(@credentials, symbol, close_opts ++ opts())
         assert expected == Fake.close_position(@credentials, symbol, close_opts)
@@ -385,7 +385,7 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
   describe "editing an order" do
     test "the fake refuses an id the real call refuses, before the credential" do
       changes = %{price: "1", quantity: "1"}
-      expected = {:error, {:invalid_id, :order_id, nil}}
+      expected = {:error, {:invalid_order_id, nil}}
 
       assert expected == Rest.replace_order(@credentials, nil, changes, opts())
       assert expected == Rest.preview_replace(@credentials, nil, changes, opts())

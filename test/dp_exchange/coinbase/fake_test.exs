@@ -7,6 +7,21 @@ defmodule DpExchange.Coinbase.FakeTest do
   @credentials %{api_key: "k", api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="}
   @missing {:error, {:missing_credentials, :coinbase}}
 
+  # A complete limit order: type and time-in-force are required, never defaulted.
+  defp limit_order(overrides \\ %{}) do
+    Map.merge(
+      %{
+        symbol: "BTC-USD",
+        side: :buy,
+        order_type: :limit,
+        time_in_force: :gtc,
+        quantity: Decimal.new("0.5"),
+        price: Decimal.new("40000")
+      },
+      overrides
+    )
+  end
+
   # The fake is a real implementation, so it gets real tests. The two rules it exists to
   # honour — less capable but never differently capable, and never rewriting a caller's
   # value — are what these assert.
@@ -16,7 +31,7 @@ defmodule DpExchange.Coinbase.FakeTest do
     # a map that cannot sign, before any request. The fake used to inspect none of them.
     test "every credentialed call, with the credential positional" do
       one = Decimal.new("1")
-      request = %{symbol: "BTC-USD", side: :buy, quantity: one, price: one}
+      request = limit_order(%{quantity: one, price: one})
       edit = %{price: Decimal.new("1"), quantity: Decimal.new("1")}
 
       for bad <- [nil, %{}, %{api_key: "k"}, %{api_key: 1, api_secret: "s"}] do
@@ -58,7 +73,7 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert @missing == Fake.get_conversion("t-1", from: "USD", to: "USDC")
 
       opts = [from: "USD", to: "USDC", credentials: @credentials]
-      assert {:refused, :not_listed} = Fake.commit_conversion("t-1", opts)
+      assert {:refused, :not_found} = Fake.commit_conversion("t-1", opts)
     end
 
     test "the argument checks come first where the real function runs them first" do
@@ -87,16 +102,16 @@ defmodule DpExchange.Coinbase.FakeTest do
   describe "orders are validated by the real checks, in the real order" do
     test "an order with no symbol or side is an error, not a KeyError" do
       assert {:error, {:missing_field, :symbol}} =
-               Fake.place_order(@credentials, %{side: :buy, quantity: Decimal.new("1")})
+               Fake.place_order(@credentials, Map.delete(limit_order(), :symbol))
 
       assert {:error, {:missing_field, :side}} =
-               Fake.place_order(@credentials, %{symbol: "BTC-USD", quantity: Decimal.new("1")})
+               Fake.place_order(@credentials, Map.delete(limit_order(), :side))
     end
 
     test "a limit order with no price is refused, as is a market order with no size" do
-      limit = %{symbol: "BTC-USD", side: :buy, quantity: Decimal.new("1")}
-      assert {:error, :missing_limit_price} = Fake.place_order(@credentials, limit)
-      assert {:error, :missing_limit_price} = Fake.preview_order(@credentials, limit)
+      limit = Map.delete(limit_order(), :price)
+      assert {:error, {:missing_field, :price}} = Fake.place_order(@credentials, limit)
+      assert {:error, {:missing_field, :price}} = Fake.preview_order(@credentials, limit)
 
       market = %{symbol: "BTC-USD", side: :buy, order_type: :market, time_in_force: :ioc}
       assert {:error, :missing_order_size} = Fake.place_order(@credentials, market)
@@ -106,12 +121,66 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert {:error, {:missing_field, :symbol}} = Fake.place_order(%{}, %{side: :buy})
     end
 
+    test "type and time-in-force are required, and a field the type does not use is refused" do
+      assert {:error, {:missing_field, :order_type}} =
+               Fake.place_order(@credentials, Map.delete(limit_order(), :order_type))
+
+      assert {:error, {:missing_field, :time_in_force}} =
+               Fake.place_order(@credentials, Map.delete(limit_order(), :time_in_force))
+
+      assert {:error, {:unexpected_field, :stop_price}} =
+               Fake.place_order(@credentials, limit_order(%{stop_price: "1"}))
+
+      market = %{symbol: "BTC-USD", side: :buy, order_type: :market, time_in_force: :ioc}
+
+      assert {:error, {:unexpected_field, :price}} =
+               Fake.place_order(@credentials, Map.merge(market, %{quantity: "1", price: "1"}))
+    end
+
     test "the placed order carries Decimals, as the real return does" do
-      request = %{symbol: "BTC-USD", side: :buy, quantity: "0.5", price: 40_000.5}
+      request = limit_order(%{quantity: "0.5", price: "40000.5"})
 
       assert {:ok, order} = Fake.place_order(@credentials, request)
       assert Decimal.equal?(order.quantity, Decimal.new("0.5"))
       assert Decimal.equal?(order.price, Decimal.new("40000.5"))
+    end
+
+    test "a float amount is refused, as the real path refuses it" do
+      assert {:error, {:invalid_price, 40_000.5}} =
+               Fake.place_order(@credentials, limit_order(%{price: 40_000.5}))
+    end
+
+    test "the side comes back as the atom the real path returns, not the caller's string" do
+      assert {:ok, %Types.Order{side: :buy}} =
+               Fake.place_order(@credentials, limit_order(%{side: "BUY"}))
+
+      assert {:error, {:invalid_side, "hold"}} =
+               Fake.place_order(@credentials, limit_order(%{side: "hold"}))
+    end
+
+    test "client_order_id is checked as the real path checks it" do
+      for bad <- ["", "  ", 5] do
+        assert {:error, {:invalid_client_order_id, ^bad}} =
+                 Fake.place_order(@credentials, limit_order(%{client_order_id: bad}))
+      end
+    end
+
+    test "re-sending a client_order_id returns the original order, as the idempotent venue does" do
+      request = limit_order(%{client_order_id: "mine-1"})
+
+      assert {:ok, first} = Fake.place_order(@credentials, request)
+      assert {:ok, again} = Fake.place_order(@credentials, request)
+      assert again == first
+
+      assert {:ok, [_canned, _placed] = orders} = Fake.get_orders(@credentials)
+      assert Enum.count(orders, &(&1.id == first.id)) == 1
+
+      assert {:ok, other} = Fake.place_order(@credentials, limit_order(%{client_order_id: "b"}))
+      refute other.id == first.id
+
+      assert {:ok, one} = Fake.place_order(@credentials, limit_order())
+      assert {:ok, two} = Fake.place_order(@credentials, limit_order())
+      refute one.id == two.id
     end
 
     test "a replace read-back shows both edited fields" do
@@ -122,8 +191,8 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert Decimal.equal?(order.quantity, Decimal.new("0.75"))
     end
 
-    test "an unknown order is the venue's 404, {:refused, :not_listed}" do
-      assert {:refused, :not_listed} = Fake.get_order(@credentials, "no-such-order")
+    test "an unknown order is the venue's 404, {:refused, :not_found}" do
+      assert {:refused, :not_found} = Fake.get_order(@credentials, "no-such-order")
     end
 
     test ":status and :symbol narrow the list instead of being ignored" do
@@ -340,7 +409,7 @@ defmodule DpExchange.Coinbase.FakeTest do
 
     test "a uuid the fake does not hold is refused, not an empty account" do
       # `{:ok, []}` would read as "this account has nothing in it".
-      assert {:refused, :not_listed} = Fake.get_accounts(@credentials, uuid: "nope")
+      assert {:refused, :not_found} = Fake.get_accounts(@credentials, uuid: "nope")
     end
 
     test "the fake's own uuid reads back" do
@@ -606,12 +675,7 @@ defmodule DpExchange.Coinbase.FakeTest do
     end
 
     test "preview_order issues a UUID preview id, as the venue's preview_id" do
-      request = %{
-        symbol: "BTC-USD",
-        side: :buy,
-        quantity: Decimal.new("0.5"),
-        price: Decimal.new("40000")
-      }
+      request = limit_order()
 
       assert {:ok, %{preview_id: preview_id}} = Fake.preview_order(@credentials, request)
       assert preview_id =~ @uuid
@@ -620,12 +684,12 @@ defmodule DpExchange.Coinbase.FakeTest do
 
   describe "an order the fake placed is the order it reads back and cancels" do
     defp eth_sell do
-      %{
+      limit_order(%{
         symbol: "ETH-USD",
         side: :sell,
         quantity: Decimal.new("2"),
         price: Decimal.new("3000")
-      }
+      })
     end
 
     test "place -> get -> list -> cancel -> get -> cancel again" do
@@ -660,7 +724,7 @@ defmodule DpExchange.Coinbase.FakeTest do
     end
 
     test "an id the fake never issued answers as the venue's 404 and unknown cancel" do
-      assert {:refused, :not_listed} = Fake.get_order(@credentials, "never-issued")
+      assert {:refused, :not_found} = Fake.get_order(@credentials, "never-issued")
 
       assert {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}} =
                Fake.cancel_order(@credentials, "never-issued")
@@ -698,8 +762,8 @@ defmodule DpExchange.Coinbase.FakeTest do
     test "replace_order on an id the fake never issued is the venue's 404" do
       edit = %{price: Decimal.new("1"), quantity: Decimal.new("1")}
 
-      assert {:refused, :not_listed} = Fake.replace_order(@credentials, "never-issued", edit)
-      assert {:refused, :not_listed} = Fake.get_order(@credentials, "never-issued")
+      assert {:refused, :not_found} = Fake.replace_order(@credentials, "never-issued", edit)
+      assert {:refused, :not_found} = Fake.get_order(@credentials, "never-issued")
     end
 
     test "close_position mints an id that reads back and cancels, one per call" do

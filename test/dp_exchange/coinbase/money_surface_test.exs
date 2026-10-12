@@ -286,7 +286,7 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
     test "a 404 on a payment method is a refusal, not an error" do
       # The account asked about a method the venue does not hold. Retrying cannot help,
       # which is what separates a refusal from an error here.
-      assert {:refused, :not_listed} =
+      assert {:refused, :not_found} =
                Rest.get_payment_method(@credentials, "pm-gone",
                  plug: failing(404),
                  retry_attempts: 0
