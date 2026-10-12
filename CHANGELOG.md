@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.119] - 2026-10-12
+
 Tick U: test-suite quality, regression review of tick T.
 
 ### Fixed
