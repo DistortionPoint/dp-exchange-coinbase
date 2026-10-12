@@ -20,6 +20,77 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **BREAKING: `{:invalid_symbols, v}` carries the caller's whole argument** from `subscribe`,
+  `unsubscribe` and `update_symbols` (facade, `Feed` and Fake): `["BTC-USD", "  "]` comes
+  back as given. It was only the bad elements (`["  "]`, capped at five).
+
+Family non-order write conventions (tick Q: W1 unconfirmed writes, W3 results, W4 amounts,
+W5 return types, W6 fakes, W7 reads), in `Rest`, `Prime` and `Fake` alike. Nothing here was
+run against the live venue; the portfolio parameter's behaviour for CDP keys is unmeasured.
+
+- **BREAKING: an unconfirmed non-order write is `{:error, {:write_unconfirmed, key, reason}}`.**
+  `transfer_internal/4`, `schedule_futures_sweep/2`, `cancel_futures_sweep/2`,
+  `commit_conversion/2`, `create_account/1`, `rename_account/3`, `delete_portfolio/3`,
+  `set_intraday_margin_setting/3` and the Prime writes `stake/3`, `unstake/3` and
+  `claim_rewards/4`. Old -> new: a transport error or `5xx` after the send was a bare
+  `{:error, {:exchange_error, :coinbase, _}}`; a `2xx` that is not an object was
+  `{:error, :unexpected_response_shape}`; a conversion commit the venue accepted but whose
+  trade had no id or an unknown status was `{:error, {:missing_required_field, :id}}` /
+  `{:error, {:unknown_conversion_status, _}}`; a created portfolio with no uuid was
+  `{:error, {:missing_required_field, :id}}`; Prime's `unwrap/1` dropped the generated
+  idempotency key on a final failure. `key` is what was sent: the Prime `idempotency_key`
+  (generated ones included), the trade id for a commit, the portfolio uuid for a delete,
+  `nil` where the venue gives the call no key. A venue `400`/`401`/`403`/`404` stays
+  `{:refused, _}`, except a Prime `4xx` that answers one of the call's own internal retries
+  (W2), which is unconfirmed because the earlier attempt may have been accepted. Validation,
+  credentials, our own rate limiter refusing before any send and signing failures stay plain
+  `{:error, _}`; the signer is counted (as `place_order/3` counts it) wherever a call retries,
+  so a limiter refusal of a retry after a sent attempt is unconfirmed. `Types.Conversion`
+  enforces a non-nil `:id` and `:status`, so a commit with neither cannot return a struct
+  with `nil`s (W3); it is `write_unconfirmed` keyed by the trade id.
+- **BREAKING: `stake/3` and `unstake/3` return a `Core.Types.StakingTransaction`** (Core's
+  callback type) in the real path and the Fake, not Prime's raw map (`"currency"`,
+  `"portfolio_id"`, `"scope"`, `"settled"` keys are gone from the Fake's answer). `id` is
+  Prime's `transaction_id`; an unstake carries `amount_remaining` equal to the requested
+  amount. A `2xx` with no `transaction_id` is `write_unconfirmed` with the key. The `Prime`
+  functions still return the raw maps.
+- **BREAKING: a wallet-scoped `stake/3` / `unstake/3` verifies the asset against the wallet.**
+  The wallet-scoped bodies carry no currency, so the `asset` argument was ignored: naming
+  `"ETH"` for a wallet holding `SOL` staked the SOL. The package now reads
+  `GET /portfolios/{pid}/wallets/{wid}` (`Wallet.symbol`) first: mismatch is
+  `{:error, {:wallet_asset_mismatch, asked, held}}`, an unreadable symbol is
+  `{:error, {:wallet_asset_unverified, :unexpected_response_shape}}`, and a failed read is
+  returned as it came; nothing is written. One extra signed `GET` per wallet-scoped write.
+  The asset is also validated in the wallet scope now (`{:invalid_asset, v}`; it was only
+  validated for the portfolio scope).
+- **Fake staking parity (W6).** `Fake.stake/3` and `Fake.unstake/3` share
+  `Prime.validate_write/3` with the real path, so they now refuse a non-UUID or `""`
+  `idempotency_key`, a non-map `:extra` and an amount beyond the 64-place exponent bound,
+  as Prime does. Each placement has a unique id (a reused key answers with the original).
+- **BREAKING: `transfer_internal/4` with the same portfolio on both sides is
+  `{:error, {:invalid_transfer, :same_account}}`** (it was sent), in `Rest` and the Fake. The
+  facade's `Keyword.merge(request_opts, opts)` (the third argument wins on a repeated key) is
+  now documented on `DpExchange.Coinbase.transfer_internal/4`.
+- **BREAKING: `portfolio:` is honoured by `get_balances/2`, `get_accounts/2`, `get_orders/2`
+  and `get_trade_history/2`**, sent as the spec's `retail_portfolio_id` (deprecated, "only
+  applicable for legacy keys"; at-spec.yaml accounts, orders/historical/batch and fills).
+  It used to be ignored. A blank or non-string value is `{:invalid_option, :portfolio, v}`;
+  `get_accounts(uuid:, portfolio:)` and the futures reads (`get_positions/1`,
+  `list_futures_positions/1`, `get_futures_position/2`, which have no such parameter) are
+  `{:error, {:unsupported_option, :portfolio}}`. The Fake scopes by it (another portfolio
+  holds nothing).
+- **BREAKING: `get_positions/1` refuses a position row it cannot read as a whole
+  `Types.Position`.** An UNKNOWN (or any other than `LONG`/`SHORT`) side is
+  `{:error, {:unknown_position_side, v}}` and an absent, unreadable, zero or negative
+  `number_of_contracts` is `{:error, {:invalid_position_quantity, v}}`; they were reported
+  with `side: nil` / `quantity: nil`, which the type forbids. `list_futures_positions/1` is
+  unchanged.
+- Tests: `non_order_writes_test.exs`; additions in `prime_staking_test.exs`,
+  `portfolios_test.exs`, `convert_test.exs`, `money_surface_test.exs` and `futures_test.exs`;
+  `spec_examples_test.exs` answers the wallet read.
+
 ## [0.3.113] - 2026-10-12
 
 ### Fixed

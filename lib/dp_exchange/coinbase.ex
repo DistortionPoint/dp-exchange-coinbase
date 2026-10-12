@@ -49,7 +49,7 @@ defmodule DpExchange.Coinbase do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Coinbase.{Feed, Prime, Rest, Supervisor, SymbolFormat}
+  alias DpExchange.Coinbase.{Feed, IdempotencyKey, Prime, Rest, Supervisor, SymbolFormat}
   alias DpExchange.Core.{Capabilities, Config, Venue}
 
   # The venue serves none of these. **That is a claim about Coinbase, not about how far
@@ -839,6 +839,21 @@ defmodule DpExchange.Coinbase do
   this stakes on that wallet; without, it stakes across the portfolio. The two are
   different operations, so neither is inferred from the other.
 
+  **Returns a `Core.Types.StakingTransaction`** (`id` is Prime's `transaction_id`, `amount`
+  what was requested, `type: :stake`), not Prime's raw map. With `opts[:wallet_id]` the
+  `asset` is checked against the wallet's own symbol before anything is written
+  (`{:error, {:wallet_asset_mismatch, asked, held}}`, or `{:wallet_asset_unverified, _}`
+  when it cannot be read): the wallet body carries no currency, so the wallet decides what
+  is staked.
+
+  **Unconfirmed writes carry the idempotency key.** Every call sends an `idempotency_key`
+  (`opts[:idempotency_key]` or one generated for the call), and the call retries internally
+  only because of it. A transport failure or `5xx` after the send, a `2xx` whose body is not
+  an object or names no `transaction_id`, or a `4xx` answered to an internal retry is
+  `{:error, {:write_unconfirmed, key, reason}}`: the stake may exist, and `key` is what to
+  retry with or reconcile by. Validation, missing credentials and our own rate limiter
+  refusing before any send stay plain errors.
+
   See `DpExchange.Coinbase.Prime` for the endpoints themselves and for what has and has
   not been measured.
   """
@@ -854,25 +869,38 @@ defmodule DpExchange.Coinbase do
   and arrives in parts; `unstake_status/4` is what reports progress. A caller treating this
   return value as settled will spend an asset it does not have yet.
 
-  Scope and credentials work exactly as they do on `stake/3`.
+  Scope, credentials, the wallet-asset check and the `write_unconfirmed` answer work exactly
+  as they do on `stake/3`. Returns a `Core.Types.StakingTransaction` with `type: :unstake`
+  and `amount_remaining` equal to the requested amount: the acceptance carries no progress,
+  so nothing has been reported paid.
   """
   @impl true
   def unstake(asset, amount, opts) do
     prime_write(:unstake, asset, amount, opts)
   end
 
+  # The result is a `Types.StakingTransaction` (the Core callback's type), not Prime's raw map.
+  # The idempotency key is fixed HERE, before the call, so that a `2xx` whose body names no
+  # transaction can still answer `{:write_unconfirmed, key, _}` with the key that was sent.
   defp prime_write(operation, asset, amount, opts) do
     credentials = Keyword.get(opts, :credentials, %{})
+    key = Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate()
+    opts = Keyword.put(opts, :idempotency_key, key)
 
-    case {Keyword.get(opts, :portfolio_id), Keyword.get(opts, :wallet_id)} do
-      {nil, _wallet} ->
-        {:error, :missing_portfolio}
+    result =
+      case {Keyword.get(opts, :portfolio_id), Keyword.get(opts, :wallet_id)} do
+        {nil, _wallet} ->
+          {:error, :missing_portfolio}
 
-      {portfolio, nil} ->
-        prime_portfolio(operation, credentials, portfolio, asset, amount, opts)
+        {portfolio, nil} ->
+          prime_portfolio(operation, credentials, portfolio, asset, amount, opts)
 
-      {portfolio, wallet} ->
-        prime_wallet(operation, credentials, portfolio, wallet, asset, amount, opts)
+        {portfolio, wallet} ->
+          prime_wallet(operation, credentials, portfolio, wallet, asset, amount, opts)
+      end
+
+    with {:ok, body} <- result do
+      Prime.to_staking_transaction(body, operation, asset, amount, key)
     end
   end
 
@@ -1071,7 +1099,18 @@ defmodule DpExchange.Coinbase do
   Moves funds between two of this account's portfolios.
 
   See `DpExchange.Coinbase.Rest.transfer_internal/4`. Nothing leaves Coinbase, and both
-  portfolio uuids are required — `opts[:from]` and `opts[:to]`, neither defaulted.
+  portfolio uuids are required — `opts[:from]` and `opts[:to]`, neither defaulted, and not
+  the same portfolio (`{:error, {:invalid_transfer, :same_account}}`).
+
+  **The two option lists are merged, the third argument winning.** `opts` (the callback's
+  third argument, where `:from` / `:to` belong) and `request_opts` (the fourth: `:credentials`,
+  `:plug`, `:timeout`, …) are combined as `Keyword.merge(request_opts, opts)`, so a key given
+  in both takes the value from `opts`. The credential is read from `request_opts` only.
+
+  The amount is a finite, positive `Decimal`; a float, integer or string is
+  `{:error, {:invalid_amount, v}}`. An unconfirmed move — a transport failure or `5xx` after
+  the send, or a `2xx` that is not an object — is `{:error, {:write_unconfirmed, nil, reason}}`
+  (the call is sent once and the venue gives it no key): reconcile before moving again.
   """
   @impl true
   def transfer_internal(asset, amount, opts, request_opts),

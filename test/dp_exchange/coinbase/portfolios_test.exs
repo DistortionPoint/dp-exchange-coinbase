@@ -224,14 +224,63 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
       assert raw == ""
     end
 
-    test "an unreadable response on each write is refused" do
+    test "an unreadable 2xx on each write is unconfirmed, never a plain error" do
       opts = [plug: responding(%{}), retry_attempts: 0]
 
-      assert {:error, :unexpected_response_shape} =
+      assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
                Rest.create_portfolio(@credentials, [name: "X"] ++ opts)
 
-      assert {:error, :unexpected_response_shape} =
+      assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
                Rest.rename_portfolio(@credentials, "pf-1", "X", opts)
+
+      # A delete is keyed by the portfolio it names, so the caller can reconcile on it.
+      assert {:error, {:write_unconfirmed, "pf-1", :unexpected_response_shape}} =
+               Rest.delete_portfolio(@credentials, "pf-1",
+                 plug: responding(["not", "an", "object"]),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a created portfolio whose uuid is unreadable is unconfirmed: it may exist" do
+      body = %{"portfolio" => %{"name" => "X"}}
+
+      assert {:error, {:write_unconfirmed, nil, reason}} =
+               Rest.create_portfolio(@credentials,
+                 name: "X",
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert is_binary(reason)
+      assert reason =~ "missing_required_field"
+    end
+
+    test "a 500 on each write is unconfirmed and a 4xx is still a refusal" do
+      server_error = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(500, Jason.encode!(%{"error" => "nope"}))
+      end
+
+      denied = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(403, Jason.encode!(%{"message" => "no"}))
+      end
+
+      opts = [plug: server_error, retry_attempts: 0]
+
+      assert {:error, {:write_unconfirmed, nil, {:exchange_error, :coinbase, _text}}} =
+               Rest.create_portfolio(@credentials, [name: "X"] ++ opts)
+
+      assert {:error, {:write_unconfirmed, nil, {:exchange_error, :coinbase, _text}}} =
+               Rest.rename_portfolio(@credentials, "pf-1", "X", opts)
+
+      assert {:error, {:write_unconfirmed, "pf-1", {:exchange_error, :coinbase, _text}}} =
+               Rest.delete_portfolio(@credentials, "pf-1", opts)
+
+      assert {:refused, _reason} =
+               Rest.create_portfolio(@credentials, name: "X", plug: denied, retry_attempts: 0)
     end
 
     test "a 500 is an error on each of the five" do

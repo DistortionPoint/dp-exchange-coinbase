@@ -29,6 +29,24 @@ of two ways, and which one it is depends on what the endpoint gives it:
   None has a key the venue honours. Before 0.3.49 they were retried, so a timed-out move could move the funds
   twice. A transport error on one of these means **the outcome is unknown**: read the
   portfolio, sweep, conversion or order back before issuing it again.
+- **BREAKING: `{:error, {:write_unconfirmed, key, reason}}` is the answer for an unconfirmed
+  non-order write.** Returned by `transfer_internal/4`, `schedule_futures_sweep/2`,
+  `cancel_futures_sweep/2`, `commit_conversion/2`, `create_account/1` / `rename_account/3` /
+  `delete_portfolio/3`, `set_intraday_margin_setting/3`, and the Prime writes `stake/3`,
+  `unstake/3` and `claim_rewards/4`, when the request MAY have reached the venue and success
+  is not proven: a transport error or timeout after the send, a `5xx`, a `2xx` whose body is
+  not an object or lacks what the result needs (a conversion commit with no `trade`, no id or
+  a status this package does not know; a created portfolio with no uuid; a Prime stake with
+  no `transaction_id`), or a `4xx` answered to an internal RETRY of a keyed Prime write.
+  `key` is what was sent that you retry or reconcile by: the Prime `idempotency_key`
+  (generated ones included), the trade id for a commit, the portfolio uuid for a delete, and
+  `nil` where the venue gives the call no key (a move, a sweep, a create, a rename, a setting).
+  Old -> new: those cases were a bare `{:error, {:exchange_error, :coinbase, _}}` or
+  `{:error, :unexpected_response_shape}` (or, for a commit with an unreadable trade,
+  `{:error, {:unknown_conversion_status, _}}` / `{:error, {:missing_required_field, :id}}`),
+  all of which read as "nothing happened". A venue `400`/`401`/`403`/`404` still answers
+  `{:refused, _}`. Validation, credentials, our own rate limiter refusing before a send and
+  a signing failure stay plain `{:error, _}`.
 - **`{:error, {:replace_accepted_unread, order_id, reason}}` from `replace_order/4`
   means the edit WAS applied.** The read-back of the order failed afterwards. Do not edit
   again; read the order with `get_order/3`. (It was `:edit_accepted_refetch_failed`.)
@@ -752,6 +770,16 @@ spot sits in one held with **Coinbase Inc**. `get_futures_balance_summary/2` nam
 `cfm_usd_balance`, `cbi_usd_balance`, `total_usd_balance` — and **sizing a futures position
 against the total is sizing against money that is not there.**
 
+**BREAKING: `get_positions/1` refuses a row it cannot read as a whole `Types.Position`.** A
+row whose `side` is not `LONG` or `SHORT` (the venue's `UNKNOWN` included) is
+`{:error, {:unknown_position_side, value}}`, and one whose `number_of_contracts` is absent,
+unreadable, zero or negative is `{:error, {:invalid_position_quantity, value}}`. They used to
+come back as `side: nil` / `quantity: nil` positions, which `Core.Types.Position` does not
+allow (`:long | :short`, positive size). `list_futures_positions/1` still returns the venue's
+rows untouched. The futures endpoints take no portfolio, so `portfolio:` on
+`get_positions/1`, `list_futures_positions/1` or `get_futures_position/2` is
+`{:error, {:unsupported_option, :portfolio}}`.
+
 `get_positions/1` returns CFM positions. Its `:realised_pnl` is `nil` and that is not an
 omission: the venue publishes `daily_realized_pnl`, which is what the position realised
 *today*, and putting a daily number in a field that means the position's answers a different
@@ -808,6 +836,35 @@ and `nil` for a wallet) answers `{:error, {:invalid_portfolio_id, value}}` or
 canonical 8-4-4-4-12 hex form, as the spec requires (`{:error, {:invalid_idempotency_key,
 value}}` otherwise): the venue answers a repeated key with the first response, so `""` made
 every later stake a copy of the first.
+
+**BREAKING: `stake/3` and `unstake/3` return a `Core.Types.StakingTransaction`**, as the Core
+callback says, not Prime's raw map. `id` is Prime's `transaction_id`, `amount` what you asked
+for, `type` is `:stake` or `:unstake`, `asset` is upper-cased. An unstake carries
+`amount_remaining` equal to the requested amount (the acceptance reports no progress; nothing
+is reported paid, and `unstake_status/4` is what moves it) and a stake leaves it `nil`. The
+raw map is still what `Prime.stake_portfolio/5`, `Prime.stake_wallet/6` and the other
+`Prime` functions return. The Fake returns the same struct with a unique id per placement (a
+reused `:idempotency_key` answers with the original) and refuses what the real path refuses,
+in the same order: the asset in both scopes, the amount and its 64-place bound, a UUID key, a
+map `:extra`, then the Prime credentials.
+
+**BREAKING: a wallet-scoped `stake/3` / `unstake/3` verifies the asset against the wallet
+first.** The wallet bodies carry no currency, so the wallet decides what is staked, and an
+`asset` that disagreed was silently ignored (naming `"ETH"` for a `SOL` wallet staked the
+SOL). The package now reads `GET /portfolios/{pid}/wallets/{wid}` (`Wallet.symbol`) and
+compares, case-insensitively: a mismatch is `{:error, {:wallet_asset_mismatch, asked,
+held}}`, a wallet whose symbol cannot be read is `{:error, {:wallet_asset_unverified,
+:unexpected_response_shape}}`, and a failed read comes back as it came (`{:refused, _}` for
+a `4xx`, `{:error, _}` otherwise). Nothing is written in any of those cases. This costs one
+extra signed `GET` per wallet-scoped write; `Prime.preview_unstake_wallet/6` does not check
+(it moves nothing). The Fake has no wallet inventory, so it accepts the asset it is given.
+
+**An unconfirmed staking write is `{:error, {:write_unconfirmed, idempotency_key, reason}}`.**
+Every staking write sends an `idempotency_key` (yours, or one generated for the call) and
+retries internally only because of it. The key in the error is the one that was sent, so
+retrying with it cannot stake twice. See the `write_unconfirmed` entry at the top of this
+file for what counts as unconfirmed; a `4xx` that answers one of the call's own retries is
+also unconfirmed rather than a refusal.
 
 **An order request key is read or refused by name.** `place_order/3` and `preview_order/3`
 accept the contract's keys plus `quote_size`, `stop_price`, `stop_direction`, `post_only`,
@@ -1050,6 +1107,18 @@ you want from the list. On `get_balances/2` and `get_accounts/2` it must be an i
 `get_orders/2` returned one page until 0.3.36. If you built your own cursor loop on top of
 it, it now returns the whole set and your loop will see a single page with nothing after it.
 
+**BREAKING: `portfolio:` is honoured, not ignored.** `get_balances/2`, `get_accounts/2`,
+`get_orders/2` and `get_trade_history/2` send `opts[:portfolio]` as the spec's
+`retail_portfolio_id` query parameter (they used to drop it, answering for whichever
+portfolio the key defaults to). A non-string or blank value is
+`{:error, {:invalid_option, :portfolio, value}}`; `get_accounts(uuid: _, portfolio: _)` is
+`{:error, {:unsupported_option, :portfolio}}` (the single-account read has no such
+parameter). **The spec marks `retail_portfolio_id` deprecated and "only applicable for legacy
+keys; CDP keys default to the key's permissioned portfolio"** — what the venue does with it
+for a CDP key is unmeasured, which is why it is sent as given and never swapped for the
+key's own. The Fake scopes by it too (its data belongs to its one default portfolio;
+another holds nothing).
+
 ## A malformed argument to a private call is refused by name, before anything is sent
 
 None of these raises in your process, and the fake runs the same check in the same order
@@ -1074,7 +1143,11 @@ None of these raises in your process, and the fake runs the same check in the sa
 - **Conversions and transfers.** `quote_conversion/4` needs a finite positive `Decimal`, and
   `from`/`to` must be non-empty strings; `opts[:from]`/`opts[:to]` on commit and read, and
   on `transfer_internal/4`, may not be `""`. `transfer_internal/4` also needs a non-empty
-  asset (`{:invalid_asset, v}`). A portfolio name (`create_account/1`, `rename_account/3`)
+  asset (`{:invalid_asset, v}`), and the same portfolio on both sides moves nothing and is
+  `{:error, {:invalid_transfer, :same_account}}`. The amount is a finite positive `Decimal`
+  (a float, integer or string is `{:invalid_amount, v}`). The callback's two option lists are
+  merged as `Keyword.merge(request_opts, opts)`, so the third argument (`opts`) wins over the
+  fourth (`request_opts`) on a repeated key. A portfolio name (`create_account/1`, `rename_account/3`)
   may not be `""` (`{:error, :name_required}`).
 - **`Prime.query_transaction_validators/3`** takes at most 100 transaction ids, each a
   non-empty string (`{:error, {:invalid_transaction_ids, ids}}`) — the spec's stated limit.

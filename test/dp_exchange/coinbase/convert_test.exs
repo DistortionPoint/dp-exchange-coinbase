@@ -272,11 +272,56 @@ defmodule DpExchange.Coinbase.ConvertTest do
       assert {:error, :unexpected_response_shape} =
                Rest.quote_conversion(@credentials, "USD", "USDC", Decimal.new("1"), opts)
 
-      assert {:error, :unexpected_response_shape} =
+      # The commit MAY have happened: not a plain error, and keyed by the trade committed.
+      assert {:error, {:write_unconfirmed, "t-1", :unexpected_response_shape}} =
                Rest.commit_conversion(@credentials, "t-1", [from: "USD", to: "USDC"] ++ opts)
 
       assert {:error, :unexpected_response_shape} =
                Rest.get_conversion(@credentials, "t-1", [from: "USD", to: "USDC"] ++ opts)
+    end
+
+    test "a commit the venue accepted but whose trade cannot be read is unconfirmed" do
+      accounts = [from: "USD", to: "USDC", retry_attempts: 0]
+
+      # A status this package does not know, and an id the trade does not carry. Both leave
+      # no `Types.Conversion` to return (it enforces `:id` and `:status`), and a plain error
+      # would read as "nothing happened" to a caller about to commit again.
+      assert {:error, {:write_unconfirmed, "t-1", unknown}} =
+               Rest.commit_conversion(
+                 @credentials,
+                 "t-1",
+                 accounts ++ [plug: responding(trade(%{"status" => "TRADE_STATUS_NEW"}))]
+               )
+
+      assert is_binary(unknown)
+      assert unknown =~ "unknown_conversion_status"
+
+      assert {:error, {:write_unconfirmed, "t-1", missing}} =
+               Rest.commit_conversion(
+                 @credentials,
+                 "t-1",
+                 accounts ++ [plug: responding(trade(%{"id" => nil}))]
+               )
+
+      assert missing =~ "missing_required_field"
+    end
+
+    test "a commit answered 500 is unconfirmed, and 404 is a refusal" do
+      status = fn code ->
+        fn conn ->
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(code, Jason.encode!(%{"error" => "nope"}))
+        end
+      end
+
+      accounts = [from: "USD", to: "USDC", retry_attempts: 0]
+
+      assert {:error, {:write_unconfirmed, "t-1", {:exchange_error, :coinbase, _text}}} =
+               Rest.commit_conversion(@credentials, "t-1", accounts ++ [plug: status.(500)])
+
+      assert {:refused, :not_found} =
+               Rest.commit_conversion(@credentials, "t-1", accounts ++ [plug: status.(404)])
     end
 
     test "a 500 is an error" do

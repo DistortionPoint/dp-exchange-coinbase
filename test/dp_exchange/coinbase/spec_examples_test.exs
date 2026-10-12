@@ -95,6 +95,25 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
     end
   end
 
+  # A wallet-scoped Prime stake or unstake first reads `GET .../wallets/{wid}` and compares
+  # `wallet.symbol` (prime-spec.yaml `Wallet.symbol`, "the asset stored in the wallet") with
+  # the asset it was told. That read is answered as a wallet holding `symbol`; the write is
+  # captured as `capturing/2` does.
+  defp capturing_wallet(body, test_pid, symbol) do
+    write = capturing(body, test_pid)
+    wallet = Jason.encode!(%{"wallet" => %{"id" => "wal-1", "symbol" => symbol}})
+
+    fn conn ->
+      if conn.method == "GET" do
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, wallet)
+      else
+        write.(conn)
+      end
+    end
+  end
+
   # `get_accounts.json`/`get_historical_orders.json` document the vendor's own
   # `has_next: true` example verbatim (see README) — sent as-is, this would page forever
   # against a plug answering the same body every time. Every walking endpoint's own test
@@ -625,7 +644,9 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       assert {:ok, result} =
                Rest.transfer_internal(@credentials, "USD", Decimal.new("10"),
                  from: "8bfc20d7-f7c6-4422-bf07-8243ca4169fe",
-                 to: "8bfc20d7-f7c6-4422-bf07-8243ca4169fe",
+                 # The same portfolio on both sides is refused locally; any other uuid will
+                 # do, the stub answers the spec's response whatever was sent.
+                 to: "3f2a9c1e-7b64-4d08-9e15-a0c2b7d4f681",
                  plug: responding(body),
                  retry_attempts: 0
                )
@@ -1113,7 +1134,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       assert {:ok, response} =
                Prime.stake_wallet(@prime_credentials, "pf-1", "wal-1", "eth", Decimal.new("16"),
                  idempotency_key: "6f1d2a40-0000-4000-8000-000000000013",
-                 plug: capturing(body, me),
+                 plug: capturing_wallet(body, me, "ETH"),
                  retry_attempts: 0
                )
 
@@ -1138,7 +1159,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       assert {:ok, _response} =
                Prime.unstake_wallet(@prime_credentials, "pf-1", "wal-1", "eth", Decimal.new("8"),
                  idempotency_key: "6f1d2a40-0000-4000-8000-000000000014",
-                 plug: capturing(body, me),
+                 plug: capturing_wallet(body, me, "ETH"),
                  retry_attempts: 0
                )
 

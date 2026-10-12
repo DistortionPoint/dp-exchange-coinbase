@@ -115,8 +115,10 @@ defmodule DpExchange.Coinbase.ReadSymbolTest do
                )
     end
 
-    test "a wallet-scoped call does not raise on an asset the real path never sends" do
-      assert {:ok, %{"scope" => "wallet", "currency" => nil}} =
+    test "a wallet-scoped call refuses an asset that is not a name, as the real path does" do
+      # The wallet body carries no currency, so the real path now VERIFIES the asset against
+      # the wallet; an asset that cannot name one is `{:invalid_asset, _}` in both scopes.
+      assert {:error, {:invalid_asset, :eth}} =
                Fake.stake(:eth, Decimal.new("1"),
                  portfolio_id: "pf-1",
                  wallet_id: "w-1",

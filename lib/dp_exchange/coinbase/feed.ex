@@ -2434,15 +2434,15 @@ defmodule DpExchange.Coinbase.Feed do
   # refuses exactly as the real feed does.
   @doc """
   `:ok` for a proper list of strings that are not blank after trimming, else
-  `{:error, {:invalid_symbols, term}}`. A whitespace-only string (`" "`) is blank, and an
-  improper list is refused whole rather than raising.
+  `{:error, {:invalid_symbols, term}}`. A whitespace-only string (`" "`) is blank. The
+  error carries the caller's WHOLE argument as given (`["BTC-USD", "  "]`, not just the bad
+  element), and an improper list comes back as itself rather than raising.
   """
   @spec check_symbols(term()) :: :ok | {:error, {:invalid_symbols, term()}}
   def check_symbols(symbols) when is_list(symbols) do
     case invalid_symbols(symbols, []) do
-      :improper -> {:error, {:invalid_symbols, symbols}}
       [] -> :ok
-      invalid -> {:error, {:invalid_symbols, invalid |> Enum.reverse() |> Enum.take(5)}}
+      _invalid_or_improper -> {:error, {:invalid_symbols, symbols}}
     end
   end
 

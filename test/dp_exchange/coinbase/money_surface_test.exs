@@ -164,6 +164,44 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
                Rest.transfer_internal(@credentials, "USD", Decimal.new("1"), from: "src-uuid")
     end
 
+    test "the same portfolio on both sides moves nothing and is refused before a request" do
+      # No plug: reaching HTTP would fail the test on the connection, not on the guard.
+      assert {:error, {:invalid_transfer, :same_account}} =
+               Rest.transfer_internal(@credentials, "USD", Decimal.new("1"),
+                 from: "same-uuid",
+                 to: "same-uuid"
+               )
+
+      assert {:error, {:invalid_transfer, :same_account}} =
+               Fake.transfer_internal(
+                 "USD",
+                 Decimal.new("1"),
+                 [from: "same-uuid", to: "same-uuid"],
+                 credentials: @credentials
+               )
+    end
+
+    test "the facade merges its two option lists with the third argument winning" do
+      me = self()
+
+      assert {:ok, _result} =
+               DpExchange.Coinbase.transfer_internal(
+                 "USD",
+                 Decimal.new("1"),
+                 [from: "from-in-opts", to: "to-in-opts"],
+                 from: "from-in-request-opts",
+                 to: "to-in-request-opts",
+                 credentials: @credentials,
+                 plug: capturing(%{}, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:request, "POST", _path, raw}
+      decoded = Jason.decode!(raw)
+      assert decoded["source_portfolio_uuid"] == "from-in-opts"
+      assert decoded["target_portfolio_uuid"] == "to-in-opts"
+    end
+
     test "a small amount is sent in full notation, not scientific" do
       # `Decimal.to_string/1` would render this as 1E-8, which the venue does not read as a
       # number. The amount would be wrong by eight orders of magnitude or rejected outright.
@@ -298,8 +336,8 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
                Rest.list_payment_methods(@credentials, plug: failing(500), retry_attempts: 0)
     end
 
-    test "a 500 on a move is an error and moves nothing" do
-      assert {:error, _reason} =
+    test "a 500 on a move is unconfirmed: it may have moved the funds" do
+      assert {:error, {:write_unconfirmed, nil, _reason}} =
                Rest.transfer_internal(@credentials, "USD", Decimal.new("1"),
                  from: "a",
                  to: "b",
@@ -308,14 +346,24 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
                )
     end
 
-    test "a move answering with something other than a map is unreadable" do
+    test "a 4xx on a move stays a refusal: the venue declined it" do
+      assert {:refused, _reason} =
+               Rest.transfer_internal(@credentials, "USD", Decimal.new("1"),
+                 from: "a",
+                 to: "b",
+                 plug: failing(403),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a move answering 2xx with something other than a map is unconfirmed" do
       plug = fn conn ->
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
         |> Plug.Conn.resp(200, Jason.encode!(["not", "a", "map"]))
       end
 
-      assert {:error, :unexpected_response_shape} =
+      assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
                Rest.transfer_internal(@credentials, "USD", Decimal.new("1"),
                  from: "a",
                  to: "b",

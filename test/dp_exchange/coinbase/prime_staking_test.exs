@@ -14,7 +14,7 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Coinbase.{Fake, Prime}
-  alias DpExchange.Core.Config
+  alias DpExchange.Core.{Config, Types}
 
   @moduletag :capture_log
 
@@ -41,7 +41,10 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
     signing_key: "prime-signing-key"
   }
 
-  defp capturing(body, test_pid) do
+  # A wallet-scoped stake or unstake first READS the wallet (`GET .../wallets/{wid}`) to check
+  # the asset it was told against the asset the wallet holds. This stub answers that read as a
+  # wallet holding ETH; every other request gets `body`.
+  defp capturing(body, test_pid, wallet_symbol \\ "ETH") do
     fn conn ->
       {:ok, raw, conn} = Plug.Conn.read_body(conn)
 
@@ -50,14 +53,23 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
         {:request, conn.method, conn.request_path, raw, Enum.into(conn.req_headers, %{})}
       )
 
+      reply =
+        if wallet_read?(conn), do: %{"wallet" => %{"symbol" => wallet_symbol}}, else: body
+
       conn
       |> Plug.Conn.put_resp_content_type("application/json")
-      |> Plug.Conn.resp(200, Jason.encode!(body))
+      |> Plug.Conn.resp(200, Jason.encode!(reply))
     end
   end
 
+  defp wallet_read?(conn) do
+    conn.method == "GET" and
+      Regex.match?(~r{\A/v1/portfolios/[^/]+/wallets/[^/]+\z}, conn.request_path)
+  end
+
   defp opts(test_pid, extra \\ []) do
-    Keyword.merge([plug: capturing(%{"ok" => true}, test_pid), retry_attempts: 0], extra)
+    ok = %{"ok" => true, "transaction_id" => "txn-1"}
+    Keyword.merge([plug: capturing(ok, test_pid), retry_attempts: 0], extra)
   end
 
   describe "the two scopes reach two different paths" do
@@ -601,23 +613,60 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       assert {:error, :missing_portfolio} = Fake.unstake("ETH", Decimal.new("1"))
     end
 
-    test "the scope follows the wallet, as it does in the package" do
-      assert {:ok, portfolio} =
-               Fake.stake("ETH", Decimal.new("1"),
-                 portfolio_id: "pf-1",
-                 credentials: @credentials
-               )
+    test "both scopes answer a StakingTransaction, as the real facade does" do
+      for extra <- [[], [wallet_id: "w-9"]] do
+        assert {:ok, %Types.StakingTransaction{} = tx} =
+                 Fake.stake(
+                   "eth",
+                   Decimal.new("1"),
+                   [portfolio_id: "pf-1", credentials: @credentials] ++ extra
+                 )
 
-      assert portfolio["scope"] == "portfolio"
+        assert tx.type == :stake
+        assert tx.asset == "ETH"
+        assert Decimal.equal?(tx.amount, Decimal.new("1"))
+        assert tx.amount_remaining == nil
+        assert tx.provider == :coinbase
+        assert is_binary(tx.id) and tx.id != ""
+      end
+    end
 
-      assert {:ok, wallet} =
-               Fake.stake("ETH", Decimal.new("1"),
-                 portfolio_id: "pf-1",
-                 wallet_id: "w-9",
-                 credentials: @credentials
-               )
+    test "each placement gets its own id, and a reused idempotency key answers the original" do
+      opts = [portfolio_id: "pf-1", credentials: @credentials]
 
-      assert wallet["scope"] == "wallet"
+      assert {:ok, first} = Fake.stake("ETH", Decimal.new("1"), opts)
+      assert {:ok, second} = Fake.stake("ETH", Decimal.new("1"), opts)
+      refute first.id == second.id
+
+      keyed = [idempotency_key: "6f1d2a40-0000-4000-8000-000000000009"] ++ opts
+      assert {:ok, a} = Fake.stake("ETH", Decimal.new("1"), keyed)
+      assert {:ok, b} = Fake.stake("ETH", Decimal.new("1"), keyed)
+      assert a.id == b.id
+    end
+
+    test "the fake refuses what Prime.validate_write refuses, in the same order" do
+      one = Decimal.new("1")
+      base = [portfolio_id: "pf-1", credentials: @credentials]
+
+      # Not a UUID, empty, or not a string: the real path refuses all three.
+      for bad <- ["", "not-a-uuid", 7] do
+        expected = {:error, {:invalid_idempotency_key, bad}}
+        assert expected == Fake.stake("ETH", one, [idempotency_key: bad] ++ base)
+        assert expected == Fake.unstake("ETH", one, [idempotency_key: bad] ++ base)
+        real = [idempotency_key: bad, retry_attempts: 0]
+        assert expected == Prime.stake_portfolio(@credentials, "pf-1", "ETH", one, real)
+      end
+
+      assert {:error, {:invalid_extra, "x"}} = Fake.stake("ETH", one, [extra: "x"] ++ base)
+
+      # The 64-place exponent bound the real path applies to every amount.
+      wide = %Decimal{sign: 1, coef: 1, exp: 999_999_999}
+      assert {:error, {:invalid_amount, ^wide}} = Fake.stake("ETH", wide, base)
+      assert {:error, {:invalid_amount, ^wide}} = Fake.unstake("ETH", wide, base)
+
+      # The asset is checked in the wallet scope too.
+      assert {:error, {:invalid_asset, :eth}} =
+               Fake.stake(:eth, one, [wallet_id: "w-1"] ++ base)
     end
 
     test "a stake without Prime credentials, or with an unsendable amount, is refused" do
@@ -634,14 +683,16 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
                )
     end
 
-    test "an unstake is not settled" do
-      assert {:ok, result} =
+    test "an unstake is not settled: the whole amount is still remaining" do
+      assert {:ok, %Types.StakingTransaction{} = tx} =
                Fake.unstake("ETH", Decimal.new("1"),
                  portfolio_id: "pf-1",
                  credentials: @credentials
                )
 
-      assert result["settled"] == false
+      assert tx.type == :unstake
+      assert Decimal.equal?(tx.amount_remaining, Decimal.new("1"))
+      assert Types.StakingTransaction.settled?(tx) == false
     end
   end
 
@@ -1038,6 +1089,373 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       assert_received {:timestamp, [first]}
       assert_received {:timestamp, [second]}
       assert String.to_integer(second) > String.to_integer(first)
+    end
+  end
+
+  describe "a wallet-scoped write is checked against the wallet's own asset" do
+    test "an asset that is not the wallet's is refused and nothing is written" do
+      me = self()
+      plug = capturing(%{"transaction_id" => "txn-1"}, me, "SOL")
+      real = [plug: plug, retry_attempts: 0]
+      one = Decimal.new("1")
+
+      assert {:error, {:wallet_asset_mismatch, "ETH", "SOL"}} =
+               Prime.stake_wallet(@credentials, "pf-1", "w-1", "ETH", one, real)
+
+      assert {:error, {:wallet_asset_mismatch, "ETH", "SOL"}} =
+               Prime.unstake_wallet(@credentials, "pf-1", "w-1", "ETH", one, real)
+
+      assert {:error, {:wallet_asset_mismatch, "ETH", "SOL"}} =
+               DpExchange.Coinbase.stake(
+                 "ETH",
+                 one,
+                 [credentials: @credentials, portfolio_id: "pf-1", wallet_id: "w-1"] ++ real
+               )
+
+      # The wallet was read once per call, and never written to.
+      assert_receive {:request, "GET", "/v1/portfolios/pf-1/wallets/w-1", _raw, _headers}, 5_000
+      refute_received {:request, "POST", _path, _raw, _headers}
+    end
+
+    test "the comparison ignores case and the matching write goes out" do
+      me = self()
+      ok = %{"transaction_id" => "txn-9"}
+      real = [plug: capturing(ok, me, "eth"), retry_attempts: 0]
+
+      assert {:ok, _body} =
+               Prime.stake_wallet(@credentials, "pf-1", "w-1", "ETH", Decimal.new("1"), real)
+
+      assert_receive {:request, "GET", "/v1/portfolios/pf-1/wallets/w-1", _raw, _headers}, 5_000
+
+      assert_receive {:request, "POST", "/v1/portfolios/pf-1/wallets/w-1/staking/initiate", _r,
+                      _h},
+                     5_000
+    end
+
+    test "a wallet whose symbol cannot be read is not staked: the asset is unverified" do
+      me = self()
+
+      for body <- [%{}, %{"wallet" => %{}}, %{"wallet" => %{"symbol" => ""}}] do
+        plug = fn conn ->
+          {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+          send(me, {:method, conn.method})
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(200, Jason.encode!(body))
+        end
+
+        assert {:error, {:wallet_asset_unverified, :unexpected_response_shape}} =
+                 Prime.stake_wallet(@credentials, "pf-1", "w-1", "ETH", Decimal.new("1"),
+                   plug: plug,
+                   retry_attempts: 0
+                 )
+      end
+
+      assert_receive {:method, "GET"}, 5_000
+      refute_received {:method, "POST"}
+    end
+
+    test "a failed wallet read is returned as it came and nothing is written" do
+      me = self()
+
+      denied = fn conn ->
+        send(me, {:method, conn.method})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(404, Jason.encode!(%{"message" => "no such wallet"}))
+      end
+
+      assert {:refused, _message} =
+               Prime.stake_wallet(@credentials, "pf-1", "w-1", "ETH", Decimal.new("1"),
+                 plug: denied,
+                 retry_attempts: 0
+               )
+
+      down = fn conn ->
+        send(me, {:method, conn.method})
+        Plug.Conn.resp(conn, 503, "down")
+      end
+
+      assert {:error, {:exchange_error, :coinbase, _text}} =
+               Prime.unstake_wallet(@credentials, "pf-1", "w-1", "ETH", Decimal.new("1"),
+                 plug: down,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:method, "GET"}, 5_000
+      refute_received {:method, "POST"}
+    end
+  end
+
+  describe "the facade returns a StakingTransaction" do
+    defp facade_opts(me, extra) do
+      ok = %{"transaction_id" => "txn-42", "activity_id" => "act-42"}
+
+      Keyword.merge(
+        [
+          credentials: @credentials,
+          portfolio_id: "pf-1",
+          plug: capturing(ok, me),
+          retry_attempts: 0
+        ],
+        extra
+      )
+    end
+
+    test "stake/3 builds the struct from the transaction id, in both scopes" do
+      me = self()
+      one = Decimal.new("1.5")
+
+      for scope <- [[], [wallet_id: "w-1"]] do
+        assert {:ok, %Types.StakingTransaction{} = tx} =
+                 DpExchange.Coinbase.stake("eth", one, facade_opts(me, scope))
+
+        assert tx.id == "txn-42"
+        assert tx.type == :stake
+        assert tx.asset == "ETH"
+        assert Decimal.equal?(tx.amount, one)
+        assert tx.amount_remaining == nil
+        assert tx.provider == :coinbase
+      end
+    end
+
+    test "unstake/3 reports the whole amount as still remaining" do
+      me = self()
+
+      assert {:ok, %Types.StakingTransaction{} = tx} =
+               DpExchange.Coinbase.unstake("ETH", Decimal.new("8"), facade_opts(me, []))
+
+      assert tx.type == :unstake
+      assert Decimal.equal?(tx.amount_remaining, Decimal.new("8"))
+      assert Types.StakingTransaction.settled?(tx) == false
+    end
+
+    test "a 2xx without a transaction id is unconfirmed and carries the key that was sent" do
+      me = self()
+      no_id = capturing(%{"ok" => true}, me)
+
+      assert {:error, {:write_unconfirmed, key, :missing_transaction_id}} =
+               DpExchange.Coinbase.stake(
+                 "ETH",
+                 Decimal.new("1"),
+                 facade_opts(me, plug: no_id)
+               )
+
+      assert_receive {:request, "POST", _path, raw, _headers}, 5_000
+      assert Jason.decode!(raw)["idempotency_key"] == key
+
+      # The caller's own key is the one carried back.
+      mine = "6f1d2a40-0000-4000-8000-0000000000aa"
+
+      assert {:error, {:write_unconfirmed, ^mine, :missing_transaction_id}} =
+               DpExchange.Coinbase.unstake(
+                 "ETH",
+                 Decimal.new("1"),
+                 facade_opts(me, plug: no_id, idempotency_key: mine)
+               )
+
+      for blank <- ["", "   ", 7, nil] do
+        assert {:error, {:write_unconfirmed, _key, :missing_transaction_id}} =
+                 DpExchange.Coinbase.stake(
+                   "ETH",
+                   Decimal.new("1"),
+                   facade_opts(me, plug: capturing(%{"transaction_id" => blank}, me))
+                 )
+      end
+    end
+
+    test "validation and a missing portfolio stay plain errors" do
+      me = self()
+
+      assert {:error, :missing_portfolio} =
+               DpExchange.Coinbase.stake("ETH", Decimal.new("1"), credentials: @credentials)
+
+      assert {:error, {:invalid_amount, 1.5}} =
+               DpExchange.Coinbase.stake("ETH", 1.5, facade_opts(me, []))
+
+      assert {:error, :missing_prime_credentials} =
+               DpExchange.Coinbase.stake(
+                 "ETH",
+                 Decimal.new("1"),
+                 facade_opts(me, credentials: %{})
+               )
+
+      refute_received {:request, _method, _path, _raw, _headers}
+    end
+  end
+
+  describe "an unconfirmed staking write (W1) carries the idempotency key" do
+    defmodule Throttling do
+      @moduledoc false
+      @behaviour DpExchange.Core.RateLimitBehaviour
+
+      @impl true
+      def acquire(_provider, _weight, _opts), do: {:error, :rate_limit_timeout}
+      @impl true
+      def check(_provider, _weight, _opts), do: {:rate_limited, 2_000}
+      @impl true
+      def record(_provider, _weight, _opts), do: :ok
+    end
+
+    defmodule RefuseAfterFirst do
+      @moduledoc false
+      @behaviour DpExchange.Core.RateLimitBehaviour
+
+      @impl true
+      def acquire(_provider, _weight, _opts) do
+        if Process.get(:prime_first_acquire_done, false) do
+          {:error, :rate_limit_timeout}
+        else
+          Process.put(:prime_first_acquire_done, true)
+          :ok
+        end
+      end
+
+      @impl true
+      def check(_provider, _weight, _opts), do: {:rate_limited, 2_000}
+      @impl true
+      def record(_provider, _weight, _opts), do: :ok
+    end
+
+    @key "6f1d2a40-0000-4000-8000-0000000000bb"
+
+    defp status_plug(status, me) do
+      fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(raw)["idempotency_key"]})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(status, Jason.encode!(%{"message" => "x"}))
+      end
+    end
+
+    test "a 5xx after the send is unconfirmed, with the key that was sent" do
+      me = self()
+      one = Decimal.new("1")
+
+      assert {:error, {:write_unconfirmed, key, {:exchange_error, :coinbase, text}}} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", one,
+                 plug: status_plug(500, me),
+                 retry_attempts: 0
+               )
+
+      assert text =~ "500"
+      assert_receive {:sent, ^key}, 5_000
+      assert key =~ ~r/\A[0-9a-f-]{36}\z/
+
+      assert {:error, {:write_unconfirmed, @key, _reason}} =
+               Prime.claim_rewards(@credentials, "pf-1", "w-1",
+                 plug: status_plug(502, me),
+                 retry_attempts: 0,
+                 idempotency_key: @key
+               )
+    end
+
+    test "a 2xx that is not an object is unconfirmed on every keyed write" do
+      list = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(["no"]))
+      end
+
+      real = [plug: list, retry_attempts: 0, idempotency_key: @key]
+      one = Decimal.new("1")
+
+      assert {:error, {:write_unconfirmed, @key, :unexpected_response_shape}} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", one, real)
+
+      assert {:error, {:write_unconfirmed, @key, :unexpected_response_shape}} =
+               Prime.unstake_portfolio(@credentials, "pf-1", "ETH", one, real)
+
+      assert {:error, {:write_unconfirmed, @key, :unexpected_response_shape}} =
+               Prime.claim_rewards(@credentials, "pf-1", "w-1", real)
+    end
+
+    test "a 4xx on the first attempt is a refusal, on a retry it is unconfirmed" do
+      me = self()
+      one = Decimal.new("1")
+
+      assert {:refused, message} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", one,
+                 plug: status_plug(403, me),
+                 retry_attempts: 0
+               )
+
+      assert message =~ "403"
+
+      # 503 then 403 (403 is in Prime's refusal set; a 409 is not, and stays an unrefused
+      # `{:error, _}`): the 403 answers an internal RETRY of a keyed write, so the earlier
+      # attempt may have been accepted and the 403 may be the venue objecting to the repeat.
+      counter = :counters.new(1, [])
+
+      flaky = fn conn ->
+        {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+        :counters.add(counter, 1, 1)
+        status = if :counters.get(counter, 1) == 1, do: 503, else: 403
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(status, Jason.encode!(%{"message" => "x"}))
+      end
+
+      assert {:error, {:write_unconfirmed, @key, reason}} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", one,
+                 plug: flaky,
+                 retry_attempts: 2,
+                 retry_delay: 1,
+                 idempotency_key: @key
+               )
+
+      assert :counters.get(counter, 1) == 2
+      assert is_binary(reason)
+      assert reason =~ "403"
+    end
+
+    test "our own limiter refusing the first attempt is decided before sending: plain" do
+      Config.put_override(:rate_limit_module, Throttling)
+      me = self()
+
+      assert {:error, {:exchange_error, :coinbase, "Throttled by our own rate limiter" <> _r}} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", Decimal.new("1"),
+                 plug: status_plug(500, me),
+                 retry_attempts: 2,
+                 retry_delay: 1
+               )
+
+      refute_received {:sent, _key}
+    end
+
+    test "the limiter refusing a retry after a sent 5xx is unconfirmed, not plain" do
+      Config.put_override(:rate_limit_module, RefuseAfterFirst)
+      me = self()
+
+      assert {:error, {:write_unconfirmed, @key, {:exchange_error, :coinbase, text}}} =
+               Prime.unstake_portfolio(@credentials, "pf-1", "ETH", Decimal.new("1"),
+                 plug: status_plug(503, me),
+                 retry_attempts: 3,
+                 retry_delay: 1,
+                 idempotency_key: @key
+               )
+
+      assert text =~ "Throttled by our own rate limiter"
+      assert_receive {:sent, @key}, 5_000
+      refute_received {:sent, _key}
+    end
+
+    test "a signing failure and a body that cannot be encoded are plain, nothing was sent" do
+      one = Decimal.new("1")
+
+      assert {:error, :missing_prime_credentials} =
+               Prime.stake_portfolio(%{access_key: "k"}, "pf-1", "ETH", one, retry_attempts: 0)
+
+      assert {:error, :unencodable_body} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", one,
+                 extra: %{"x" => {:not, :json}},
+                 retry_attempts: 0
+               )
     end
   end
 end

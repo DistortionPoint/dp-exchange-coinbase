@@ -462,29 +462,43 @@ defmodule DpExchange.Coinbase.Rest do
   The local checks `get_accounts/2` runs on its options before any request: `:uuid` (absent,
   or a non-empty string) and `:limit` (absent, or an integer in `1..250` — the venue's
   documented page size, "by default 49, max 250"). Errors: `{:invalid_id, :uuid, v}`,
-  `{:invalid_limit, v}`.
+  `{:invalid_limit, v}`. `:portfolio` is sent as `retail_portfolio_id` on the listing
+  (`{:invalid_option, :portfolio, v}` when malformed); the single-account read has no such
+  parameter, so `:uuid` together with `:portfolio` is `{:unsupported_option, :portfolio}`.
   """
   @spec validate_account_options(keyword()) :: :ok | {:error, term()}
   def validate_account_options(opts) do
-    with :ok <- validate_account_uuid(Keyword.get(opts, :uuid)) do
-      validate_balance_options(opts)
+    with :ok <- validate_account_uuid(Keyword.get(opts, :uuid)),
+         :ok <- validate_balance_options(opts) do
+      if Keyword.get(opts, :uuid) != nil and Keyword.get(opts, :portfolio) != nil,
+        do: {:error, {:unsupported_option, :portfolio}},
+        else: :ok
     end
   end
 
   @doc """
   The local check `get_balances/2` runs on its options before any request: `:limit` is
-  absent, or an integer in `1..250`. Error: `{:invalid_limit, v}`. A `limit` the venue's own
+  absent, or an integer in `1..250`, and `:portfolio` absent or a non-blank string (sent as
+  the spec's `retail_portfolio_id`; see `validate_portfolio_option/1`). Errors:
+  `{:invalid_limit, v}`, `{:invalid_option, :portfolio, v}`. A `limit` the venue's own
   page-size bound does not allow was sent for the venue to clamp or refuse, which is
   unmeasured; a non-number raised `Protocol.UndefinedError` in the caller's process.
   """
-  @spec validate_balance_options(keyword()) :: :ok | {:error, {:invalid_limit, term()}}
+  @spec validate_balance_options(keyword()) ::
+          :ok | {:error, {:invalid_limit, term()} | {:invalid_option, :portfolio, term()}}
   def validate_balance_options(opts) do
-    case Keyword.get(opts, :limit) do
-      nil -> :ok
-      limit when is_integer(limit) and limit >= 1 and limit <= @max_account_limit -> :ok
-      other -> {:error, {:invalid_limit, other}}
+    with :ok <- validate_balance_limit(Keyword.get(opts, :limit)) do
+      validate_portfolio_option(opts)
     end
   end
+
+  defp validate_balance_limit(nil), do: :ok
+
+  defp validate_balance_limit(limit)
+       when is_integer(limit) and limit >= 1 and limit <= @max_account_limit,
+       do: :ok
+
+  defp validate_balance_limit(other), do: {:error, {:invalid_limit, other}}
 
   defp validate_account_uuid(nil), do: :ok
   defp validate_account_uuid(uuid), do: validate_id(uuid, :uuid)
@@ -552,6 +566,7 @@ defmodule DpExchange.Coinbase.Rest do
     params =
       %{}
       |> put_unless_nil("limit", Keyword.get(opts, :limit))
+      |> put_unless_nil("retail_portfolio_id", Keyword.get(opts, :portfolio))
       |> put_unless_nil("cursor", cursor)
 
     case request(:get, "/accounts", credentials, opts, params) do
@@ -642,7 +657,15 @@ defmodule DpExchange.Coinbase.Rest do
 
   The amount is sent as Coinbase's `funds` object: a string value and a currency, which is
   the shape the venue reads. `Decimal.to_string(:normal)` because scientific notation is
-  not a number this venue accepts.
+  not a number this venue accepts. The amount is a finite, positive `Decimal`; a float is
+  `{:error, {:invalid_amount, v}}`. The same uuid for `:from` and `:to` is
+  `{:error, {:invalid_transfer, :same_account}}`.
+
+  **An unconfirmed move is `{:error, {:write_unconfirmed, nil, reason}}`.** The request is
+  sent once and carries no idempotency key, so a transport failure or `5xx` after the send,
+  or a `2xx` whose body is not an object, may have moved the funds: reconcile through
+  `get_portfolio_breakdown/3` before moving again. `nil` is the key slot — the venue gives
+  this call none. Validation, credentials and our own rate limiter stay plain errors.
   """
   @spec transfer_internal(map(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -656,8 +679,8 @@ defmodule DpExchange.Coinbase.Rest do
 
       case post_once("/portfolios/move_funds", body, credentials, opts) do
         {:ok, %{body: %{} = result}} -> {:ok, result}
-        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-        {:error, reason} -> classify(reason)
+        {:ok, _unexpected} -> write_unconfirmed(nil, :unexpected_response_shape)
+        {:error, reason} -> write_failure(reason, nil)
       end
     end
   end
@@ -897,6 +920,15 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  # A portfolio the venue says it created but whose uuid cannot be read is a write that may
+  # have happened (W1): a plain error invites a second create, which leaves a duplicate.
+  defp created_portfolio(row) do
+    case to_portfolio(row) do
+      {:ok, _portfolio} = created -> created
+      {:error, reason} -> write_unconfirmed(nil, reason)
+    end
+  end
+
   @doc """
   One portfolio's full breakdown — `GET /portfolios/{portfolio_uuid}`.
 
@@ -943,13 +975,13 @@ defmodule DpExchange.Coinbase.Rest do
     with {:ok, name} <- required_name(opts) do
       case post_once("/portfolios", %{"name" => name}, credentials, opts) do
         {:ok, %{body: %{"portfolio" => portfolio}}} when is_map(portfolio) ->
-          to_portfolio(portfolio)
+          created_portfolio(portfolio)
 
         {:ok, _unexpected} ->
-          {:error, :unexpected_response_shape}
+          write_unconfirmed(nil, :unexpected_response_shape)
 
         {:error, reason} ->
-          classify(reason)
+          write_failure(reason, nil)
       end
     end
   end
@@ -966,15 +998,19 @@ defmodule DpExchange.Coinbase.Rest do
     with :ok <- validate_portfolio_rename(portfolio_uuid, name) do
       path = "/portfolios/#{segment(portfolio_uuid)}"
 
-      case put_json(path, %{"name" => name}, credentials, opts) do
+      # A PUT of the same name is idempotent, so the default retries stay; the signer is
+      # counted so a limiter refusal of a retry after a sent attempt is not read as pre-send.
+      calls = :atomics.new(1, signed: false)
+
+      case json_request(:put, path, %{"name" => name}, credentials, opts, &counting(&1, calls)) do
         {:ok, %{body: %{"portfolio" => portfolio}}} when is_map(portfolio) ->
-          to_portfolio(portfolio)
+          created_portfolio(portfolio)
 
         {:ok, _unexpected} ->
-          {:error, :unexpected_response_shape}
+          write_unconfirmed(nil, :unexpected_response_shape)
 
         {:error, reason} ->
-          classify(reason)
+          write_failure(reason, nil, {calls, opts})
       end
     end
   end
@@ -997,8 +1033,8 @@ defmodule DpExchange.Coinbase.Rest do
 
       case request(:delete, path, credentials, once(opts)) do
         {:ok, %{body: %{} = result}} -> {:ok, result}
-        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-        {:error, reason} -> classify(reason)
+        {:ok, _unexpected} -> write_unconfirmed(portfolio_uuid, :unexpected_response_shape)
+        {:error, reason} -> write_failure(reason, portfolio_uuid)
       end
     end
   end
@@ -1069,9 +1105,28 @@ defmodule DpExchange.Coinbase.Rest do
       body = %{"from_account" => from, "to_account" => to}
       path = "/convert/trade/#{segment(trade_id)}"
 
-      with {:ok, trade} <- convert_trade(post_once(path, body, credentials, opts)) do
-        to_conversion(trade, from, to)
+      # `trade_id` is the correlation key sent. Past a possible send, a body that cannot
+      # establish what became of the commit (no `trade`, no id, a status this package does
+      # not know) is `{:write_unconfirmed, trade_id, reason}`: a plain error would read as
+      # "nothing happened" and the caller would commit again. `Types.Conversion` enforces a
+      # non-nil `:id` and `:status`, so there is no struct to return with those unreadable.
+      case post_once(path, body, credentials, opts) do
+        {:ok, %{body: %{"trade" => trade}}} when is_map(trade) ->
+          committed_conversion(trade, from, to, trade_id)
+
+        {:ok, _unexpected} ->
+          write_unconfirmed(trade_id, :unexpected_response_shape)
+
+        {:error, reason} ->
+          write_failure(reason, trade_id)
       end
+    end
+  end
+
+  defp committed_conversion(trade, from, to, trade_id) do
+    case to_conversion(trade, from, to) do
+      {:ok, _conversion} = committed -> committed
+      {:error, reason} -> write_unconfirmed(trade_id, reason)
     end
   end
 
@@ -1204,10 +1259,13 @@ defmodule DpExchange.Coinbase.Rest do
   @spec list_futures_positions(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_futures_positions(credentials, opts) do
-    case request(:get, "/cfm/positions", credentials, opts) do
-      {:ok, %{body: %{"positions" => positions}}} when is_list(positions) -> {:ok, positions}
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+    # The CFM endpoints take no portfolio parameter: a portfolio scope is refused, not ignored.
+    with :ok <- reject_portfolio_option(opts) do
+      case request(:get, "/cfm/positions", credentials, opts) do
+        {:ok, %{body: %{"positions" => positions}}} when is_list(positions) -> {:ok, positions}
+        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
     end
   end
 
@@ -1220,7 +1278,8 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_futures_position(map(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_futures_position(credentials, product_id, opts) do
-    with :ok <- validate_id(product_id, :product_id) do
+    with :ok <- validate_id(product_id, :product_id),
+         :ok <- reject_portfolio_option(opts) do
       get_futures_position_at(credentials, product_id, opts)
     end
   end
@@ -1241,31 +1300,29 @@ defmodule DpExchange.Coinbase.Rest do
   # `Core.Types.Position` enforces `:symbol`, `:side` and `:quantity`, and its `new/1` refuses
   # a `nil` in any of them. Nothing here called `new/1` — the struct is built literally, as
   # everywhere in this family — so that check never ran and all three came through unguarded:
-  # `row["product_id"]` by key, `futures_side/1` answering `nil` for a side it does not
+  # `row["product_id"]` by key, the side mapping answering `nil` for a side it does not
   # recognise, and `amount_value/1` answering `nil` for an absent or unreadable figure.
   #
-  # **Only `:symbol` is guarded, and the other two are deliberately left alone.** This package
-  # has already reasoned about both, and reporting a partial position is more informative than
-  # dropping it — a caller still learns the position exists and can ask again.
+  # **All three are guarded (family convention W7).** This used to leave `:side` and
+  # `:quantity` alone, reasoning that a partial position is more informative than none. But
+  # the struct's contract is not partial: `:side` is `:long` or `:short` and `:quantity` is
+  # positive (`Core.Types.Position`), and a literal carrying `side: nil` or `quantity: nil`
+  # breaks every consumer that pattern-matches on it — while a consumer that does not match
+  # reads "no side" as "flat". One unreadable row refuses the whole reply instead, as an
+  # unreadable symbol always did.
   #
-  #   * `side` — the venue's own `UNKNOWN` becomes `nil` rather than a guess. See
-  #     `futures_test.exs`'s "the venue's UNKNOWN is nil, not a side": *"A position filed the
-  #     wrong way round is the most expensive mistake in this mapping."*
-  #   * `quantity` — "a missing amount is nil rather than zero", same file. That decision is
-  #     about `nil` versus `0`; refusing the row would answer a question nobody asked.
-  #
-  # `symbol` has no such reading. A position naming no instrument cannot be sized, closed or
-  # reconciled by anyone — it is not a weaker claim about what is held, it is not a claim at
-  # all — and unlike a side or a size there is no "the venue declined to say" case for it.
+  #   * `side` — the venue's own `UNKNOWN` (or anything else but `LONG` / `SHORT`) is
+  #     `{:unknown_position_side, value}`, never a guess: a position filed the wrong way round
+  #     is the most expensive mistake in this mapping.
+  #   * `quantity` — absent, unreadable, zero or negative `number_of_contracts` is
+  #     `{:invalid_position_quantity, value}`. A venue sending a signed size would be a new
+  #     sign convention and is refused until measured, not normalised by guess.
+  #   * `symbol` — a position naming no instrument cannot be sized, closed or reconciled.
   defp to_position(%{} = row) do
-    with {:ok, symbol} <- required_position_field(row["product_id"], :symbol) do
-      {:ok,
-       position_struct(
-         row,
-         symbol,
-         futures_side(row["side"]),
-         amount_value(row["number_of_contracts"])
-       )}
+    with {:ok, symbol} <- required_position_field(row["product_id"], :symbol),
+         {:ok, side} <- position_side(row["side"]),
+         {:ok, quantity} <- position_quantity(row["number_of_contracts"]) do
+      {:ok, position_struct(row, symbol, side, quantity)}
     end
   end
 
@@ -1315,9 +1372,21 @@ defmodule DpExchange.Coinbase.Rest do
     }
   end
 
-  defp futures_side("LONG"), do: :long
-  defp futures_side("SHORT"), do: :short
-  defp futures_side(_other), do: nil
+  defp position_side("LONG"), do: {:ok, :long}
+  defp position_side("SHORT"), do: {:ok, :short}
+  defp position_side(other), do: {:error, {:unknown_position_side, other}}
+
+  defp position_quantity(raw) do
+    case amount_value(raw) do
+      %Decimal{} = quantity ->
+        if usable_positive?(quantity),
+          do: {:ok, quantity},
+          else: {:error, {:invalid_position_quantity, raw}}
+
+      nil ->
+        {:error, {:invalid_position_quantity, raw}}
+    end
+  end
 
   defp amount_value(nil), do: nil
   defp amount_value(%{"value" => value}), do: decimal(value)
@@ -1392,8 +1461,8 @@ defmodule DpExchange.Coinbase.Rest do
 
       case post_once("/cfm/sweeps/schedule", body, credentials, opts) do
         {:ok, %{body: %{} = result}} -> sweep_outcome(result, :sweep_not_scheduled)
-        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-        {:error, reason} -> classify(reason)
+        {:ok, _unexpected} -> write_unconfirmed(nil, :unexpected_response_shape)
+        {:error, reason} -> write_failure(reason, nil)
       end
     end
   end
@@ -1435,8 +1504,8 @@ defmodule DpExchange.Coinbase.Rest do
   def cancel_futures_sweep(credentials, opts) do
     case request(:delete, "/cfm/sweeps", credentials, once(opts)) do
       {:ok, %{body: %{} = result}} -> sweep_outcome(result, :sweep_not_cancelled)
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+      {:ok, _unexpected} -> write_unconfirmed(nil, :unexpected_response_shape)
+      {:error, reason} -> write_failure(reason, nil)
     end
   end
 
@@ -1478,10 +1547,16 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def set_intraday_margin_setting(credentials, setting, opts)
       when setting in @margin_settings do
-    case post_json("/cfm/intraday/margin_setting", %{"setting" => setting}, credentials, opts) do
+    # Setting the same value twice is harmless, so the default retries stay and the signer is
+    # counted (see `rename_portfolio/4`).
+    calls = :atomics.new(1, signed: false)
+    body = %{"setting" => setting}
+    path = "/cfm/intraday/margin_setting"
+
+    case post_json(path, body, credentials, opts, &counting(&1, calls)) do
       {:ok, %{body: %{} = result}} -> {:ok, result}
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+      {:ok, _unexpected} -> write_unconfirmed(nil, :unexpected_response_shape)
+      {:error, reason} -> write_failure(reason, nil, {calls, opts})
     end
   end
 
@@ -1681,6 +1756,7 @@ defmodule DpExchange.Coinbase.Rest do
       |> put_unless_nil("product_ids", venue_symbol(Keyword.get(opts, :symbol)))
       |> put_unless_nil("start_sequence_timestamp", timestamp_param(Keyword.get(opts, :start)))
       |> put_unless_nil("end_sequence_timestamp", timestamp_param(Keyword.get(opts, :end)))
+      |> put_unless_nil("retail_portfolio_id", Keyword.get(opts, :portfolio))
       |> put_unless_nil("limit", Keyword.get(opts, :limit))
       |> put_unless_nil("cursor", cursor)
 
@@ -1912,14 +1988,56 @@ defmodule DpExchange.Coinbase.Rest do
   @doc """
   The local checks `get_orders/2` runs on its options before any request: `:status` (one of
   `OrderExecutionStatus`), `:symbol` (a non-empty string or a non-empty list of them) and
-  `:limit` (a positive integer). Errors: `{:invalid_status, v}`, `{:invalid_symbol, v}`,
-  `{:invalid_limit, v}`.
+  `:limit` (a positive integer), then `:portfolio` (`validate_portfolio_option/1`). Errors:
+  `{:invalid_status, v}`, `{:invalid_symbol, v}`, `{:invalid_limit, v}`,
+  `{:invalid_option, :portfolio, v}`.
   """
   @spec validate_order_filters(keyword()) :: :ok | {:error, term()}
   def validate_order_filters(opts) do
     with :ok <- valid_statuses(Keyword.get(opts, :status)),
-         :ok <- valid_order_symbols(Keyword.get(opts, :symbol)) do
-      valid_page_size(Keyword.get(opts, :limit))
+         :ok <- valid_order_symbols(Keyword.get(opts, :symbol)),
+         :ok <- valid_page_size(Keyword.get(opts, :limit)) do
+      validate_portfolio_option(opts)
+    end
+  end
+
+  @doc """
+  The local check on `opts[:portfolio]` for the reads that send it as `retail_portfolio_id`
+  (`get_balances/2`, `get_accounts/2`, `get_orders/2`, `get_trade_history/2`): absent, or a
+  non-blank string. Error: `{:invalid_option, :portfolio, v}`.
+
+  The spec marks the parameter **deprecated and "only applicable for legacy keys"** — a CDP
+  key defaults to its own permissioned portfolio. What the venue does with it for a CDP key
+  is unmeasured, which is why it is sent as given and never silently replaced by the key's.
+  """
+  @spec validate_portfolio_option(keyword()) ::
+          :ok | {:error, {:invalid_option, :portfolio, term()}}
+  def validate_portfolio_option(opts) do
+    case Keyword.get(opts, :portfolio) do
+      nil -> :ok
+      portfolio when is_binary(portfolio) -> validate_portfolio_text(portfolio)
+      other -> {:error, {:invalid_option, :portfolio, other}}
+    end
+  end
+
+  defp validate_portfolio_text(portfolio) do
+    if String.trim(portfolio) == "",
+      do: {:error, {:invalid_option, :portfolio, portfolio}},
+      else: :ok
+  end
+
+  # Futures (CFM) reads address the account the key belongs to and take no portfolio
+  # parameter (at-spec.yaml `/cfm/positions`), so a portfolio scope cannot be honoured.
+  @doc """
+  Refuses `opts[:portfolio]` on a read that cannot honour it:
+  `{:error, {:unsupported_option, :portfolio}}`. The futures (CFM) endpoints take no
+  portfolio parameter; ignoring the option would answer for a different scope than asked.
+  """
+  @spec reject_portfolio_option(keyword()) :: :ok | {:error, {:unsupported_option, :portfolio}}
+  def reject_portfolio_option(opts) do
+    case Keyword.get(opts, :portfolio) do
+      nil -> :ok
+      _scope -> {:error, {:unsupported_option, :portfolio}}
     end
   end
 
@@ -1930,7 +2048,7 @@ defmodule DpExchange.Coinbase.Rest do
   (absent, or a `DateTime`; when both are given `:start` must be before `:end`). Errors:
   `{:invalid_trade_types, v}`, `{:invalid_symbol, v}`, `{:invalid_limit, v}`,
   `{:invalid_order_id, v}`, `{:invalid_time, :start | :end, v}`,
-  `{:invalid_range, start: s, end: e}`. A string or map in `:start` / `:end` went to the
+  `{:invalid_range, start: s, end: e}`, `{:invalid_option, :portfolio, v}`. A string or map in `:start` / `:end` went to the
   venue as given (or raised in the query encoder), and what it makes of an inverted window is
   unmeasured.
   """
@@ -1939,8 +2057,9 @@ defmodule DpExchange.Coinbase.Rest do
     with :ok <- valid_trade_types(Config.opt(opts, :trade_types, ["FILL"])),
          :ok <- valid_order_symbols(Keyword.get(opts, :symbol)),
          :ok <- valid_fill_order_ids(Keyword.get(opts, :order_id)),
-         :ok <- valid_fill_window(Keyword.get(opts, :start), Keyword.get(opts, :end)) do
-      valid_page_size(Keyword.get(opts, :limit))
+         :ok <- valid_fill_window(Keyword.get(opts, :start), Keyword.get(opts, :end)),
+         :ok <- valid_page_size(Keyword.get(opts, :limit)) do
+      validate_portfolio_option(opts)
     end
   end
 
@@ -2059,7 +2178,8 @@ defmodule DpExchange.Coinbase.Rest do
   @doc """
   The local checks `transfer_internal/4` runs before any request: the amount is a finite,
   positive `Decimal` (`{:invalid_amount, v}`), the asset a non-empty string
-  (`{:invalid_asset, v}`), then both portfolio uuids are given (`{:error, :missing_portfolio}`).
+  (`{:invalid_asset, v}`), then both portfolio uuids are given (`{:error, :missing_portfolio}`)
+  and differ (`{:error, {:invalid_transfer, :same_account}}`).
   """
   @spec validate_transfer(term(), term(), keyword()) ::
           {:ok, String.t(), String.t()} | {:error, term()}
@@ -2075,12 +2195,17 @@ defmodule DpExchange.Coinbase.Rest do
 
   @doc """
   The two portfolio uuids `transfer_internal/4` requires in `opts[:from]` and `opts[:to]`,
-  or `{:error, :missing_portfolio}`.
+  or `{:error, :missing_portfolio}`. The same uuid on both sides moves nothing and is
+  refused as `{:error, {:invalid_transfer, :same_account}}` (family convention W4).
   """
   @spec transfer_portfolios(keyword()) ::
-          {:ok, String.t(), String.t()} | {:error, :missing_portfolio}
+          {:ok, String.t(), String.t()}
+          | {:error, :missing_portfolio | {:invalid_transfer, :same_account}}
   def transfer_portfolios(opts) do
     case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
+      {same, same} when is_binary(same) and same != "" ->
+        {:error, {:invalid_transfer, :same_account}}
+
       {from, to} when is_binary(from) and is_binary(to) and from != "" and to != "" ->
         {:ok, from, to}
 
@@ -3708,7 +3833,19 @@ defmodule DpExchange.Coinbase.Rest do
   # signer, or `nil` for a write sent once. A pre-send failure is plain only when NO attempt
   # was sent before it: the same limiter refusal on a retry, after a first attempt left the
   # process, is unconfirmed.
-  defp write_error(reason, client_order_id, counted) do
+  defp write_error(reason, client_order_id, counted),
+    do: tagged_write_error(reason, client_order_id, counted, &unconfirmed/2)
+
+  # The same decision for a write that is not an order (family convention W1): `key` is the
+  # correlation key actually sent (`nil` where the write carries none) and the answer is
+  # `{:error, {:write_unconfirmed, key, reason}}`.
+  defp write_failure(reason, key, counted \\ nil),
+    do: tagged_write_error(reason, key, counted, &write_unconfirmed/2)
+
+  defp write_unconfirmed(key, reason),
+    do: {:error, {:write_unconfirmed, key, bounded_reason(reason)}}
+
+  defp tagged_write_error(reason, key, counted, build) do
     case classify(reason) do
       {:refused, _reason} = refused ->
         refused
@@ -3716,7 +3853,7 @@ defmodule DpExchange.Coinbase.Rest do
       {:error, inner} ->
         if pre_send_failure?(reason) and sent_attempts(counted) == 0,
           do: {:error, inner},
-          else: unconfirmed(client_order_id, inner)
+          else: build.(key, inner)
     end
   end
 
@@ -3827,15 +3964,12 @@ defmodule DpExchange.Coinbase.Rest do
   # deletion that happened.
   defp once(opts), do: Keyword.put_new(opts, :retry_attempts, 1)
 
-  defp put_json(path, body, credentials, opts),
-    do: json_request(:put, path, body, credentials, opts)
-
   # **Every caller of this function is a write, and there is no public path for one.** So
   # unlike `request/5` there is no anonymous branch here: credentials that cannot sign
   # refuse locally, by name, rather than producing an unauthenticated POST for the venue
   # to reject as an opaque 401. A malformed `api_secret` reaching `place_order/3` used to
   # do exactly that.
-  defp json_request(method, path, body, credentials, opts, wrap \\ &Function.identity/1) do
+  defp json_request(method, path, body, credentials, opts, wrap) do
     signer = wrap.(signer(method, @api_path <> path, credentials))
     send_json_request(method, path, signer, body, opts)
   end
@@ -4017,6 +4151,7 @@ defmodule DpExchange.Coinbase.Rest do
       %{}
       |> put_unless_nil("order_status", opts |> Keyword.get(:status) |> order_status_param())
       |> put_unless_nil("product_ids", venue_symbol(Keyword.get(opts, :symbol)))
+      |> put_unless_nil("retail_portfolio_id", Keyword.get(opts, :portfolio))
       |> put_unless_nil("limit", Keyword.get(opts, :limit))
       |> put_unless_nil("cursor", cursor)
 

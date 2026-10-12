@@ -70,7 +70,7 @@ defmodule DpExchange.Coinbase.Prime do
   """
 
   alias DpExchange.Coinbase.IdempotencyKey
-  alias DpExchange.Core.{Config, HttpClient}
+  alias DpExchange.Core.{Config, HttpClient, Types}
 
   @base_url "https://api.prime.coinbase.com"
   @api_path "/v1"
@@ -94,6 +94,15 @@ defmodule DpExchange.Coinbase.Prime do
   **This moves funds.** `opts[:idempotency_key]` is sent where the caller supplies one, and
   one is generated otherwise, once per call, so this call's own retries cannot stake twice. A
   caller retrying the call itself must pass its own key, or the venue sees a new request.
+
+  **An unconfirmed write carries that key.** A transport failure or `5xx` after the send, a
+  `2xx` whose body is not an object, or a `4xx` answered to one of this call's own internal
+  retries is `{:error, {:write_unconfirmed, idempotency_key, reason}}` (`reason` bounded):
+  the stake may exist, and the key is what the caller retries or reconciles with. The same
+  holds for `unstake_portfolio/5`, `stake_wallet/6`, `unstake_wallet/6` and `claim_rewards/4`.
+  A failure decided before anything was sent (validation, credentials, our own rate limiter
+  refusing the first attempt, a signing failure) and a `4xx` on the first attempt stay plain
+  `{:error, _}` / `{:refused, _}`.
   """
   @spec stake_portfolio(credentials(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -103,11 +112,11 @@ defmodule DpExchange.Coinbase.Prime do
          :ok <- valid_amount(amount),
          :ok <- valid_key(opts),
          :ok <- valid_extra(opts) do
-      post(
+      post_write(
         "/portfolios/#{portfolio_id}/staking/initiate",
         portfolio_stake_body(asset, amount, opts),
-        credentials: credentials,
-        opts: opts
+        credentials,
+        opts
       )
     end
   end
@@ -128,11 +137,11 @@ defmodule DpExchange.Coinbase.Prime do
          :ok <- valid_amount(amount),
          :ok <- valid_key(opts),
          :ok <- valid_extra(opts) do
-      post(
+      post_write(
         "/portfolios/#{portfolio_id}/staking/unstake",
         portfolio_stake_body(asset, amount, opts),
-        credentials: credentials,
-        opts: opts
+        credentials,
+        opts
       )
     end
   end
@@ -197,22 +206,35 @@ defmodule DpExchange.Coinbase.Prime do
 
   `asset` is not sent — `StakingInitiateRequest` at this path carries no currency field
   (docs/reference/coinbase/openapi/prime-spec.yaml:8850-8869); the wallet already names a
-  single asset on the venue's side. It stays a parameter here because a caller choosing
-  between `stake_wallet/6` and `stake_portfolio/5` needs to say which asset it means, the
-  same way `unstake_wallet/6` and `preview_unstake_wallet/6` do.
+  single asset on the venue's side.
+
+  **The asset is VERIFIED against the wallet before anything is written.** Because the body
+  carries no currency, a caller naming `"ETH"` for a wallet that holds `"SOL"` used to stake
+  the SOL, silently. This reads `GET /portfolios/{pid}/wallets/{wid}` (`Wallet.symbol`,
+  "the asset stored in the wallet", prime-spec.yaml:15765) first and refuses on mismatch
+  (case-insensitively): `{:error, {:wallet_asset_mismatch, asked, held}}`. A wallet whose
+  symbol cannot be read is `{:error, {:wallet_asset_unverified, reason}}`: an asset that
+  cannot be checked is not staked. The read's own failure is returned as it came
+  (`{:refused, _}` for a 4xx, `{:error, _}` otherwise); nothing has been written by then.
+
+  An unconfirmed write is `{:error, {:write_unconfirmed, idempotency_key, reason}}`, as
+  `stake_portfolio/5` documents: the key is the one actually sent, generated or the
+  caller's, so the caller can retry with it.
   """
   @spec stake_wallet(credentials(), String.t(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def stake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
+  def stake_wallet(credentials, portfolio_id, wallet_id, asset, amount, opts) do
     with :ok <- valid_scope(portfolio_id, wallet_id),
+         :ok <- valid_asset(asset),
          :ok <- valid_amount(amount),
          :ok <- valid_key(opts),
-         :ok <- valid_extra(opts) do
-      post(
+         :ok <- valid_extra(opts),
+         :ok <- verify_wallet_asset(credentials, portfolio_id, wallet_id, asset, opts) do
+      post_write(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/initiate",
         wallet_stake_body(amount, opts),
-        credentials: credentials,
-        opts: opts
+        credentials,
+        opts
       )
     end
   end
@@ -222,7 +244,8 @@ defmodule DpExchange.Coinbase.Prime do
   `POST /portfolios/{pid}/wallets/{wid}/staking/unstake`.
 
   `preview_unstake_wallet/6` answers what this would do without doing it. `asset` is not
-  sent, for the same reason it is not sent by `stake_wallet/6` — see that function's doc.
+  sent, for the same reason it is not sent by `stake_wallet/6`, and is verified against the
+  wallet the same way before anything is written — see that function's doc.
   """
   @spec unstake_wallet(
           credentials(),
@@ -233,16 +256,18 @@ defmodule DpExchange.Coinbase.Prime do
           keyword()
         ) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
+  def unstake_wallet(credentials, portfolio_id, wallet_id, asset, amount, opts) do
     with :ok <- valid_scope(portfolio_id, wallet_id),
+         :ok <- valid_asset(asset),
          :ok <- valid_amount(amount),
          :ok <- valid_key(opts),
-         :ok <- valid_extra(opts) do
-      post(
+         :ok <- valid_extra(opts),
+         :ok <- verify_wallet_asset(credentials, portfolio_id, wallet_id, asset, opts) do
+      post_write(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake",
         wallet_stake_body(amount, opts),
-        credentials: credentials,
-        opts: opts
+        credentials,
+        opts
       )
     end
   end
@@ -261,7 +286,9 @@ defmodule DpExchange.Coinbase.Prime do
   reasoning that a key on a call that changes nothing was harmless. It was also undocumented:
   the venue defines no field here for it to occupy, so sending one was a guess at a schema
   this package does not own, exactly what `query_transaction_validators/3`'s comment above
-  warns against. `asset` is unused for the same reason `stake_wallet/6` does not send it.
+  warns against. `asset` is unused for the same reason `stake_wallet/6` does not send it, and
+  unlike `stake_wallet/6` it is **not** checked against the wallet: a preview moves nothing,
+  so the preview answers for the wallet named, whatever it holds.
   """
   @spec preview_unstake_wallet(
           credentials(),
@@ -334,11 +361,11 @@ defmodule DpExchange.Coinbase.Prime do
          :ok <- valid_claim_amount(Config.opt(opts, :amount, nil)),
          :ok <- valid_key(opts),
          :ok <- valid_claim_body(Config.opt(opts, :body, %{})) do
-      post(
+      post_write(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/claim_rewards",
         claim_rewards_body(opts),
-        credentials: credentials,
-        opts: opts
+        credentials,
+        opts
       )
     end
   end
@@ -373,6 +400,69 @@ defmodule DpExchange.Coinbase.Prime do
           :ok | {:error, {:invalid_portfolio_id | :invalid_wallet_id, term()}}
   def validate_scope(portfolio_id, nil), do: valid_portfolio(portfolio_id)
   def validate_scope(portfolio_id, wallet_id), do: valid_scope(portfolio_id, wallet_id)
+
+  @doc """
+  The field checks a staking write (`stake/3` / `unstake/3`) runs after the scope, in the
+  order the real path runs them: `asset` a non-blank string (`{:invalid_asset, v}`), `amount`
+  a finite, positive `Decimal` within 64 places (`{:invalid_amount, v}`),
+  `opts[:idempotency_key]` absent or a UUID (`{:invalid_idempotency_key, v}`) and `opts[:extra]`
+  absent or a map (`{:invalid_extra, v}`). Exposed so `DpExchange.Coinbase.Fake` refuses
+  exactly as the real path does.
+  """
+  @spec validate_write(term(), term(), keyword()) :: :ok | {:error, term()}
+  def validate_write(asset, amount, opts) do
+    with :ok <- valid_asset(asset),
+         :ok <- valid_amount(amount),
+         :ok <- valid_key(opts) do
+      valid_extra(opts)
+    end
+  end
+
+  @doc """
+  The `Core.Types.StakingTransaction` for an accepted staking write.
+
+  `body` is Prime's answer (`StakingInitiateResponse`, `PortfolioStakingInitiateResponse`
+  and their unstake twins all carry `transaction_id`); `key` is the idempotency key that was
+  sent. `:amount` is what was requested. For an unstake `:amount_remaining` is that same
+  amount: the response reports no progress, so nothing has been reported paid, and
+  `unstake_status/4` is what moves it. A stake leaves it `nil` — the type reserves the field
+  for a redemption's progress. `:amount_paid_so_far` is `nil` (not reported).
+
+  A `2xx` whose body names no usable `transaction_id` cannot say what was written, so it is
+  `{:error, {:write_unconfirmed, key, :missing_transaction_id}}` (W1): the stake may exist,
+  and `key` is what the caller retries or reconciles with.
+  """
+  @spec to_staking_transaction(
+          term(),
+          :stake | :unstake,
+          String.t(),
+          Decimal.t(),
+          String.t()
+        ) ::
+          {:ok, Types.StakingTransaction.t()}
+          | {:error, {:write_unconfirmed, String.t(), :missing_transaction_id}}
+  def to_staking_transaction(%{"transaction_id" => id}, type, asset, amount, key)
+      when is_binary(id) and id != "" do
+    if String.trim(id) == "",
+      do: {:error, {:write_unconfirmed, key, :missing_transaction_id}},
+      else: {:ok, staking_transaction(id, type, asset, amount)}
+  end
+
+  def to_staking_transaction(_body, _type, _asset, _amount, key),
+    do: {:error, {:write_unconfirmed, key, :missing_transaction_id}}
+
+  defp staking_transaction(id, type, asset, amount) do
+    Types.StakingTransaction.new(
+      id: id,
+      type: type,
+      venue_type: nil,
+      asset: String.upcase(asset),
+      amount: amount,
+      amount_paid_so_far: nil,
+      amount_remaining: if(type == :unstake, do: amount),
+      provider: :coinbase
+    )
+  end
 
   # --- internals ----------------------------------------------------------
 
@@ -595,6 +685,133 @@ defmodule DpExchange.Coinbase.Prime do
       :post
       |> HttpClient.request(@base_url <> @api_path <> path, headers, encoded, request_opts(opts))
       |> unwrap()
+    end
+  end
+
+  # **A staking write, past the point where it may have reached the venue, never answers a
+  # bare error** (family convention W1). The body always carries the `idempotency_key` that
+  # was sent (the caller's, or the one generated for this call), and it is that key a caller
+  # retries with. The outcomes:
+  #
+  #   * a transport failure, a 5xx or a 2xx whose body is not an object may have staked:
+  #     `{:error, {:write_unconfirmed, key, reason}}`;
+  #   * a 4xx answered to an internal RETRY (the signer ran more than once) is the same
+  #     thing, not a refusal: the earlier attempt may have been accepted, and the 4xx may be
+  #     the venue objecting to the repeat;
+  #   * a failure decided before anything was sent (our own limiter refusing the first
+  #     attempt, signing) and a 4xx on the first attempt stay plain.
+  #
+  # The signer is counted as `Rest.place_order/3` counts it, because this call retries.
+  defp post_write(path, body, credentials, opts) do
+    key = Map.get(body, "idempotency_key")
+    calls = :atomics.new(1, signed: false)
+
+    with {:ok, encoded} <- encode_body(body) do
+      headers = calls |> counting(signer(:post, path, encoded, credentials))
+
+      :post
+      |> HttpClient.request(@base_url <> @api_path <> path, headers, encoded, request_opts(opts))
+      |> unwrap_write(key, {calls, opts})
+    end
+  end
+
+  defp counting(calls, signer) do
+    fn ->
+      :atomics.add(calls, 1, 1)
+      signer.()
+    end
+  end
+
+  # A 2xx the venue answered but whose body is no object cannot say what became of the write.
+  defp unwrap_write({:ok, %{status: status}} = result, key, _counted)
+       when status in 200..299 do
+    case unwrap(result) do
+      {:ok, _body} = confirmed -> confirmed
+      {:error, reason} -> write_unconfirmed(key, reason)
+    end
+  end
+
+  defp unwrap_write(failure, key, counted) do
+    case unwrap(failure) do
+      {:refused, message} = refused ->
+        if attempts_made(counted) > 1, do: write_unconfirmed(key, message), else: refused
+
+      {:error, reason} ->
+        if pre_send_failure?(reason) and sent_attempts(counted) == 0,
+          do: {:error, reason},
+          else: write_unconfirmed(key, reason)
+    end
+  end
+
+  defp write_unconfirmed(key, reason),
+    do: {:error, {:write_unconfirmed, key, bounded_reason(reason)}}
+
+  # `Core.HttpClient` signs once per attempt, just before the limiter is asked (twice per
+  # attempt with a blocking limiter), so the count tells how many attempts really left the
+  # process. For a pre-send failure the last signature was never sent; a response, even a
+  # 4xx, means every signature of its attempt was.
+  defp sent_attempts({calls, opts}) do
+    signed = :atomics.get(calls, 1)
+
+    if Config.opt(opts, :rate_limit_blocking, false),
+      do: div(signed, 2),
+      else: max(signed - 1, 0)
+  end
+
+  defp attempts_made({calls, opts}) do
+    signed = :atomics.get(calls, 1)
+    if Config.opt(opts, :rate_limit_blocking, false), do: div(signed, 2), else: signed
+  end
+
+  defp pre_send_failure?({:exchange_error, _venue, :rate_limit_timeout}), do: true
+
+  defp pre_send_failure?({:exchange_error, _venue, "Throttled by our own rate limiter" <> _rest}),
+    do: true
+
+  defp pre_send_failure?({:exchange_error, _venue, "Rate limiter unavailable"}), do: true
+  defp pre_send_failure?({:exchange_error, _venue, _reason}), do: false
+  defp pre_send_failure?("Throttled by our own rate limiter" <> _rest), do: true
+  defp pre_send_failure?("Rate limiter unavailable"), do: true
+  defp pre_send_failure?(reason) when is_binary(reason), do: false
+  # What is left is raised before the request: the header function's signing error.
+  defp pre_send_failure?(_local), do: true
+
+  @max_unconfirmed_text 256
+
+  defp bounded_reason(reason) when is_atom(reason), do: reason
+
+  defp bounded_reason(reason) when is_binary(reason),
+    do: String.slice(reason, 0, @max_unconfirmed_text)
+
+  defp bounded_reason({:exchange_error, venue, message}) when is_atom(venue),
+    do: {:exchange_error, venue, bounded_reason(message)}
+
+  defp bounded_reason(reason) do
+    reason
+    |> inspect(limit: 20, printable_limit: 200)
+    |> String.slice(0, @max_unconfirmed_text)
+  end
+
+  # The wallet-scoped bodies carry no currency, so the wallet decides what is staked. Reading
+  # the wallet first and comparing is the only way to make the caller's `asset` mean what it
+  # says. Fails closed: a symbol that cannot be read is a refusal to write, not a guess.
+  defp verify_wallet_asset(credentials, portfolio_id, wallet_id, asset, opts) do
+    path = "/portfolios/#{portfolio_id}/wallets/#{wallet_id}"
+
+    case get(path, credentials: credentials, opts: opts) do
+      {:ok, %{"wallet" => %{"symbol" => held}}} when is_binary(held) and held != "" ->
+        if String.upcase(held) == String.upcase(asset),
+          do: :ok,
+          else: {:error, {:wallet_asset_mismatch, asset, held}}
+
+      {:ok, _unreadable} ->
+        {:error, {:wallet_asset_unverified, :unexpected_response_shape}}
+
+      {:refused, _message} = refused ->
+        refused
+
+      {:error, _reason} = failure ->
+        failure
     end
   end
 

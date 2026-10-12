@@ -65,7 +65,7 @@ defmodule DpExchange.Coinbase.Fake do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Coinbase.{Feed, Prime, Rest, SymbolFormat}
+  alias DpExchange.Coinbase.{Feed, IdempotencyKey, Prime, Rest, SymbolFormat}
   alias DpExchange.Core.{Capabilities, Config, FakeInjection, Fanout, Instrument, Types, Venue}
 
   @symbols ~w(BTC-USD BTC-USDC ETH-USD ETH-EUR)
@@ -406,26 +406,28 @@ defmodule DpExchange.Coinbase.Fake do
       available = Decimal.new("1.25")
       hold = Decimal.new("0.25")
 
-      {:ok,
-       [
-         %Types.Balance{
-           currency: "BTC",
-           balance: Decimal.add(available, hold),
-           available_balance: available,
-           hold: hold,
-           # When we asked. A balance has no venue event time.
-           timestamp: DateTime.utc_now(),
-           provider: :coinbase
-         },
-         %Types.Balance{
-           currency: "USD",
-           balance: Decimal.new("10000"),
-           available_balance: Decimal.new("10000"),
-           hold: Decimal.new("0"),
-           timestamp: DateTime.utc_now(),
-           provider: :coinbase
-         }
-       ]}
+      balances = [
+        %Types.Balance{
+          currency: "BTC",
+          balance: Decimal.add(available, hold),
+          available_balance: available,
+          hold: hold,
+          # When we asked. A balance has no venue event time.
+          timestamp: DateTime.utc_now(),
+          provider: :coinbase
+        },
+        %Types.Balance{
+          currency: "USD",
+          balance: Decimal.new("10000"),
+          available_balance: Decimal.new("10000"),
+          hold: Decimal.new("0"),
+          timestamp: DateTime.utc_now(),
+          provider: :coinbase
+        }
+      ]
+
+      # `opts[:portfolio]` scopes the read (`retail_portfolio_id`); see `in_portfolio?/1`.
+      {:ok, if(in_portfolio?(opts), do: balances, else: [])}
     end)
   end
 
@@ -446,7 +448,7 @@ defmodule DpExchange.Coinbase.Fake do
       ]
 
       case Keyword.get(opts, :uuid) do
-        nil -> {:ok, accounts}
+        nil -> {:ok, if(in_portfolio?(opts), do: accounts, else: [])}
         "8bfc20d7-f7c6-4422-bf07-8243ca4169fe" -> {:ok, accounts}
         # An id the venue does not hold. `{:ok, []}` would read as "this account has nothing".
         # The venue answers 404, which `Rest` classifies `{:refused, :not_found}`.
@@ -540,8 +542,14 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  # Everything this fake holds belongs to its one default portfolio. `opts[:portfolio]` is
+  # honoured as the real reads honour it (the spec's `retail_portfolio_id`): another
+  # portfolio holds nothing here, rather than being ignored and handed this one's rows.
+  defp in_portfolio?(opts), do: Keyword.get(opts, :portfolio) in [nil, @default_portfolio_id]
+
   defp fill_matches?(fill, opts) do
-    matches?(Keyword.get(opts, :order_id), fill.order_id) and
+    in_portfolio?(opts) and
+      matches?(Keyword.get(opts, :order_id), fill.order_id) and
       matches?(canonical_symbol(Keyword.get(opts, :symbol)), fill.symbol) and
       after_start?(fill.timestamp, Keyword.get(opts, :start)) and
       before_end?(fill.timestamp, Keyword.get(opts, :end))
@@ -826,6 +834,13 @@ defmodule DpExchange.Coinbase.Fake do
 
   @impl true
   def get_positions(opts \\ []) do
+    # The futures endpoints take no portfolio scope; refused, as the real read refuses it.
+    with :ok <- Rest.reject_portfolio_option(opts) do
+      do_get_positions(opts)
+    end
+  end
+
+  defp do_get_positions(opts) do
     with_credentials(opts_credentials(opts), fn ->
       # A short, and a `realised_pnl` of nil — the two things the mapping has to get right.
       {:ok,
@@ -870,69 +885,43 @@ defmodule DpExchange.Coinbase.Fake do
   def get_staking_history(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def stake(asset, amount, opts \\ []) do
-    with_injection(fn ->
-      # Same guard as the package: a portfolio or nothing. A fake that defaulted one would
-      # let a consumer ship a stake into a portfolio it never named.
-      with {:ok, portfolio} <- fake_portfolio(opts),
-           :ok <- Prime.validate_scope(portfolio, Keyword.get(opts, :wallet_id)),
-           :ok <- fake_prime_checks(asset, amount, opts) do
-        {:ok,
-         %{
-           "currency" => upcase_asset(asset),
-           "amount" => Decimal.to_string(amount, :normal),
-           "portfolio_id" => portfolio,
-           "wallet_id" => Keyword.get(opts, :wallet_id),
-           "scope" => fake_scope(opts)
-         }}
-      end
-    end)
-  end
-
-  # A wallet-scoped call carries an asset the real path never sends, so it may be anything the
-  # caller passed; only a string is upper-cased.
-  defp upcase_asset(asset) when is_binary(asset), do: String.upcase(asset)
-  defp upcase_asset(_not_a_string), do: nil
+  def stake(asset, amount, opts \\ []), do: fake_staking(:stake, asset, amount, opts)
 
   @impl true
-  def unstake(asset, amount, opts \\ []) do
+  def unstake(asset, amount, opts \\ []), do: fake_staking(:unstake, asset, amount, opts)
+
+  # Returns the `Types.StakingTransaction` the real facade returns (W5), built by the same
+  # function. Refuses, in the real path's order, what the real path refuses: a portfolio or
+  # nothing (a fake that defaulted one would let a consumer ship a stake into a portfolio it
+  # never named), the ids, then `Prime.validate_write/3` (asset in BOTH scopes, the amount and
+  # its 64-place bound, a UUID idempotency key, a map `:extra`), then Prime's three credentials
+  # — without the last, a consumer's test staked with no Prime key and production refused it.
+  #
+  # The transaction id is derived from the idempotency key, so a unique key (generated when
+  # the caller gives none) is a unique transaction and a REUSED key answers with the original,
+  # as the venue's "subsequent requests using the same key will not create new transactions".
+  #
+  # This fake has no wallet inventory, so the real path's wallet-asset check
+  # (`{:wallet_asset_mismatch, _, _}`) cannot be modelled: a wallet is taken to hold the asset
+  # named. An unstake reports nothing paid (`amount_remaining` is the whole amount), because
+  # one that reported itself settled would teach a consumer to spend an asset still unbonding.
+  defp fake_staking(type, asset, amount, opts) do
     with_injection(fn ->
       with {:ok, portfolio} <- fake_portfolio(opts),
            :ok <- Prime.validate_scope(portfolio, Keyword.get(opts, :wallet_id)),
-           :ok <- fake_prime_checks(asset, amount, opts) do
-        # Nothing has arrived. An unstake that reported itself settled would teach a consumer
-        # to spend an asset that is still unbonding.
-        {:ok,
-         %{
-           "currency" => upcase_asset(asset),
-           "amount" => Decimal.to_string(amount, :normal),
-           "portfolio_id" => portfolio,
-           "wallet_id" => Keyword.get(opts, :wallet_id),
-           "scope" => fake_scope(opts),
-           "settled" => false
-         }}
+           :ok <- Prime.validate_write(asset, amount, opts),
+           :ok <- fake_prime_credentials(opts) do
+        key = Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate()
+        body = %{"transaction_id" => "fake-#{type}-#{key}"}
+        Prime.to_staking_transaction(body, type, asset, amount, key)
       end
     end)
   end
 
-  # The real facade's own checks, in its order: a portfolio-scoped write wants an asset, both
-  # scopes want a positive finite Decimal, and Prime wants all three of its credentials.
-  # Without the last, a consumer's test staked with no Prime key and production refused it.
-  defp fake_prime_checks(asset, amount, opts) do
-    cond do
-      is_nil(Keyword.get(opts, :wallet_id)) and not (is_binary(asset) and asset != "") ->
-        {:error, {:invalid_asset, asset}}
-
-      not (is_struct(amount, Decimal) and not Decimal.nan?(amount) and not Decimal.inf?(amount) and
-               Decimal.positive?(amount)) ->
-        {:error, {:invalid_amount, amount}}
-
-      not prime_credentials?(Keyword.get(opts, :credentials)) ->
-        {:error, :missing_prime_credentials}
-
-      true ->
-        :ok
-    end
+  defp fake_prime_credentials(opts) do
+    if prime_credentials?(Keyword.get(opts, :credentials)),
+      do: :ok,
+      else: {:error, :missing_prime_credentials}
   end
 
   defp prime_credentials?(%{access_key: key, passphrase: phrase, signing_key: signing}),
@@ -945,10 +934,6 @@ defmodule DpExchange.Coinbase.Fake do
       nil -> {:error, :missing_portfolio}
       portfolio -> {:ok, portfolio}
     end
-  end
-
-  defp fake_scope(opts) do
-    if Keyword.get(opts, :wallet_id), do: "wallet", else: "portfolio"
   end
 
   @impl true
@@ -1356,7 +1341,8 @@ defmodule DpExchange.Coinbase.Fake do
 
       matching =
         Enum.filter(canned ++ placed, fn order ->
-          status_matches?(Keyword.get(opts, :status), order.status) and
+          in_portfolio?(opts) and
+            status_matches?(Keyword.get(opts, :status), order.status) and
             matches?(canonical_symbol(Keyword.get(opts, :symbol)), order.symbol)
         end)
 

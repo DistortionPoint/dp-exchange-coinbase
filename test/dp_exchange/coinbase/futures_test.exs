@@ -89,14 +89,36 @@ defmodule DpExchange.Coinbase.FuturesTest do
       assert position.instrument_type == :future
     end
 
-    test "the venue's UNKNOWN is nil, not a side" do
-      # A position filed the wrong way round is the most expensive mistake in this mapping.
+    test "the venue's UNKNOWN side refuses the reply, it is never a side" do
+      # A position filed the wrong way round is the most expensive mistake in this mapping,
+      # and `Core.Types.Position` enforces `:long | :short`, so there is no `nil` to carry.
       body = %{"positions" => [position_row(%{"side" => "UNKNOWN"})]}
 
-      assert {:ok, [position]} =
+      assert {:error, {:unknown_position_side, "UNKNOWN"}} =
                Rest.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
+    end
 
-      assert position.side == nil
+    test "a portfolio scope is refused, the futures endpoints take none" do
+      assert {:error, {:unsupported_option, :portfolio}} =
+               Rest.get_positions(@credentials,
+                 portfolio: "p-1",
+                 plug: responding(%{"positions" => []}),
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:unsupported_option, :portfolio}} =
+               Rest.list_futures_positions(@credentials,
+                 portfolio: "p-1",
+                 plug: responding(%{"positions" => []}),
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:unsupported_option, :portfolio}} =
+               Rest.get_futures_position(@credentials, "BIT-28JUL23-CDE",
+                 portfolio: "p-1",
+                 plug: responding(%{"position" => %{}}),
+                 retry_attempts: 0
+               )
     end
 
     test "realised P&L is nil, because the venue publishes only a daily figure" do
@@ -515,13 +537,21 @@ defmodule DpExchange.Coinbase.FuturesTest do
       assert Decimal.equal?(position.quantity, Decimal.new("3"))
     end
 
-    test "a missing amount is nil rather than zero" do
-      body = %{"positions" => [Map.delete(position_row(), "number_of_contracts")]}
+    test "a missing, zero, negative or unreadable amount refuses the reply" do
+      for amount <- [:missing, "0", "-3", "abc", "NaN"] do
+        row =
+          if amount == :missing,
+            do: Map.delete(position_row(), "number_of_contracts"),
+            else: position_row(%{"number_of_contracts" => amount})
 
-      assert {:ok, [position]} =
-               Rest.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
+        raw = if amount == :missing, do: nil, else: amount
 
-      assert position.quantity == nil
+        assert {:error, {:invalid_position_quantity, ^raw}} =
+                 Rest.get_positions(@credentials,
+                   plug: responding(%{"positions" => [row]}),
+                   retry_attempts: 0
+                 )
+      end
     end
   end
 
@@ -548,24 +578,18 @@ defmodule DpExchange.Coinbase.FuturesTest do
                Rest.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
     end
 
-    test "an UNKNOWN side and a missing amount are still reported, not refused" do
-      # The other half, and why only the symbol is guarded. Both of these are decisions this
-      # package already made with reasons — "the venue's UNKNOWN is nil, not a side" and "a
-      # missing amount is nil rather than zero" — and reporting a partial position still tells
-      # a caller the position exists. The symbol guard must not tighten into either.
+    test "an UNKNOWN side with a missing amount refuses the reply on the side first" do
+      # `Core.Types.Position` enforces `:side` (`:long | :short`) and a positive `:quantity`.
+      # A partial position used to be reported with `nil`s; it is now refused whole.
       row =
         position_row(%{"side" => "UNKNOWN"})
         |> Map.delete("number_of_contracts")
 
-      assert {:ok, [position]} =
+      assert {:error, {:unknown_position_side, "UNKNOWN"}} =
                Rest.get_positions(@credentials,
                  plug: responding(%{"positions" => [row]}),
                  retry_attempts: 0
                )
-
-      assert position.side == nil
-      assert position.quantity == nil
-      assert position.symbol
     end
   end
 end

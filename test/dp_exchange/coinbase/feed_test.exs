@@ -753,11 +753,19 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert :sys.get_state(feed).wanted == MapSet.new(["BTC-USD"])
     end
 
-    test "the refusal names what was wrong, bounded" do
+    test "the refusal carries the caller's whole argument, as given" do
       feed = start_feed()
+      given = [:a, 1, nil, "", :e, :f, :g, "OK-USD"]
 
-      assert {:error, {:invalid_symbols, [:a, 1, nil, "", :e]}} =
-               Feed.subscribe(feed, [:a, 1, nil, "", :e, :f, :g, "OK-USD"])
+      assert {:error, {:invalid_symbols, ^given}} = Feed.subscribe(feed, given)
+
+      mixed = ["BTC-USD", "  "]
+      assert {:error, {:invalid_symbols, ^mixed}} = Feed.subscribe(feed, mixed)
+      assert {:error, {:invalid_symbols, ^mixed}} = Feed.unsubscribe(feed, mixed)
+      assert {:error, {:invalid_symbols, ^mixed}} = Feed.update_symbols(feed, mixed)
+
+      improper = ["BTC-USD" | "tail"]
+      assert {:error, {:invalid_symbols, ^improper}} = Feed.subscribe(feed, improper)
     end
   end
 
