@@ -20,6 +20,14 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Docs (`usage-rules.md` checked line by line against the code):** `:ssl_options` is not a
+  consumer override (`Feed` passes only `:url` to `Socket`); only a credential map that can sign
+  buys the authenticated ceiling; `get_trades/2` requires `:limit` (its error shapes named); a REST
+  `OrderBook` is dated by the pricebook `time`; Prime `metadata` is sent for wallet stakes only; an
+  order id refusal is `{:invalid_order_id, v}`; the reconnect backoff (jittered, short sessions
+  counted, ends when `Feed` stops the socket), `level2_pairs_per_socket`, the pagination, Prime and
+  order-request refusal tags, and symbol upper-casing are documented.
+
 ## [0.3.121] - 2026-10-12
 
 - **A deferred shard reconcile acted on a stale snapshot.** It carried the symbol lists computed

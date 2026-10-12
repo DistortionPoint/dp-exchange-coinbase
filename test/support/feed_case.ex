@@ -69,8 +69,13 @@ defmodule DpExchange.Coinbase.FeedCase do
     cond do
       fun.() -> :ok
       waited >= timeout -> flunk("condition was still false after #{timeout}ms")
-      true -> Process.sleep(5) && wait_until(fun, timeout, waited + 5)
+      true -> poll_again(fun, timeout, waited)
     end
+  end
+
+  defp poll_again(fun, timeout, waited) do
+    Process.sleep(5)
+    wait_until(fun, timeout, waited + 5)
   end
 
   @doc """

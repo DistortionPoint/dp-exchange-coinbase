@@ -122,7 +122,8 @@ the spec defines as "Server time the message was sent", as its `venue_time`; the
 row states no trade time, and the `snapshot` event sent at every (re)subscribe is not a
 trade at all, so the streamed `Quote.venue_time` is now `nil` (use `observed_at`). The REST
 `get_price/2` still carries the latest trade's own `time`, and every `OrderBook` still carries
-the trading engine's `event_time` and fails closed without one.
+a venue time (the pricebook's `time` on REST, the trading engine's `event_time` on the
+stream) and fails closed without one.
 `get_top_of_book/2` reads `/best_bid_ask`, and a pricebook that arrives without a parseable
 `time` yields `venue_time: nil` rather than either refusing the quote or stamping it with
 our clock — the bid and the ask are real, `observed_at` still says when we looked, and that
@@ -151,7 +152,8 @@ unavailable"}` to everything.
 
 **Which of the two declared ceilings the limiter is configured from follows whether you
 passed `credentials:` above** — see "Credentials choose the endpoint" below. Pass none
-and the limiter runs at `public_ceiling`; pass a non-empty credential map and it runs at
+and the limiter runs at `public_ceiling`; pass a credential map that can sign (`%{}`, a
+missing key, or a blank or padded value does not count) and it runs at
 `authenticated_ceiling` instead, matching whichever request path `Rest` actually takes for
 this instance.
 
@@ -186,7 +188,9 @@ resolution will fail, so resolve to 0.5.1.
 default is not to (`verify: :verify_none`), and until then this package connected with
 that default, accepting any certificate. It now uses the operating system's trust store and
 HTTPS hostname rules. On a host with no system CA bundle the connection fails with a TLS
-error rather than connecting unverified. Pass your own `:ssl_options` to override.
+error rather than connecting unverified. `Socket.start_link/1` takes an `:ssl_options` that
+replaces these, but `Feed` forwards only `:url` to it, so a consumer starting the venue
+through `DpExchange.Coinbase` has no override.
 
 ## A shard's socket crash costs one shard, never your whole subscription
 
@@ -292,7 +296,9 @@ allowed), and `:aggregation_price_increment` a finite positive number
 level with size `0` is dropped from the book (it is no liquidity), and a level with a price
 of zero or less or a negative size refuses the whole book, on REST and on the stream alike.
 
-`get_trades/2` sends `opts[:since]` as the ticker's `start` and `opts[:end]` as its `end`
+`get_trades/2` requires `opts[:limit]` (a positive integer; absent is `{:error, :missing_limit}`,
+a non-positive or non-integer value `{:error, {:invalid_limit, v}}`, above `int32`
+`{:error, {:invalid_option, :limit, v}}`) and sends `opts[:since]` as the ticker's `start` and `opts[:end]` as its `end`
 (a `DateTime` each; anything else is `{:error, {:invalid_option, key, v}}`), where it used to
 send only `limit`. `:end` is **exclusive** (MD2): the reply is also filtered client-side to
 trades stamped strictly before it, so the rule holds whatever the venue does with `end`
@@ -566,6 +572,16 @@ stalled it long enough for your own calls to time out. Frames for such a shard a
 skipped, and nothing is lost by it, because the reconnect re-issues the shard's whole
 membership.
 
+**A socket that cannot stay connected backs off, and the backoff is jittered.** The first
+reconnect after a live session drops waits nothing. Each failed reconnect after it waits
+longer: 1s, 2s, 4s, capped at 30s. A session that connected but lived under 30 seconds
+counts toward the same ladder, so a venue that accepts the upgrade and drops the socket
+again does not get a reconnect storm. Every wait is shortened by a random amount of up to
+a quarter of itself (`Socket.jittered_delay_ms/1`), never lengthened, so the shards the
+venue dropped together do not redial together. The `delay_ms` on the `link_reconnect_attempt`
+telemetry event is the delay actually waited. A backoff wait ends at once when `Feed` stops
+the socket, so a retired shard does not dial the venue one last time.
+
 ```elixir
 children = [{DpExchange.Coinbase, credentials: my_credentials(), resubscribe_interval_ms: 30_000}]
 ```
@@ -615,7 +631,8 @@ evidence of refusal. No Coinbase document states this number even now — it is 
 venue behaviour, not a documented figure.
 
 So `level2` groups symbols at **30 per socket by default**, independent of and smaller
-than `ticker`'s 100 — and, as of this version, that `30` is a supervision option you can
+than `ticker`'s 100 — and, as of this version, that `30` is the `level2_pairs_per_socket` supervision option (a positive
+integer; above 30 is honoured with a logged warning, anything else raises at start) you can
 change, not only a constant you have to wait on a release to see moved. A universe that
 needs 5 `ticker` sockets needs 14 `level2` sockets for the
 same 406-symbol scope (19 total), and every one of them — either channel — is staggered
@@ -836,8 +853,8 @@ that figure keeps its own name — along with `expiration_time`, which a future 
 **A sweep is scheduled, not settled.** `schedule_futures_sweep/2` queues a move out of the
 futures account; `list_futures_sweeps/2` reports the queue. **Omitting the amount sweeps
 every available excess dollar** — the venue's default, not this package's. Only an
-*absent* `:usd_amount` means that: a present one must be a finite positive number
-(`{:error, {:invalid_amount, value}}` otherwise), so `""`, `0` or a typo cannot turn into
+*absent* `:usd_amount` means that: a present one must be a finite positive `Decimal`,
+integer or numeric string (`{:error, {:invalid_amount, value}}` otherwise, a float included), so `""`, `0` or a typo cannot turn into
 "sweep everything" at the venue. A `200` saying `success: false` on either
 `schedule_futures_sweep/2` or `cancel_futures_sweep/2` is `{:refused, :sweep_not_scheduled}`
 or `{:refused, :sweep_not_cancelled}`, never `{:ok, _}`.
@@ -845,7 +862,8 @@ or `{:refused, :sweep_not_cancelled}`, never `{:ok, _}`.
 **Perpetual orders carry `:leverage` and `:margin_type` when you name them.**
 `place_order/3` and `preview_order/3` send `leverage` and `margin_type` (`:cross`,
 `:isolated` or the venue's `"CROSS"`/`"ISOLATED"`) only when the request has them; absent,
-the venue's defaults (1.0, CROSS) apply. A value outside the schema is
+the venue's defaults (1.0, CROSS) apply. `:leverage` is a finite positive `Decimal`, integer
+or numeric string (a float is refused). A value outside the schema is
 `{:error, {:invalid_leverage, v}}` or `{:error, {:invalid_margin_type, v}}`. They used to be
 dropped silently.
 
@@ -863,16 +881,18 @@ string. `DpExchange.Coinbase.Prime.credentials()` is that triple's type.
 **All nine reach through the facade.** `stake/3` and `unstake/3` are the two that also
 answer a `Core.Venue` callback, and they **pick a scope only from what you said**: a
 `:wallet_id` means the wallet, its absence means the portfolio, and `:portfolio_id` is
-always required. A portfolio-scoped unstake redeems across *every* wallet in the
-portfolio.
+always required (absent is `{:error, :missing_portfolio}`). The Prime credential triple goes
+in `opts[:credentials]` (not the CDP pair); an unusable one is
+`{:error, :missing_prime_credentials}`. A portfolio-scoped unstake redeems across *every*
+wallet in the portfolio.
 
 **The two scopes send different bodies, because the venue documents different schemas for
 them.** Portfolio-scoped calls send a flat `{idempotency_key, currency_symbol, amount}`;
 `opts[:extra]` merges into that same top level. Wallet-scoped calls send `{idempotency_key,
 inputs: {amount, ...}}` — no `currency` field at all, because a wallet already names one
 asset on the venue's side — and `opts[:extra]` merges into `inputs`, not the top level.
-`opts[:metadata]`, where the venue defines that field, is sent as its own sibling key
-either way. `opts[:extra]` fills in fields this package does not know; it **cannot replace**
+`opts[:metadata]` is sent as its own sibling key on a wallet-scoped call only; the
+portfolio-scoped body does not carry it. `opts[:extra]` fills in fields this package does not know; it **cannot replace**
 `amount`, `currency_symbol`, `idempotency_key` or `transaction_ids`, the ones it validated.
 
 **What is refused before anything is signed.** `:portfolio_id` and `:wallet_id` are path
@@ -881,7 +901,9 @@ and `nil` for a wallet) answers `{:error, {:invalid_portfolio_id, value}}` or
 `{:error, {:invalid_wallet_id, value}}`. A given `:idempotency_key` must be a UUID in the
 canonical 8-4-4-4-12 hex form, as the spec requires (`{:error, {:invalid_idempotency_key,
 value}}` otherwise): the venue answers a repeated key with the first response, so `""` made
-every later stake a copy of the first.
+every later stake a copy of the first. The asset must be a non-blank string
+(`{:invalid_asset, v}`), the amount a finite positive `Decimal` (`{:invalid_amount, v}`), and
+`opts[:extra]` a map (`{:invalid_extra, v}`).
 
 **BREAKING: `stake/3` and `unstake/3` return a `Core.Types.StakingTransaction`**, as the Core
 callback says, not Prime's raw map. `id` is Prime's `transaction_id`, `amount` what you asked
@@ -910,14 +932,19 @@ Every staking write sends an `idempotency_key` (yours, or one generated for the 
 retries internally only because of it. The key in the error is the one that was sent, so
 retrying with it cannot stake twice. See the `write_unconfirmed` entry at the top of this
 file for what counts as unconfirmed; a `4xx` that answers one of the call's own retries is
-also unconfirmed rather than a refusal.
+also unconfirmed rather than a refusal, and so is a `2xx` that names no `transaction_id`
+(`reason` is `:missing_transaction_id`: the stake may exist).
 
 **An order request key is read or refused by name.** `place_order/3` and `preview_order/3`
 accept the contract's keys plus `quote_size`, `stop_price`, `stop_direction`, `post_only`,
 `end_time`, `client_order_id`, `leverage`, `margin_type`, `retail_portfolio_id`,
 `sor_preference` and (place only) `preview_id`. Any other key, including `reduce_only` and
 the schema's unbuilt `attached_order_configuration`, is
-`{:error, {:unsupported_order_field, key}}`, never silently dropped.
+`{:error, {:unsupported_order_field, key}}`, never silently dropped. A request that is not a
+map is `{:invalid_order_request, request}`; a blank or non-string `retail_portfolio_id` or
+`preview_id`, or a `sor_preference` outside the schema's enum, is
+`{:invalid_order_field, key, value}`; a `side` other than `:buy`/`:sell` is
+`{:invalid_side, value}`; a non-text or blank symbol is `{:invalid_symbol, value}`.
 
 **`:order_type` and `:time_in_force` are required, and a field the type does not use is
 refused.** No default: a request with no `:order_type` is `{:error, {:missing_field,
@@ -989,7 +1016,8 @@ A lapsed quote can be filled at the *current* rate rather than refused, which is
 dangerous outcome because it looks like success and every number in it is real.
 
 **Both accounts are re-asked on the commit and even on the read.** `opts[:from]` and
-`opts[:to]` are required on `commit_conversion/2` and `get_conversion/2`, and this package
+`opts[:to]` are required on `commit_conversion/2` and `get_conversion/2`
+(`{:error, :from_and_to_required}` when either is absent or blank), and this package
 fills neither in from the quote: a conversion committed against accounts you did not name
 happens between the wrong two balances.
 
@@ -1092,7 +1120,7 @@ before this version and saw nothing, that was not your venue being quiet:
 `:telemetry.attach/4` against a name nobody emits succeeds, so an empty panel was
 indistinguishable from no traffic. Every one of them fires now.
 
-Four things to know before you build on them:
+Five things to know before you build on them:
 
 - **Telemetry is the metrics channel; `Core.Notice` is the action channel.** Telemetry is
   aggregate and lossy by design. Alarm on notices. Graph telemetry. Alarming on a gauge
@@ -1108,6 +1136,11 @@ Four things to know before you build on them:
 - **`:bytes` may be absent from `[:dp_exchange, :link, :event]`**, and absent is not zero. A
   polling route has no frame, so there is no byte count that means what a socket's does.
   Treat a missing `:bytes` as "this route cannot measure that", not as no data.
+- **`delay_ms` on `[:dp_exchange, :link, :reconnect_attempt]` is the delay actually waited**,
+  not the backoff ladder's rung. Each socket shortens its wait by a random amount of up to a
+  quarter, so the sockets a venue drops together do not all redial on the same second. Never
+  lengthened: the ladder's 30-second ceiling holds. `0` means an immediate redial, not a
+  missing figure.
 
 `:endpoint` metadata is the request URL with the query string removed. Deliberate: telemetry
 metadata reaches logs, aggregators and third-party exporters, and the query string is the one
@@ -1157,6 +1190,13 @@ filter (`:symbol` or `:status` on orders; `:symbol`, `:order_id` or `:start`/`:e
 rather than treating them as "no data". `get_orders/2` has no date option: the venue's
 `start_date`/`end_date` are not sent.
 
+A page that says `has_next: true` but carries no cursor is `{:error,
+:pagination_cursor_missing}`: the venue promised more and gave no way to ask for it, so the
+first page is never returned as the whole list. That one is the venue's fault, not this
+package's limit, and a narrower filter will not necessarily help. An empty order page
+carrying `proof_token_required: true` is `{:refused, :proof_token_required}`. A row with no
+readable `order_id` refuses the whole `get_orders/2` list.
+
 `:limit` is the venue's **page size**, not a cap: the walk collects every page, so take what
 you want from the list. On `get_balances/2` and `get_accounts/2` it must be an integer in
 `1..250` (the venue's "max 250"); on orders and fills any positive integer.
@@ -1184,7 +1224,8 @@ None of these raises in your process, and the fake runs the same check in the sa
 - **An id that becomes a path segment** — a payment method, portfolio, trade, futures
   product, order or account uuid — must be a non-empty string:
   `{:error, {:invalid_id, name, value}}` (`name` is `:payment_method_id`, `:portfolio_uuid`,
-  `:trade_id`, `:product_id`, `:order_id` or `:uuid`). `nil`, a number or a map used to raise
+  `:trade_id`, `:product_id` or `:uuid`; an order id is `{:invalid_order_id, value}`, as
+  above). `nil`, a number or a map used to raise
   `FunctionClauseError` on `get_payment_method/3`, `get_portfolio_breakdown/3`,
   `delete_portfolio/3`, `rename_account/3`, `commit_conversion/2`, `get_conversion/2` and
   `get_futures_position/3`.
@@ -1198,8 +1239,10 @@ None of these raises in your process, and the fake runs the same check in the sa
   (`{:invalid_time, :start | :end, v}`), with `:start` before `:end`
   (`{:invalid_range, start: s, end: e}`). Strings used to be forwarded as given.
 - **Conversions and transfers.** `quote_conversion/4` needs a finite positive `Decimal`, and
-  `from`/`to` must be non-empty strings; `opts[:from]`/`opts[:to]` on commit and read, and
-  on `transfer_internal/4`, may not be `""`. `transfer_internal/4` also needs a non-empty
+  `from`/`to` must be non-empty strings (`{:invalid_id, :from | :to, v}`);
+  `opts[:from]`/`opts[:to]` on commit and read must both be non-empty strings
+  (`{:error, :from_and_to_required}`), and on `transfer_internal/4` both portfolio uuids are
+  required (`{:error, :missing_portfolio}`). `transfer_internal/4` also needs a non-empty
   asset (`{:invalid_asset, v}`), and the same portfolio on both sides moves nothing and is
   `{:error, {:invalid_transfer, :same_account}}`. The amount is a finite positive `Decimal`
   (a float, integer or string is `{:invalid_amount, v}`). The callback's two option lists are
@@ -1245,6 +1288,10 @@ feed is too busy to answer within its call budget, and `{:error, {:feed_exited, 
 when it dies while answering. `coverage/1` and `coverage_by_kind/1` answer an empty map in
 all three cases, which means "not observed". Treat `:feed_timeout` as transient and retry.
 Treat the other two as a feed your supervision tree has to bring back.
+
+**Symbols are upper-cased on the way in** (`subscribe/2`, `unsubscribe/2`, `update_symbols/2`):
+`"btc-usd"` means `"BTC-USD"`. Case is the only difference normalised; anything else that is
+not canonical is yours to fix.
 
 **A symbol list that cannot be sent is refused, and nothing changes.** `subscribe/2`,
 `unsubscribe/2` and `update_symbols/2` take a proper list of strings that are not blank
