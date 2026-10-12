@@ -1351,6 +1351,11 @@ defmodule DpExchange.Coinbase.Feed do
   # a hardcoded constant.
   @default_resubscribe_interval_ms 60_000
 
+  # The least time between two gap-triggered re-issues of the same `level2` shard (MD9). A
+  # gap is answered with a snapshot burst, and a venue that keeps dropping messages must not
+  # be answered with one burst per gap.
+  @gap_resubscribe_min_ms 5_000
+
   # WebSockex's own send window, which is not configurable.
   @frame_window_ms 5_000
 
@@ -2175,6 +2180,40 @@ defmodule DpExchange.Coinbase.Feed do
         {:noreply, state}
 
       nil ->
+        {:noreply, state}
+    end
+  end
+
+  # A `level2` connection detected a gap in the venue's sequence (MD9): the books built from
+  # its deltas are no longer reliable. The shard is re-issued through the same
+  # `:resubscribe_shard` step a reconnect uses, and the venue answers a subscribe with a
+  # fresh snapshot for each symbol. Only a `level2` shard is acted on (a `ticker` or
+  # `market_trades` gap leaves no book to repair), and at most once per
+  # `@gap_resubscribe_min_ms` per shard: a venue that keeps dropping messages must not be
+  # answered with a snapshot burst per gap, which is itself load on the same connection. The
+  # `:sequence_gap` notice reaches consumers through the notice clause above, once per gap.
+  def handle_info({:dp_exchange, :coinbase, :sequence_gap, socket}, state) do
+    case shard_key_for_socket(state, socket) do
+      {"level2", _index} = key ->
+        now = System.monotonic_time(:millisecond)
+        last = state |> Map.get(:gap_resubscribed_at, %{}) |> Map.get(key)
+
+        if is_nil(last) or now - last >= @gap_resubscribe_min_ms do
+          %{symbols: symbols} = Map.fetch!(state.shards, key)
+          pending = Map.get(state.pending_unsubscribes, key, [])
+
+          send(
+            self(),
+            {:resubscribe_shard, key, socket, "level2", pending, symbols, state.credentials}
+          )
+
+          stamps = state |> Map.get(:gap_resubscribed_at, %{}) |> Map.put(key, now)
+          {:noreply, Map.put(state, :gap_resubscribed_at, stamps)}
+        else
+          {:noreply, state}
+        end
+
+      _not_a_level2_shard ->
         {:noreply, state}
     end
   end
@@ -3534,9 +3573,18 @@ defmodule DpExchange.Coinbase.Feed do
   # moduledoc. `:unfetched` is the only status this fires from, and it flips to
   # `:pending` in the same breath, so a second `subscribe/3` or `update_symbols/2` before
   # the async fetch resolves schedules nothing further.
-  defp maybe_schedule_alias_map_fetch(%{alias_map_status: :unfetched} = state) do
-    Process.send_after(self(), :fetch_alias_map, 0)
-    %{state | alias_map_status: :pending}
+  #
+  # **Nothing wanted, nothing fetched.** `subscribe([])` and `update_symbols([])` leave
+  # `state.wanted` empty, open no socket, and have no frame to attribute, so they must not
+  # cost a REST call to the venue (convention 6, DV9). The first call that names a symbol
+  # still finds the status `:unfetched` and schedules the fetch then.
+  defp maybe_schedule_alias_map_fetch(%{alias_map_status: :unfetched, wanted: wanted} = state) do
+    if MapSet.size(wanted) == 0 do
+      state
+    else
+      Process.send_after(self(), :fetch_alias_map, 0)
+      %{state | alias_map_status: :pending}
+    end
   end
 
   defp maybe_schedule_alias_map_fetch(state), do: state

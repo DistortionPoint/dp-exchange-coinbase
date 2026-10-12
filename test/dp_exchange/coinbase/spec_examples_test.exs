@@ -222,7 +222,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
                Rest.get_historical_prices(
                  "BTC-USD",
                  "1h",
-                 [start: ~U[2026-01-01 00:00:00Z], end: ~U[2026-01-02 00:00:00Z]],
+                 [start: ~U[2021-12-14 00:00:00Z], end: ~U[2021-12-15 00:00:00Z]],
                  credentials: @credentials,
                  plug: responding(body),
                  retry_attempts: 0
@@ -244,7 +244,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
                Rest.get_historical_prices(
                  "BTC-USD",
                  "1h",
-                 [start: ~U[2026-01-01 00:00:00Z], end: ~U[2026-01-02 00:00:00Z]],
+                 [start: ~U[2021-12-14 00:00:00Z], end: ~U[2021-12-15 00:00:00Z]],
                  plug: responding(body),
                  retry_attempts: 0
                )
@@ -419,13 +419,13 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       assert Decimal.equal?(ask_price, Decimal.new("79478.71"))
     end
 
-    test "GetProductBook's documented query params are sent — product_id, limit, aggregation_price_increment" do
+    test "GetProductBook's documented query params are sent — product_id, limit (from :depth), aggregation_price_increment" do
       me = self()
 
       assert {:ok, _book} =
                Rest.get_order_book("BTC-USD",
                  credentials: @credentials,
-                 limit: 50,
+                 depth: 50,
                  aggregation_price_increment: "0.01",
                  plug: capturing(fixture!("at/get_product_book.json"), me),
                  retry_attempts: 0
@@ -1295,14 +1295,16 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
   end
 
   describe "ticker channel — TickerEnvelope/Ticker (at-async.json)" do
-    test "decodes a Quote with Decimal price/volume and the envelope's own timestamp" do
+    test "decodes a Quote with Decimal price/volume and NO venue_time (the envelope is a send time)" do
       assert {:ok, _state} = frame!("websocket/ticker.json")
 
       assert_received {:dp_exchange, :coinbase, %Types.Quote{} = quote_struct}
       assert quote_struct.symbol == "BTC-USD"
       assert Decimal.equal?(quote_struct.price, Decimal.new("79478.7"))
       assert Decimal.equal?(quote_struct.volume, Decimal.new("1234.5"))
-      assert quote_struct.venue_time == ~U[2026-08-28 14:53:45.649112Z]
+      # MD7: the `Ticker` schema has no trade time and the envelope `timestamp`
+      # ("Server time the message was sent") is not one, even on this `snapshot` event.
+      assert quote_struct.venue_time == nil
       assert quote_struct.provider == :coinbase
     end
   end

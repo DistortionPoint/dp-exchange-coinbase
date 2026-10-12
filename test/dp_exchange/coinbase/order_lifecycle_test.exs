@@ -385,7 +385,7 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
         )
       end
 
-      assert {:error, :too_many_order_pages} =
+      assert {:error, :history_truncated} =
                Rest.get_orders(@credentials, plug: plug, retry_attempts: 0)
     end
 

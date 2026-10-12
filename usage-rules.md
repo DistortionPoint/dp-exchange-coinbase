@@ -44,8 +44,9 @@ of two ways, and which one it is depends on what the endpoint gives it:
   Old -> new: those cases were a bare `{:error, {:exchange_error, :coinbase, _}}` or
   `{:error, :unexpected_response_shape}` (or, for a commit with an unreadable trade,
   `{:error, {:unknown_conversion_status, _}}` / `{:error, {:missing_required_field, :id}}`),
-  all of which read as "nothing happened". A venue `400`/`401`/`403`/`404` still answers
-  `{:refused, _}`. Validation, credentials, our own rate limiter refusing before a send and
+  all of which read as "nothing happened". A venue `4xx` answered to the first attempt
+  (any status except 429, which is a plain `{:error, _}`) answers `{:refused, _}` (Prime
+  writes keep their own refusal set). Validation, credentials, our own rate limiter refusing before a send and
   a signing failure stay plain `{:error, _}`.
 - **`{:error, {:replace_accepted_unread, order_id, reason}}` from `replace_order/4`
   means the edit WAS applied.** The read-back of the order failed afterwards. Do not edit
@@ -54,13 +55,19 @@ of two ways, and which one it is depends on what the endpoint gives it:
   `close_position/3` and `replace_order/4` means the order MAY exist.** It is returned when
   the request may have reached the venue and success is not proven: a transport error or
   timeout after sending (including retries exhausted), a 5xx, a `2xx` that is not a map or
-  carries no `success`, and `DUPLICATE_CLIENT_ORDER_ID` (an earlier attempt, possibly this
+  carries no `success`, a `success: true` without a readable `order_id`
+  (`{:order_unconfirmed, cid, {:missing_required_field, :order_id}}`; it was
+  `{:ok, %Order{id: nil}}`), and `DUPLICATE_CLIENT_ORDER_ID` (an earlier attempt, possibly this
   call's own internal retry, was placed). `client_order_id` is the id actually sent,
   **including one this package generated**; for `replace_order/4` it is `nil` (an edit has
   none). Look the order up with `get_orders/2` before sending again, and send the SAME
   `client_order_id` to retry. Errors decided before sending (validation, credentials, our
-  own rate limiter, a signing failure) stay plain `{:error, reason}`; a `400`/`401`/`403`/`404`
-  is the venue answering and stays `{:refused, _}`. Before this a retries-exhausted place
+  own rate limiter, a signing failure) stay plain `{:error, reason}`; **any `4xx` answered to
+  the FIRST attempt** (400, 401, 403, 404, and now 409, 415, 422 and every other, as
+  `{:refused, {:venue_error, status, message}}`) is the venue answering and is
+  `{:refused, _}`, except **429**, which is throttling and a plain `{:error, _}` (these
+  were `{:order_unconfirmed, ...}` before); a `4xx` or 429 answered to an internal RETRY is
+  unconfirmed. Before this a retries-exhausted place
   returned a bare `{:error, "Request failed..."}` with no id, a success-less `2xx` returned
   `{:error, :unexpected_response_shape}`, and a duplicate-id answer was
   `{:refused, {:order_rejected, "DUPLICATE_CLIENT_ORDER_ID"}}`.
@@ -106,16 +113,21 @@ expressible before, because there was no way to see which kind of time you had.
 without it.
 
 
-**When is `venue_time` `nil` on this venue? On a `TopOfBook` from `get_top_of_book/2`, and
-nowhere else.** Every `Quote` and `OrderBook` this package builds parses a time the venue
-sent and fails closed when it cannot, so those always carry the venue's own instant.
+**When is `venue_time` `nil` on this venue? On a streamed `Quote`, always; and on a
+`TopOfBook` from `get_top_of_book/2` when the pricebook has no readable `time`.** BREAKING
+(MD7): a `Quote` from the `ticker` stream carried the message envelope's `timestamp`, which
+the spec defines as "Server time the message was sent", as its `venue_time`; the `Ticker`
+row states no trade time, and the `snapshot` event sent at every (re)subscribe is not a
+trade at all, so the streamed `Quote.venue_time` is now `nil` (use `observed_at`). The REST
+`get_price/2` still carries the latest trade's own `time`, and every `OrderBook` still carries
+the trading engine's `event_time` and fails closed without one.
 `get_top_of_book/2` reads `/best_bid_ask`, and a pricebook that arrives without a parseable
 `time` yields `venue_time: nil` rather than either refusing the quote or stamping it with
 our clock — the bid and the ask are real, `observed_at` still says when we looked, and that
 is the honest freshness for a top-of-book read. Depth is the stricter case and is refused,
 because a stale book read as current is a more expensive wrong number than a stale quote.
 
-So: branch on `nil` if you use `get_top_of_book/2`. You do not need to anywhere else.
+So: branch on `nil` if you stream quotes or use `get_top_of_book/2`.
 
 This section used to say "It never is", full stop, and a consumer who believed it and wrote
 no `nil` branch would have crashed on exactly that one shape. Other venues in the family
@@ -256,10 +268,32 @@ unmeasured, and an empty list would read as *no data*. So is a `range` that is n
 keyword list, or a `:start` / `:end` that is not a `DateTime` (`nil` means absent): the
 same `{:invalid_range, _}`, never a raise in your process.
 
-`get_order_book/2` checks its options the same way before any request: `:limit` must be a
-non-negative integer within `int32` (`{:error, {:invalid_limit, v}}`), and
-`:aggregation_price_increment` a finite positive number
-(`{:error, {:invalid_aggregation_price_increment, v}}`). It is sent in plain notation.
+**The forming bar, the range and `:limit` (BREAKING).** `get_historical_prices/4` no longer
+returns the bar still forming (`opened_at + width > now`; the end defaults to now, so it used
+to be the last element): pass `include_partial: true` to get it, as the venue sent it (it may
+still change; `Candle` has no flag for that). `range[:start]` is **inclusive** and
+`range[:end]` **exclusive** on `opened_at`, filtered client-side because the venue's own
+treatment of the bounds is unmeasured (only a bound you passed is filtered on). `:limit`
+(1..350, the venue's `limit`) is now sent; it used to be ignored. Anything else is
+`{:error, {:invalid_option, :limit, v}}`, and a non-boolean `:include_partial` is
+`{:error, {:invalid_option, :include_partial, v}}`. A candle open/high/low/close of zero or
+less refuses the reply (`{:error, {:non_positive_price, field, value}}`).
+
+`get_order_book/2` checks its options the same way before any request. BREAKING (MD5): the
+depth option is **`:depth`** (levels per side), sent as the venue's `limit`; `:limit` is
+`{:error, {:unsupported_option, :limit}}`. `:depth` must be a positive integer within `int32`
+(`{:error, {:invalid_option, :depth, v}}`; it was `{:invalid_limit, v}`, and `0` was
+allowed), and `:aggregation_price_increment` a finite positive number
+(`{:error, {:invalid_aggregation_price_increment, v}}`). It is sent in plain notation. A
+level with size `0` is dropped from the book (it is no liquidity), and a level with a price
+of zero or less or a negative size refuses the whole book, on REST and on the stream alike.
+
+`get_trades/2` sends `opts[:since]` as the ticker's `start` and `opts[:end]` as its `end`
+(a `DateTime` each; anything else is `{:error, {:invalid_option, key, v}}`), where it used to
+send only `limit`. A `:since` read that returns exactly `limit` rows may have a hole and is
+`{:error, :history_truncated}`. A trade (or quote) price of zero or less refuses the reply
+(`{:error, {:non_positive_price, :price, value}}`; an unreadable one keeps
+`{:invalid_decimal, field, value}`).
 
 ## Coinbase publishes no rate-limit headers
 
@@ -476,7 +510,11 @@ venue renamed (see "Frames are tagged with the symbol you subscribed" above) is 
 asked for it, not as the venue tagged it, and one you no longer want is left out. The
 numbering is per connection, so any of those could be the one that lost a message. Treat it
 exactly as `:link_up` below: the book you built from deltas is no longer reliable, so
-re-read it.
+re-read it. This package does it for you: on a gap it re-issues the `level2` subscription of
+the connection that gapped (at most once per five seconds per shard), and the venue answers a
+subscribe with a fresh snapshot. A frame whose sequence number is not above the last one
+applied is dropped, never applied. A `level2` snapshot level with size `0` is dropped; a delta
+keeps its zero, which means "remove this price".
 
 **A `:data_quality` fault is reported once per connection, not once per frame.** The same
 channel, product and kind of reason on the same connection raises one notice; every frame
@@ -885,20 +923,25 @@ stop-limit order, and `:post_only: true` / `:end_time` / `:stop_direction` where
 no such field are
 `{:error, {:unexpected_field, key}}` (they were silently dropped, or for `post_only` and
 `end_time` refused as `{:unsupported_order_field, key, {type, tif}}`). A GTD order needs
-`:end_time` (`{:missing_field, :end_time}`). A missing limit price is `{:missing_field,
-:price}` and a missing stop price `{:missing_field, :stop_price}` (were `:missing_limit_price`
-and `:missing_stop_price`). `post_only` is sent on the limit GTC and GTD leaves;
-`post_only: false` elsewhere means absent and is accepted. Market and limit orders are sized
-by exactly one of `:quantity` or `:quote_size` (both: `:ambiguous_order_size`); a
-quote-sized order's `Order.quantity` is `nil`.
+`:end_time` (`{:missing_field, :end_time}`, checked with the time in force, before sizing and
+every price field; an unreadable one is `{:invalid_end_time, v}`). A missing limit price is
+`{:missing_field, :price}` and a missing stop price `{:missing_field, :stop_price}` (were
+`:missing_limit_price` and `:missing_stop_price`). An absent `:symbol` is
+`{:invalid_symbol, nil}` (it was `{:missing_field, :symbol}`). `post_only` is sent on the
+limit GTC and GTD leaves; `post_only: false` elsewhere means absent and is accepted. Market
+and limit orders are sized by exactly one of `:quantity` or `:quote_size`: neither is
+`{:missing_field, :quantity}` (was the bare `:missing_order_size` on a market order) and both
+is `{:unexpected_field, :quote_size}` (was the bare `:ambiguous_order_size`); a quote-sized
+order's `Order.quantity` is `nil`.
 
 **Amounts are refused unless finite and positive, and a float is refused.** `{:error,
 {:invalid_quantity | :invalid_quote_size | :invalid_price | :invalid_stop_price, value}}`
 (was `{:invalid_order_amount, field, value}`); a close's `:size` is `{:invalid_quantity, v}`.
 Pass a `Decimal`, an integer or a numeric string. The checks run in a fixed order: request is
-a map, unknown keys, symbol, side, type, time-in-force and the pair, sizing, fields the leaf
-does not carry, price fields, the leaf's required fields, `end_time` / `post_only` values,
-`client_order_id` (non-blank), margin fields, then credentials, then the wire.
+a map, unknown keys, symbol, side, type, time-in-force and the pair (a GTD order's
+`end_time` included), sizing, fields the leaf does not carry, price fields, the leaf's
+required fields, `post_only` values, `client_order_id` (non-blank), margin fields, then
+credentials, then the wire.
 
 **Order ids are checked first.** `get_order/3`, `cancel_order/3` and `replace_order/4` answer
 `{:error, {:invalid_order_id, value}}` for `nil`, a non-string or a blank/whitespace-only id
@@ -1097,8 +1140,9 @@ of the three is the shape this family most wants to avoid — every value in it 
 nothing looks wrong, and what is missing is simply never seen.
 
 Each walk is bounded. A venue that keeps saying `has_next` answers
-`{:error, :too_many_account_pages}`, `{:error, :too_many_fill_pages}` or
-`{:error, :too_many_order_pages}` rather than looping inside your call, and a page that
+`{:error, :history_truncated}` (every walk, the product catalogue included; it was
+`:too_many_account_pages`, `:too_many_fill_pages`, `:too_many_order_pages` and
+`:too_many_product_pages`) rather than looping inside your call, and a page that
 offers back the cursor it was just fetched with is `{:error, :pagination_cursor_repeated}`
 at once (the same page again; also on the product catalogue). Those are errors
 about **this package's limit**, not statements about your account: retry with a narrower

@@ -77,6 +77,9 @@ defmodule DpExchange.Coinbase.Rest do
   # "no data for this period".
   @max_candles 350
 
+  # The spec's `int32` ceiling for a `limit` parameter.
+  @max_int32 2_147_483_647
+
   @doc "Every timeframe Coinbase serves, shortest first."
   @spec granularities() :: [String.t()]
   def granularities, do: @granularities |> Map.keys() |> Enum.sort_by(&timeframe_seconds/1)
@@ -119,12 +122,26 @@ defmodule DpExchange.Coinbase.Rest do
   Historical candles for `symbol` at `timeframe`.
 
   A timeframe Coinbase does not serve is an **error**, never the nearest width.
+
+  ## The range, the forming bar and `:limit` (family conventions MD1, MD2, MD4)
+
+    * `range[:start]` is **inclusive** and `range[:end]` **exclusive**, both on `opened_at`.
+      The venue's own treatment of the two bounds is unmeasured, so the reply is filtered
+      client-side to make the rule exact for a bound the caller gave. An absent `:end` is
+      now, and an absent `:start` is a default window of 300 bars (neither is filtered on).
+    * The bar still forming (`opened_at + width > now`) is **not returned** unless
+      `opts[:include_partial]` is `true`. With it, the last bar is returned as the venue
+      sent it and may still change; `Core.Types.Candle` has no flag for that.
+    * `opts[:limit]` (an integer 1..350, the spec's `limit`, whose default and maximum are
+      both 350) is sent to the venue. Anything else is
+      `{:error, {:invalid_option, :limit, v}}`. An `:include_partial` that is not a boolean
+      is `{:error, {:invalid_option, :include_partial, v}}`.
   """
   @spec get_historical_prices(String.t(), String.t(), keyword(), keyword()) ::
-          {:ok, [Types.Quote.t()]} | {:error, term()} | {:refused, term()}
+          {:ok, [Types.Candle.t()]} | {:error, term()} | {:refused, term()}
   def get_historical_prices(symbol, timeframe, range, opts) do
     with {:ok, enum} <- granularity_enum(timeframe),
-         {:ok, params} <- candle_params(timeframe, range, enum),
+         {:ok, params} <- candle_params(timeframe, range, enum, opts),
          :ok <- validate_symbol(symbol) do
       native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
 
@@ -139,10 +156,41 @@ defmodule DpExchange.Coinbase.Rest do
           else: "/market/products/#{native}/candles"
 
       case request(:get, path, credentials, opts, params) do
-        {:ok, %{body: body}} -> to_candles(body, symbol, timeframe)
+        {:ok, %{body: body}} -> decode_candles(body, symbol, timeframe, range, opts)
         {:error, reason} -> classify(reason, :symbol)
       end
     end
+  end
+
+  defp decode_candles(body, symbol, timeframe, range, opts) do
+    with {:ok, bars} <- to_candles(body, symbol, timeframe) do
+      {:ok, select_candles(bars, timeframe, range, opts)}
+    end
+  end
+
+  @doc """
+  Applies the family's range and forming-bar rules to decoded bars: a bar is kept when its
+  `opened_at` is at or after `range[:start]` (when given), strictly before `range[:end]`
+  (when given), and, unless `opts[:include_partial]` is `true`, when it has closed
+  (`opened_at + width <= now`).
+
+  Shared by `get_historical_prices/4` and `DpExchange.Coinbase.Fake`, so the two cannot
+  drift. `range` and `opts` must already have passed `validate_candle_request/3`.
+  """
+  @spec select_candles([Types.Candle.t()], String.t(), keyword(), keyword()) ::
+          [Types.Candle.t()]
+  def select_candles(bars, timeframe, range, opts) do
+    width = timeframe_seconds(timeframe)
+    now = DateTime.utc_now()
+    partial? = Keyword.get(opts, :include_partial) == true
+    start = Keyword.get(range, :start)
+    finish = Keyword.get(range, :end)
+
+    Enum.filter(bars, fn %{opened_at: at} ->
+      (partial? or DateTime.compare(DateTime.add(at, width, :second), now) != :gt) and
+        (is_nil(start) or DateTime.compare(at, start) != :lt) and
+        (is_nil(finish) or DateTime.compare(at, finish) == :lt)
+    end)
   end
 
   @doc """
@@ -292,7 +340,7 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp all_products(_credentials, _path, _opts, _cursor, _acc, page)
        when page >= @max_product_pages,
-       do: {:error, :too_many_product_pages}
+       do: {:error, :history_truncated}
 
   defp all_products(credentials, path, opts, cursor, acc, page) do
     params = put_unless_nil(%{"product_type" => "SPOT"}, "cursor", cursor)
@@ -560,7 +608,7 @@ defmodule DpExchange.Coinbase.Rest do
   defp next_cursor(_body, _sent), do: :done
 
   defp all_accounts(_credentials, _opts, _cursor, _acc, page) when page >= @max_account_pages,
-    do: {:error, :too_many_account_pages}
+    do: {:error, :history_truncated}
 
   defp all_accounts(credentials, opts, cursor, acc, page) do
     params =
@@ -1765,7 +1813,7 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp all_fills(_credentials, _opts, _cursor, _acc, page) when page >= @max_fill_pages,
-    do: {:error, :too_many_fill_pages}
+    do: {:error, :history_truncated}
 
   defp all_fills(credentials, opts, cursor, acc, page) do
     params =
@@ -2154,12 +2202,13 @@ defmodule DpExchange.Coinbase.Rest do
 
   @doc """
   The local checks `get_historical_prices/4` runs before any request: a timeframe Coinbase
-  serves, and a window of at most `max_candles/0` candles.
+  serves, a `:limit` of 1..#{@max_candles} and a boolean `:include_partial`
+  (`{:invalid_option, key, value}`), and a window of at most `max_candles/0` candles.
   """
-  @spec validate_candle_request(String.t(), keyword()) :: :ok | {:error, term()}
-  def validate_candle_request(timeframe, range) do
+  @spec validate_candle_request(String.t(), keyword(), keyword()) :: :ok | {:error, term()}
+  def validate_candle_request(timeframe, range, opts) do
     with {:ok, enum} <- granularity_enum(timeframe),
-         {:ok, _params} <- candle_params(timeframe, range, enum) do
+         {:ok, _params} <- candle_params(timeframe, range, enum, opts) do
       :ok
     end
   end
@@ -2316,11 +2365,32 @@ defmodule DpExchange.Coinbase.Rest do
   # Refuses a window wider than the venue will answer, rather than sending it and
   # receiving `INVALID_ARGUMENT` — the caller gets a reason it can act on instead of an
   # empty result it will read as "no data".
-  defp candle_params(timeframe, range, enum) do
+  defp candle_params(timeframe, range, enum, opts) do
     width = timeframe_seconds(timeframe)
 
-    with {:ok, start, finish} <- candle_window(range, width) do
-      candle_span(start, finish, width, enum)
+    with {:ok, limit} <- candle_limit(opts),
+         :ok <- include_partial_option(opts),
+         {:ok, start, finish} <- candle_window(range, width),
+         {:ok, params} <- candle_span(start, finish, width, enum) do
+      {:ok, put_unless_nil(params, :limit, limit)}
+    end
+  end
+
+  # The candles endpoint has a `limit` ("350 by default, max 350", at-spec.yaml:455-462), so
+  # the option is sent, never ignored. Zero, a negative, a float, a string and anything above
+  # the venue's maximum are refused rather than clamped.
+  defp candle_limit(opts) do
+    case Keyword.get(opts, :limit) do
+      nil -> {:ok, nil}
+      limit when is_integer(limit) and limit >= 1 and limit <= @max_candles -> {:ok, limit}
+      other -> {:error, {:invalid_option, :limit, other}}
+    end
+  end
+
+  defp include_partial_option(opts) do
+    case Keyword.get(opts, :include_partial) do
+      value when value in [nil, true, false] -> :ok
+      other -> {:error, {:invalid_option, :include_partial, other}}
     end
   end
 
@@ -2558,7 +2628,7 @@ defmodule DpExchange.Coinbase.Rest do
   # because two formatters for one shape is a second place to be wrong about the venue.
   defp to_quote(%{"trades" => [trade | _rest]} = _body, symbol) when is_map(trade) do
     with {:ok, at} <- parse_time(trade["time"]),
-         {:ok, price} <- required_decimal(trade["price"], :price) do
+         {:ok, price} <- required_price(trade["price"], :price) do
       # The latest trade's own size: one print (dp-exchange-core issue #42). The streamed
       # `Quote` carries a rolling 24-hour total instead, and `volume_window` tells them apart.
       volume = decimal(trade["size"])
@@ -2596,6 +2666,14 @@ defmodule DpExchange.Coinbase.Rest do
   the venue does with an undocumented absence; this refuses locally instead. `Core.Venue`
   documents no default itself, so a caller must say how many prints it wants.
 
+  **`opts[:since]` and `opts[:end]`** (a `DateTime` each) are sent to the venue as the ticker's
+  `start` and `end` (at-spec.yaml:530-541, UNIX seconds), not applied to the page it
+  returned (family convention MD4). A `:since` read that returns `limit` rows may have a hole
+  between `since` and the first row, and is `{:error, :history_truncated}`. Which rows the
+  venue keeps when more than `limit` match, and whether `end` is inclusive, are unmeasured.
+
+  A trade whose price is zero or negative refuses the reply (MD6).
+
   **Coinbase publishes no bust flag on the ticker**, so `broken` is `false` on every print —
   a venue with nothing busted reports nothing busted, which is the same answer, and
   `opts[:include_broken]` therefore changes nothing here.
@@ -2603,18 +2681,53 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_trades(String.t(), keyword()) ::
           {:ok, [Types.Trade.t()]} | {:error, term()} | {:refused, term()}
   def get_trades(symbol, opts) do
-    case Keyword.get(opts, :limit) do
-      nil -> {:error, :missing_limit}
-      limit when is_integer(limit) and limit > 0 -> do_get_trades(symbol, limit, opts)
-      other -> {:error, {:invalid_limit, other}}
+    with {:ok, limit, since, finish} <- trades_options(opts) do
+      do_get_trades(symbol, {limit, since, finish}, opts)
     end
   end
 
-  defp do_get_trades(symbol, limit, opts) do
-    with :ok <- validate_symbol(symbol), do: fetch_trades(symbol, limit, opts)
+  @doc """
+  The local checks `get_trades/2` runs on its options before any request, returning
+  `{:ok, limit, since, end}`: `:limit` is required (`{:error, :missing_limit}`), a positive
+  integer within the spec's `int32` (`{:invalid_limit, v}`, `{:invalid_option, :limit, v}`
+  above it), and `:since` / `:end` are each absent or a `DateTime`
+  (`{:invalid_option, key, v}`). `:since` is sent as the ticker's `start` and `:end` as its
+  `end` (family convention MD4).
+  """
+  @spec trades_options(keyword()) ::
+          {:ok, pos_integer(), DateTime.t() | nil, DateTime.t() | nil} | {:error, term()}
+  def trades_options(opts) do
+    with {:ok, limit} <- trades_limit(Keyword.get(opts, :limit)),
+         {:ok, since} <- trades_bound(opts, :since),
+         {:ok, finish} <- trades_bound(opts, :end) do
+      {:ok, limit, since, finish}
+    end
   end
 
-  defp fetch_trades(symbol, limit, opts) do
+  defp trades_limit(nil), do: {:error, :missing_limit}
+
+  defp trades_limit(limit) when is_integer(limit) and limit > @max_int32,
+    do: {:error, {:invalid_option, :limit, limit}}
+
+  defp trades_limit(limit) when is_integer(limit) and limit > 0, do: {:ok, limit}
+  defp trades_limit(other), do: {:error, {:invalid_limit, other}}
+
+  defp put_unix(params, _key, nil), do: params
+  defp put_unix(params, key, %DateTime{} = at), do: Map.put(params, key, DateTime.to_unix(at))
+
+  defp trades_bound(opts, key) do
+    case Keyword.get(opts, key) do
+      nil -> {:ok, nil}
+      %DateTime{} = at -> {:ok, at}
+      other -> {:error, {:invalid_option, key, other}}
+    end
+  end
+
+  defp do_get_trades(symbol, bounds, opts) do
+    with :ok <- validate_symbol(symbol), do: fetch_trades(symbol, bounds, opts)
+  end
+
+  defp fetch_trades(symbol, {limit, since, finish}, opts) do
     native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
     credentials = opts_credentials(opts)
 
@@ -2623,9 +2736,19 @@ defmodule DpExchange.Coinbase.Rest do
         do: "/products/#{native}/ticker",
         else: "/market/products/#{native}/ticker"
 
-    case request(:get, path, credentials, opts, %{"limit" => limit}) do
+    params =
+      %{"limit" => limit}
+      |> put_unix("start", since)
+      |> put_unix("end", finish)
+
+    case request(:get, path, credentials, opts, params) do
       {:ok, %{body: %{"trades" => trades}}} when is_list(trades) ->
-        decode_trades(trades, symbol)
+        # A `:since` read that returns exactly `limit` rows may have a hole between `since`
+        # and the first row: the venue's order and its choice of rows when more match than
+        # `limit` are unmeasured, so such a reply is refused rather than returned short.
+        if since != nil and length(trades) >= limit,
+          do: {:error, :history_truncated},
+          else: decode_trades(trades, symbol)
 
       {:ok, _unexpected} ->
         {:error, :unexpected_response_shape}
@@ -2665,7 +2788,7 @@ defmodule DpExchange.Coinbase.Rest do
   defp to_trade(trade, symbol) do
     with {:ok, at} <- parse_time(trade["time"]),
          {:ok, id} <- required_trade_id(trade["trade_id"]),
-         {:ok, price} <- required_decimal(trade["price"], :price),
+         {:ok, price} <- required_price(trade["price"], :price),
          {:ok, quantity} <- required_decimal(trade["size"], :quantity) do
       {:ok,
        %Types.Trade{
@@ -2845,8 +2968,13 @@ defmodule DpExchange.Coinbase.Rest do
   @doc """
   The order book for `symbol` — `GET /product_book`.
 
-  `opts[:limit]` bounds the levels per side; `opts[:aggregation_price_increment]` groups
-  them, which is the venue's own word for it.
+  `opts[:depth]` bounds the levels per side (family convention MD5) and is sent as the
+  venue's `limit`; the old `opts[:limit]` spelling is `{:error, {:unsupported_option,
+  :limit}}`. `opts[:aggregation_price_increment]` groups them, which is the venue's own word
+  for it.
+
+  A level that cannot be read, has a price of zero or less, or a negative size refuses the
+  whole book; a level with size zero is no liquidity and is dropped.
 
   **Both sides come back sorted best-price-first** — bids descending, asks ascending — which
   `Core.Types.OrderBook` makes part of the contract rather than a convenience.
@@ -2893,9 +3021,10 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   @doc """
-  The local checks `get_order_book/2` runs on its options before any request: `:limit` (a
-  non-negative integer, the spec's `int32`) and `:aggregation_price_increment` (a finite
-  positive number). Errors: `{:invalid_limit, v}`,
+  The local checks `get_order_book/2` runs on its options before any request: `:limit` is
+  refused (`{:unsupported_option, :limit}`, it is `:depth` now), `:depth` (a positive
+  integer, the spec's `int32`) and `:aggregation_price_increment` (a finite positive
+  number). Errors: `{:invalid_option, :depth, v}`,
   `{:invalid_aggregation_price_increment, v}`.
 
   Either used to be stringified with `to_string/1` and sent as given, so a map raised
@@ -2907,21 +3036,28 @@ defmodule DpExchange.Coinbase.Rest do
     with {:ok, _limit, _increment} <- book_options(opts), do: :ok
   end
 
-  @max_int32 2_147_483_647
-
+  # `:depth` is the family's name for levels per side (MD5) and is sent as the venue's
+  # `limit`. The old `:limit` spelling is refused by name, never read as `:depth`.
   defp book_options(opts) do
-    limit = Keyword.get(opts, :limit)
+    depth = Keyword.get(opts, :depth)
     increment = Keyword.get(opts, :aggregation_price_increment)
 
-    with :ok <- book_limit(limit),
+    with :ok <- book_limit_refused(opts),
+         :ok <- book_depth(depth),
          {:ok, increment} <- book_increment(increment) do
-      {:ok, limit, increment}
+      {:ok, depth, increment}
     end
   end
 
-  defp book_limit(nil), do: :ok
-  defp book_limit(limit) when is_integer(limit) and limit >= 0 and limit <= @max_int32, do: :ok
-  defp book_limit(limit), do: {:error, {:invalid_limit, limit}}
+  defp book_limit_refused(opts) do
+    if Keyword.has_key?(opts, :limit),
+      do: {:error, {:unsupported_option, :limit}},
+      else: :ok
+  end
+
+  defp book_depth(nil), do: :ok
+  defp book_depth(depth) when is_integer(depth) and depth >= 1 and depth <= @max_int32, do: :ok
+  defp book_depth(depth), do: {:error, {:invalid_option, :depth, depth}}
 
   defp book_increment(nil), do: {:ok, nil}
 
@@ -2968,7 +3104,7 @@ defmodule DpExchange.Coinbase.Rest do
     |> Enum.reduce_while({:ok, []}, fn
       %{"price" => price, "size" => size}, {:ok, acc} ->
         case {decimal(price), decimal(size)} do
-          {%Decimal{} = p, %Decimal{} = s} -> {:cont, {:ok, [{p, s} | acc]}}
+          {%Decimal{} = p, %Decimal{} = s} -> book_level(p, s, acc)
           _unreadable -> {:halt, {:error, :unexpected_response_shape}}
         end
 
@@ -2978,6 +3114,21 @@ defmodule DpExchange.Coinbase.Rest do
     |> case do
       {:ok, levels} -> {:ok, Enum.reverse(levels)}
       error -> error
+    end
+  end
+
+  # MD5/MD6: a price of zero or less, or a negative size, is not a level any market has and
+  # refuses the whole book; a size of zero is no liquidity, so the level is dropped.
+  defp book_level(price, size, acc) do
+    cond do
+      not Decimal.positive?(price) or Decimal.negative?(size) ->
+        {:halt, {:error, :unexpected_response_shape}}
+
+      Decimal.eq?(size, 0) ->
+        {:cont, {:ok, acc}}
+
+      true ->
+        {:cont, {:ok, [{price, size} | acc]}}
     end
   end
 
@@ -3033,10 +3184,10 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp to_candle(candle, symbol, timeframe) do
     with {:ok, opened_at} <- candle_start(candle["start"]),
-         {:ok, open} <- required_decimal(candle["open"], :open),
-         {:ok, high} <- required_decimal(candle["high"], :high),
-         {:ok, low} <- required_decimal(candle["low"], :low),
-         {:ok, close} <- required_decimal(candle["close"], :close) do
+         {:ok, open} <- required_price(candle["open"], :open),
+         {:ok, high} <- required_price(candle["high"], :high),
+         {:ok, low} <- required_price(candle["low"], :low),
+         {:ok, close} <- required_price(candle["close"], :close) do
       {:ok,
        %Types.Candle{
          symbol: symbol,
@@ -3200,6 +3351,18 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  # A TRADED price (a quote's, a trade's, a candle's open/high/low/close) is above zero
+  # (family convention MD6). Zero and negatives parse cleanly as decimals and used to flow
+  # through as a price no market printed; the item is refused instead. A bid or ask of zero
+  # means "no resting order" and is not read here.
+  defp required_price(value, field) do
+    with {:ok, parsed} <- required_decimal(value, field) do
+      if Decimal.positive?(parsed),
+        do: {:ok, parsed},
+        else: {:error, {:non_positive_price, field, value}}
+    end
+  end
+
   # FAILS CLOSED. A missing or unparseable venue timestamp is an error, never `now`.
   #
   # Substituting the local clock is the failure this whole family is built to refuse:
@@ -3253,7 +3416,8 @@ defmodule DpExchange.Coinbase.Rest do
   `{:error, {:order_unconfirmed, client_order_id, reason}}` (`reason` bounded), never a bare
   `{:error, _}` and never `{:refused, _}`: a transport error or timeout after sending (the
   retries exhausted included), a 5xx, a `2xx` whose body is not a map or carries no `success`,
-  and `DUPLICATE_CLIENT_ORDER_ID` (the id was already used, so an earlier attempt, possibly
+  a `success: true` without a readable `order_id` (reason `{:missing_required_field,
+  :order_id}`), and `DUPLICATE_CLIENT_ORDER_ID` (the id was already used, so an earlier attempt, possibly
   this call's own internal retry, may have been placed). `client_order_id` is the id actually
   sent, **including one generated here**, so the caller can look the order up with
   `get_orders/2` before trying again. Errors decided before anything is sent (validation,
@@ -3277,16 +3441,16 @@ defmodule DpExchange.Coinbase.Rest do
   (`{:error, {:missing_field, :end_time}}`).
 
   A market or limit order is sized by exactly one of `:quantity` (`base_size`) or
-  `:quote_size`; both is `{:error, :ambiguous_order_size}`, neither is
-  `{:error, :missing_order_size}` (market) or `{:error, {:missing_field, :quantity}}` (limit).
+  `:quote_size`; both is `{:error, {:unexpected_field, :quote_size}}`, neither is
+  `{:error, {:missing_field, :quantity}}` (market and limit alike).
   A quote-sized order's `Order.quantity` is `nil`. A stop-limit order needs `:quantity`.
 
   Checks run in this order, each before anything is sent: request is a map
   (`{:invalid_order_request, request}`), unknown keys (`{:unsupported_order_field, key}`),
-  symbol, side, type, time-in-force and the pair, sizing (`quantity` / `quote_size`), fields
-  the leaf does not carry, price fields, the leaf's required fields (`price`, `stop_price`,
-  `end_time`), `end_time` and `post_only` values, `client_order_id`, the margin and routing
-  fields, credentials.
+  symbol, side, type, time-in-force and the pair (a GTD order's `end_time`, present and
+  readable, is checked here, DV10), sizing (`quantity` / `quote_size`), fields the leaf does
+  not carry, price fields, the leaf's required fields (`price`, `stop_price`), `post_only`
+  values, `client_order_id`, the margin and routing fields, credentials.
 
   ## Amounts
 
@@ -3461,6 +3625,7 @@ defmodule DpExchange.Coinbase.Rest do
          {:ok, side} <- order_side_field(request),
          {:ok, type} <- order_type_field(request),
          {:ok, tif} <- order_tif_field(request, type),
+         :ok <- gtd_end_time(tif, request),
          {:ok, normalised} <- leaf_amounts(type, tif, request),
          {:ok, client_order_id} <- client_order_id(Map.get(request, :client_order_id)),
          {:ok, margin} <- margin_fields(request),
@@ -3508,6 +3673,20 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
+  # A good-till-date order's expiry is part of its time in force (family convention step 6,
+  # DV10), so it is checked HERE, before sizing and before any price field: absent is
+  # `{:missing_field, :end_time}`, and one that is not a `DateTime` or a non-blank string is
+  # `{:invalid_end_time, value}`. A leaf without `end_time` is refused later as
+  # `{:unexpected_field, :end_time}` if the caller named one.
+  defp gtd_end_time(:gtd, request) do
+    case Map.get(request, :end_time) do
+      nil -> {:error, {:missing_field, :end_time}}
+      end_time -> valid_end_time(end_time)
+    end
+  end
+
+  defp gtd_end_time(_tif, _request), do: :ok
+
   # What each leaf's own schema carries beyond the base size. A field outside its leaf's list
   # that the caller named is `{:unexpected_field, key}`: it used to be dropped without a word
   # (`price` on a market order, `stop_price` on a limit), so the order placed was not the one
@@ -3534,8 +3713,6 @@ defmodule DpExchange.Coinbase.Rest do
          {:ok, priced} <- normalise_amounts([:price, :stop_price], sized),
          :ok <- required_leaf_field(priced, allowed, :price),
          :ok <- required_leaf_field(priced, allowed, :stop_price),
-         :ok <- required_leaf_field(priced, allowed, :end_time),
-         :ok <- valid_end_time(Map.get(priced, :end_time)),
          {:ok, _post_only} <- post_only(priced) do
       {:ok, priced}
     end
@@ -3555,10 +3732,10 @@ defmodule DpExchange.Coinbase.Rest do
   defp order_sizing(type, request) when type in [:market, :limit] do
     with {:ok, request} <- normalise_amounts([:quantity, :quote_size], request) do
       case {Map.get(request, :quantity), Map.get(request, :quote_size)} do
-        {nil, nil} -> {:error, missing_size_error(type)}
+        {nil, nil} -> {:error, {:missing_field, :quantity}}
         {_quantity, nil} -> {:ok, request}
         {nil, _quote_size} -> {:ok, request}
-        {_quantity, _quote_size} -> {:error, :ambiguous_order_size}
+        {_quantity, _quote_size} -> {:error, {:unexpected_field, :quote_size}}
       end
     end
   end
@@ -3568,9 +3745,6 @@ defmodule DpExchange.Coinbase.Rest do
       normalise_amounts([:quantity], request)
     end
   end
-
-  defp missing_size_error(:market), do: :missing_order_size
-  defp missing_size_error(:limit), do: {:missing_field, :quantity}
 
   defp unexpected_fields(request, allowed) do
     case Enum.find(@optional_fields, &(&1 not in allowed and Map.get(request, &1) != nil)) do
@@ -3585,7 +3759,6 @@ defmodule DpExchange.Coinbase.Rest do
       else: :ok
   end
 
-  defp valid_end_time(nil), do: :ok
   defp valid_end_time(%DateTime{}), do: :ok
 
   defp valid_end_time(value) when is_binary(value) do
@@ -3770,10 +3943,11 @@ defmodule DpExchange.Coinbase.Rest do
   # for each of them, on a money-moving call; a request that is not a map is refused by
   # `order_plan/2` before any of these run.
   defp order_symbol_field(request) do
-    with {:ok, symbol} <- required_field(request, :symbol, {:missing_field, :symbol}),
-         :ok <- order_symbol(symbol) do
-      {:ok, symbol}
-    end
+    # An absent symbol is `{:invalid_symbol, nil}`, not `{:missing_field, :symbol}` (DV2): the
+    # same tag as a blank or non-text one, on every venue of the family.
+    symbol = Map.get(request, :symbol)
+
+    with :ok <- order_symbol(symbol), do: {:ok, symbol}
   end
 
   defp order_side_field(request) do
@@ -3817,29 +3991,27 @@ defmodule DpExchange.Coinbase.Rest do
   # placed order is the failure this clause exists to prevent — the HTTP call succeeded and
   # the order did not.
   #
-  # `success: true` means an order is live at the venue, so it is `{:ok, _}` even when the
-  # body's id is unreadable (`id: nil`). Reviewed 2026-10-10 against making that an error: an
-  # `{:error, _}` reads as "nothing was placed", and a caller retrying on it places a second
-  # order. A `nil` id says the venue did not name it; `get_orders` is how to find it.
+  # `success: true` means an order is live at the venue. That was once returned as `{:ok, _}`
+  # even when the body's id was unreadable (`id: nil`), on the argument (2026-10-10) that an
+  # `{:error, _}` reads as "nothing was placed" and a caller retrying on it places a second
+  # order. `{:order_unconfirmed, ...}` makes the opposite claim, that the order MAY be live,
+  # and carries the `client_order_id` to look it up with, which is why it replaced the `nil`
+  # id (see below).
   #
   # The same holds when `success_response` is missing altogether: `success` is the only field
   # the spec requires on `NewOrderResponse` (at-spec.yaml:8177-8198), and an absent object is
   # no more evidence that nothing was placed than an unreadable one.
+  #
+  # **Superseded 2026-10-12 (family convention DV5).** An order the caller cannot name is not
+  # an order it can manage: a `2xx` without a readable `order_id` is
+  # `{:order_unconfirmed, client_order_id, {:missing_required_field, :order_id}}`, which says
+  # the order MAY be live and hands back the id to look it up with (`get_orders/2`), instead
+  # of `{:ok, %Order{id: nil}}`. `Core.Types.Order` requires an id. Still no retry on it.
   defp to_placed_order(%{"success" => true} = response, plan) do
-    {:ok,
-     %Types.Order{
-       id: response |> Map.get("success_response") |> success_order_id(),
-       symbol: plan.symbol,
-       side: plan.side,
-       order_type: plan.order_type,
-       time_in_force: plan.time_in_force,
-       # Decimals, the type `Order` declares; normalised by `order_plan/2`.
-       quantity: plan.quantity,
-       price: plan.price,
-       stop_price: plan.stop_price,
-       status: :pending,
-       provider: :coinbase
-     }}
+    case response |> Map.get("success_response") |> success_order_id() do
+      nil -> unconfirmed(plan.client_order_id, {:missing_required_field, :order_id})
+      id -> {:ok, placed_order(id, plan)}
+    end
   end
 
   # `DUPLICATE_CLIENT_ORDER_ID` is the venue saying the id was used before, which after an
@@ -3857,6 +4029,22 @@ defmodule DpExchange.Coinbase.Rest do
   # request reached the venue and what came back cannot be read as a yes or a no.
   defp to_placed_order(_other, plan),
     do: unconfirmed(plan.client_order_id, :unexpected_response_shape)
+
+  defp placed_order(id, plan) do
+    %Types.Order{
+      id: id,
+      symbol: plan.symbol,
+      side: plan.side,
+      order_type: plan.order_type,
+      time_in_force: plan.time_in_force,
+      # Decimals, the type `Order` declares; normalised by `order_plan/2`.
+      quantity: plan.quantity,
+      price: plan.price,
+      stop_price: plan.stop_price,
+      status: :pending,
+      provider: :coinbase
+    }
+  end
 
   defp duplicate_client_order_id?(reason) when is_binary(reason),
     do: String.contains?(reason, "DUPLICATE_CLIENT_ORDER_ID")
@@ -3890,7 +4078,7 @@ defmodule DpExchange.Coinbase.Rest do
     do: {:error, {:write_unconfirmed, key, bounded_reason(reason)}}
 
   defp tagged_write_error(reason, key, counted, build) do
-    case classify(reason) do
+    case write_classify(reason) do
       # A 4xx answered to an internal RETRY (family convention W2): an earlier attempt of this
       # same call already left the process (a 5xx or a timeout), and the venue objecting to
       # the repeat does not say that attempt placed nothing. Only a first attempt's 4xx is a
@@ -3899,11 +4087,34 @@ defmodule DpExchange.Coinbase.Rest do
         if attempts_made(counted) > 1, do: build.(key, refusal), else: refused
 
       {:error, inner} ->
-        if pre_send_failure?(reason) and sent_attempts(counted) == 0,
-          do: {:error, inner},
-          else: build.(key, inner)
+        cond do
+          pre_send_failure?(reason) and sent_attempts(counted) == 0 -> {:error, inner}
+          # A 429 to the FIRST attempt: the venue throttled the request before acting on it,
+          # which is a plain, retryable error (DV6). Answered to a retry it proves nothing
+          # about the attempt before it, so it falls through to unconfirmed.
+          too_many_requests?(reason) and attempts_made(counted) <= 1 -> {:error, inner}
+          true -> build.(key, inner)
+        end
     end
   end
+
+  # DV6: EVERY 4xx the venue answers to a write's first attempt is a refusal of that request
+  # (409, 415, 422 and the rest included), except 429, which is throttling and stays a plain
+  # error. A 404 keeps `classify/1`'s own `:not_found`. Reads keep `classify/2`: only a write
+  # has an unconfirmed class that a bare 4xx would otherwise fall into.
+  defp write_classify({:http_status, status, body})
+       when status in 400..499 and status not in [404, 429],
+       do: {:refused, refusal(status, body)}
+
+  defp write_classify(reason), do: classify(reason)
+
+  # `Core.HttpClient` handles a venue 429 itself (the held bucket, `Retry-After`) and answers
+  # it as this tagged message whether or not `raw_status` is set, so there is never a
+  # `{:http_status, 429, _}` to match here.
+  defp too_many_requests?({:exchange_error, _venue, "Rate limited by the venue" <> _rest}),
+    do: true
+
+  defp too_many_requests?(_reason), do: false
 
   # How many attempts of this call were signed and sent when a response (even a 4xx) came
   # back: every signature of an attempt that got an answer was sent. `nil` is a write sent once.
@@ -3956,6 +4167,9 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp bounded_reason({:exchange_error, venue, message}) when is_atom(venue),
     do: {:exchange_error, venue, bounded_reason(message)}
+
+  defp bounded_reason({:missing_required_field, field}) when is_atom(field),
+    do: {:missing_required_field, field}
 
   defp bounded_reason(reason) do
     reason
@@ -4165,7 +4379,7 @@ defmodule DpExchange.Coinbase.Rest do
   is the same shape and the same envelope.
 
   A venue that sends no cursor is unaffected: the walk stops on the first page, exactly as
-  before. A server that always says `has_next` answers `{:error, :too_many_order_pages}`
+  before. A server that always says `has_next` answers `{:error, :history_truncated}`
   rather than looping inside a facade call.
 
   A page that says `has_next: true` but carries no cursor is
@@ -4201,7 +4415,7 @@ defmodule DpExchange.Coinbase.Rest do
   @max_order_pages 50
 
   defp all_orders(_credentials, _opts, _cursor, _acc, page) when page >= @max_order_pages,
-    do: {:error, :too_many_order_pages}
+    do: {:error, :history_truncated}
 
   defp all_orders(credentials, opts, cursor, acc, page) do
     params =

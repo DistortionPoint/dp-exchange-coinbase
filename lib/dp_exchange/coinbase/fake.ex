@@ -55,7 +55,7 @@ defmodule DpExchange.Coinbase.Fake do
   `%{}` and a map that cannot sign are `{:error, {:missing_credentials, :coinbase}}`), after
   the injected outcome and after the same local argument checks, in the same order, as the
   real function. The checks themselves are `Rest`'s (`order_plan/2`,
-  `validate_order_edit/1`, `validate_candle_request/2`, ...), called rather than re-stated, so
+  `validate_order_edit/1`, `validate_candle_request/3`, ...), called rather than re-stated, so
   the two cannot drift. This fake used to inspect no credential at all, so a consumer that
   forgot them saw green tests and a production `:missing_credentials`.
 
@@ -196,19 +196,21 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @impl true
-  def get_historical_prices(symbol, timeframe, range \\ [], _opts \\ []) do
+  def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []) do
     with_injection(symbol, fn ->
-      # The real path's order: the timeframe and the window are refused locally, before any
-      # request, so they win over an unlisted symbol (which only the venue can name). The
-      # check is `Rest`'s own — this used to re-state it and answered `:not_listed` first.
-      # `12h`, which the shared vocabulary models and Coinbase does not serve, fails here.
-      with :ok <- Rest.validate_candle_request(timeframe, range),
+      # The real path's order: the timeframe, the options and the window are refused locally,
+      # before any request, so they win over an unlisted symbol (which only the venue can
+      # name). The check is `Rest`'s own — this used to re-state it and answered
+      # `:not_listed` first. `12h`, which the shared vocabulary models and Coinbase does not
+      # serve, fails here.
+      with :ok <- Rest.validate_candle_request(timeframe, range, opts),
            :ok <- Rest.validate_symbol(symbol) do
         if native(symbol) in @symbols do
           # A bar, not a quote. The fake returned `get_price/2`'s `Quote` here, which agreed
           # with the real package's own defect — a suite reproducing the bug it is meant to
-          # catch.
-          {:ok, [fake_candle(symbol, timeframe)]}
+          # catch. Through `Rest.select_candles/4`, so the fake's one bar is kept or dropped
+          # by the same range and forming-bar rules (MD1, MD2) as the venue's.
+          {:ok, Rest.select_candles([fake_candle(symbol, timeframe)], timeframe, range, opts)}
         else
           {:refused, :not_listed}
         end
@@ -249,8 +251,8 @@ defmodule DpExchange.Coinbase.Fake do
          :ok <- Rest.validate_book_options(opts) do
       case Map.fetch(@price, native(symbol)) do
         {:ok, price} ->
-          limit = Keyword.get(opts, :limit) || 3
-          {:ok, fake_book(symbol, Decimal.new(price), limit)}
+          depth = Keyword.get(opts, :depth) || 3
+          {:ok, fake_book(symbol, Decimal.new(price), depth)}
 
         :error ->
           {:refused, :not_listed}
@@ -258,13 +260,13 @@ defmodule DpExchange.Coinbase.Fake do
     end
   end
 
-  defp fake_book(symbol, mid, limit) do
+  defp fake_book(symbol, mid, depth) do
     %Types.OrderBook{
       symbol: symbol,
       # Descending bids, ascending asks — the venue's own ordering, and the sizes
       # differ per level so a caller reading only the top learns it is reading a book.
-      bids: book_side(mid, limit, :sub),
-      asks: book_side(mid, limit, :add),
+      bids: book_side(mid, depth, :sub),
+      asks: book_side(mid, depth, :add),
       venue_time: @at,
       observed_at: @at,
       # The venue publishes no sequence on this endpoint, so neither does the fake: a
@@ -281,73 +283,76 @@ defmodule DpExchange.Coinbase.Fake do
       # `limit` query param is `required: true`
       # (docs/reference/coinbase/openapi/at-spec.yaml:523-528) and documents no default. A
       # fake that answered anyway would let a consumer's suite go green on a call the real
-      # venue refuses.
-      with {:ok, limit} <- required_trades_limit(opts) do
-        get_trades_result(symbol, limit)
+      # venue refuses. `Rest.trades_options/1` is that check (the limit, then `:since` and
+      # `:end`), called rather than re-stated.
+      with {:ok, limit, since, finish} <- Rest.trades_options(opts) do
+        get_trades_result(symbol, limit, since, finish)
       end
     end)
-  end
-
-  # `Rest.get_trades/2`'s own rule: absent is `:missing_limit`, and anything but a positive
-  # integer is `{:invalid_limit, value}`. This accepted `0`, `-1` and `"5"`.
-  defp required_trades_limit(opts) do
-    case Keyword.get(opts, :limit) do
-      nil -> {:error, :missing_limit}
-      limit when is_integer(limit) and limit > 0 -> {:ok, limit}
-      other -> {:error, {:invalid_limit, other}}
-    end
   end
 
   # Oldest first, as `Rest.get_trades/2` returns them (it sorts by the venue's own time), and
   # at most `limit` of them, the newest. This returned the newest first, so a consumer reading
   # `List.last/1` as "the latest print" passed here and failed against the venue.
-  defp get_trades_result(symbol, limit) do
+  defp get_trades_result(symbol, limit, since, finish) do
     with :ok <- Rest.validate_symbol(symbol) do
-      trades_for(symbol, limit)
+      trades_for(symbol, limit, since, finish)
     end
   end
 
-  defp trades_for(symbol, limit) do
+  # `:since` (inclusive) and `:end` (exclusive) narrow the window as the venue's `start` and
+  # `end` do; a `:since` read that fills the page may have a hole, as `Rest.get_trades/2`
+  # reports it (MD4).
+  defp trades_for(symbol, limit, since, finish) do
     case Map.fetch(@price, native(symbol)) do
       {:ok, price} ->
-        # More than one print, because the whole point of the tape is that get_price/2
-        # keeps only the newest and this does not.
-        {:ok,
-         Enum.take(
-           [
-             %Types.Trade{
-               id: "t-2",
-               symbol: symbol,
-               side: :sell,
-               price: Decimal.sub(Decimal.new(price), Decimal.new("1.50")),
-               quantity: Decimal.new("0.10"),
-               timestamp: DateTime.add(@at, -5, :second),
-               broken: false,
-               provider: :coinbase
-             },
-             %Types.Trade{
-               id: "t-1",
-               symbol: symbol,
-               side: :buy,
-               price: Decimal.new(price),
-               quantity: Decimal.new("0.25"),
-               timestamp: @at,
-               broken: false,
-               provider: :coinbase
-             }
-           ],
-           -limit
-         )}
+        in_window = Enum.filter(tape(symbol, price), &in_trade_window?(&1, since, finish))
+
+        if since != nil and length(in_window) >= limit,
+          do: {:error, :history_truncated},
+          else: {:ok, Enum.take(in_window, -limit)}
 
       :error ->
         {:refused, :not_listed}
     end
   end
 
-  defp book_side(mid, limit, direction) do
-    # `//1`: a `limit` of 0 made `1..0` a descending range, so the book had two levels
-    # (`1` and `0`) where the caller asked for none.
-    for step <- 1..limit//1 do
+  defp in_trade_window?(%Types.Trade{timestamp: at}, since, finish) do
+    (is_nil(since) or DateTime.compare(at, since) != :lt) and
+      (is_nil(finish) or DateTime.compare(at, finish) == :lt)
+  end
+
+  defp tape(symbol, price) do
+    # More than one print, because the whole point of the tape is that get_price/2
+    # keeps only the newest and this does not.
+    [
+      %Types.Trade{
+        id: "t-2",
+        symbol: symbol,
+        side: :sell,
+        price: Decimal.sub(Decimal.new(price), Decimal.new("1.50")),
+        quantity: Decimal.new("0.10"),
+        timestamp: DateTime.add(@at, -5, :second),
+        broken: false,
+        provider: :coinbase
+      },
+      %Types.Trade{
+        id: "t-1",
+        symbol: symbol,
+        side: :buy,
+        price: Decimal.new(price),
+        quantity: Decimal.new("0.25"),
+        timestamp: @at,
+        broken: false,
+        provider: :coinbase
+      }
+    ]
+  end
+
+  defp book_side(mid, depth, direction) do
+    # `//1`: a depth of 0 makes `1..0` a descending range. `Rest` refuses a depth below 1, so
+    # this is never reached with one, and stays an empty range if it ever is.
+    for step <- 1..depth//1 do
       offset = Decimal.mult(Decimal.new("0.50"), Decimal.new(step))
       price = if direction == :sub, do: Decimal.sub(mid, offset), else: Decimal.add(mid, offset)
       {price, Decimal.mult(Decimal.new("0.1"), Decimal.new(step))}
@@ -591,14 +596,18 @@ defmodule DpExchange.Coinbase.Fake do
     end
   end
 
+  # What the real stream pushes (MD7): a rolling 24-hour volume, and no `venue_time`, because
+  # a `ticker` row states no trade time and the envelope's is a send time.
+  defp streamed_quote(%Types.Quote{} = quote_struct),
+    do: %{quote_struct | volume_window: :rolling_24h, venue_time: nil}
+
   defp do_subscribe(symbols, target, channels) do
     for symbol <- symbols, symbol in @symbols do
       case fake_quote(symbol) do
         # The real stream's volume is `volume_24_h`, a rolling total, where `get_price/2`'s is
         # one print — so the pushed quote says what the real one says.
         {:ok, quote_struct} ->
-          streamed = %{quote_struct | volume_window: :rolling_24h}
-          deliver(target, {:dp_exchange, :coinbase, streamed})
+          deliver(target, {:dp_exchange, :coinbase, streamed_quote(quote_struct)})
 
         _refused ->
           :ok
@@ -680,11 +689,7 @@ defmodule DpExchange.Coinbase.Fake do
     # channel: the contract's callback takes neither a `to:` nor `:channels` (2026-10-10).
     for symbol <- MapSet.difference(wanted, subscribed()) do
       with {:ok, quote_struct} <- fake_quote(symbol),
-           do:
-             send(
-               self(),
-               {:dp_exchange, :coinbase, %{quote_struct | volume_window: :rolling_24h}}
-             )
+           do: send(self(), {:dp_exchange, :coinbase, streamed_quote(quote_struct)})
     end
 
     Process.put(__MODULE__, wanted)

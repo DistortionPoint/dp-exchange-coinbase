@@ -719,14 +719,17 @@ defmodule DpExchange.Coinbase.Socket do
   # every book update — and a venue delivering nothing on one channel while another works
   # reads as a quiet market.
   #
-  # **The `ticker` timestamp lives on the envelope, not the row.** Every v3 channel message
-  # carries its own top-level `timestamp` (server time the message was sent); a `Ticker`
-  # row has no time field of its own to repeat it (at-async.json's `Ticker` schema has none)
-  # — an earlier version of this module read a `ticker["time"]` field that does not exist in
-  # the venue's own documented schema, and every single `ticker` decode failed against the
-  # real venue as a result, silently, because the fake and hand-written tests both encoded
-  # the same wrong assumption and agreed with each other. Confirmed against Coinbase's own
-  # CDP API reference before fixing, not assumed a second time.
+  # **A `ticker` row states no time, and the envelope's is a send time, so a streamed
+  # `Quote.venue_time` is `nil` (MD7).** Every v3 channel message carries its own top-level
+  # `timestamp` (server time the message was SENT); a `Ticker` row has no time field of its
+  # own (at-async.json's `Ticker` schema has none) — an earlier version of this module read a
+  # `ticker["time"]` field that does not exist in the venue's own documented schema, and
+  # every single `ticker` decode failed against the real venue as a result, silently. The
+  # envelope time was then used as `venue_time`, which is when the gateway forwarded the
+  # message and not when the last trade happened; on the `snapshot` event sent at every
+  # (re)subscribe it could be hours after the last trade. `venue_time` is "the venue's
+  # stated time of the last trade", and the venue states none here. It stays `nil` for both
+  # event types; `observed_at` says when this package read it.
   #
   # **`l2_data` is different: `L2Update` names its own `event_time`**, "Time of the event as
   # recorded by the trading engine" (docs/reference/coinbase/openapi/at-async.json:1367-1370)
@@ -867,15 +870,13 @@ defmodule DpExchange.Coinbase.Socket do
 
   defp deliver_ticker(_ticker, state, _timestamp), do: state
 
-  # FAILS CLOSED on the timestamp, exactly as the REST path does. A tick whose freshness
-  # we cannot state is a tick we must not deliver, and substituting `now` would make a
-  # stale one indistinguishable from a live one. The price fails closed the same way:
-  # `Decimal.new/1` used to raise directly here, and a `Quote` with a nil price would be
-  # the same substitution wearing a quieter shape — refused instead, through the same
+  # No timestamp is read (see `dispatch/2`): `venue_time` is `nil`, never the envelope's send
+  # time and never `now`. The price fails closed: `Decimal.new/1` used to raise directly
+  # here, and a `Quote` with a nil price would be a substitution wearing a quieter shape —
+  # refused instead (an unreadable, zero or negative price, MD6), through the same
   # {:error, _} path deliver_ticker/3 already reports as a data-quality notice.
-  defp build_quote(%{"price" => price} = ticker, symbol, timestamp) do
-    with {:ok, at} <- parse_time(timestamp),
-         {:ok, parsed_price} <- required_decimal(price, :price) do
+  defp build_quote(%{"price" => price} = ticker, symbol, _timestamp) do
+    with {:ok, parsed_price} <- required_price(price, :price) do
       # `volume_24_h` is the trailing 24 hours, recomputed on every ticker — a quantity no
       # interval's volume can be derived from. A consumer summed it into candles as if it
       # were one print and read a pair's average volume about 1000× too high
@@ -889,7 +890,11 @@ defmodule DpExchange.Coinbase.Socket do
          price: parsed_price,
          volume: volume,
          volume_window: volume && :rolling_24h,
-         venue_time: at,
+         # `nil`: a `Ticker` row states no trade time (at-async.json `Ticker` schema), and
+         # the envelope `timestamp` is when the gateway SENT the message, not when the last
+         # trade happened (MD7). That holds for the `snapshot` event sent on every
+         # (re)subscribe as much as for an `update`, so neither is dressed as a fresh trade.
+         venue_time: nil,
          observed_at: DateTime.utc_now(),
          provider: :coinbase
        }}
@@ -962,7 +967,7 @@ defmodule DpExchange.Coinbase.Socket do
   defp build_trade(%{"product_id" => product} = trade) when is_binary(product) do
     with {:ok, id} <- required_trade_id(trade["trade_id"]),
          {:ok, at} <- parse_time(trade["time"]),
-         {:ok, price} <- required_decimal(trade["price"], :price),
+         {:ok, price} <- required_price(trade["price"], :price),
          {:ok, quantity} <- required_decimal(trade["size"], :quantity) do
       {:ok,
        %Types.Trade{
@@ -1057,7 +1062,12 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   defp snapshot(state, symbol, rows, levels) do
-    {bids, asks} = split_sides(levels)
+    # A snapshot level with size zero is no liquidity and is dropped (family convention
+    # MD5). A DELTA keeps its zero, which means "remove this price".
+    {bids, asks} =
+      levels
+      |> Enum.reject(fn {_side, _price, quantity} -> Decimal.eq?(quantity, 0) end)
+      |> split_sides()
 
     case latest_event_time(rows) do
       {:ok, at} ->
@@ -1313,6 +1323,16 @@ defmodule DpExchange.Coinbase.Socket do
     end
   end
 
+  # A traded price is above zero (family convention MD6): a zero or negative one parses
+  # cleanly and would otherwise be delivered as a price no market printed.
+  defp required_price(value, field) do
+    with {:ok, parsed} <- required_decimal(value, field) do
+      if Decimal.positive?(parsed),
+        do: {:ok, parsed},
+        else: {:error, {:non_positive_price, field, brief(value)}}
+    end
+  end
+
   # The venue's `sequence_num`: "Per-connection message sequence number; use it to detect
   # dropped or out-of-order messages" (the AsyncAPI schema for every channel's envelope,
   # read 2026-09-25). Its overview adds that the servers "can result in dropped messages"
@@ -1336,6 +1356,11 @@ defmodule DpExchange.Coinbase.Socket do
           # consumer holding several books unable to tell which to re-read. All of them.
           symbols: state.delivering |> MapSet.to_list() |> Enum.sort()
         })
+
+        # MD9: a delta stream that detects a gap asks for a fresh snapshot. `Feed` owns the
+        # shard's subscription, so it is told which connection gapped and re-issues the
+        # level2 subscribe for it; the venue answers a subscribe with a full snapshot.
+        report_sequence_gap(state)
 
         dispatch(decoded, %{state | last_seq: seq, stale_run: nil})
 
@@ -1408,7 +1433,8 @@ defmodule DpExchange.Coinbase.Socket do
   defp sequence_message(:sequence_gap, %{dropped: dropped}),
     do:
       "#{dropped} message(s) dropped by the venue on this connection; a book built from " <>
-        "deltas is no longer reliable — re-read it"
+        "deltas is no longer reliable — the level2 subscription is re-issued for a fresh " <>
+        "snapshot, re-read it"
 
   defp sequence_message(:sequence_reset, %{got: got}),
     do:
@@ -1514,4 +1540,16 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   defp report_reconnected(_state), do: :ok
+
+  # Sent alongside the `:sequence_gap` notice, for the same reason `report_link_down/1` is
+  # sent alongside `:link_down`: `Feed` has to know WHICH connection gapped, and a socket pid
+  # has no business in a `Core.Notice`. `Feed` re-issues the level2 subscription of that
+  # shard so a fresh snapshot replaces the book the gap made unreliable. Lossy by contract,
+  # like `report_link_down/1`; the 60-second re-issue is the net.
+  defp report_sequence_gap(%{subscriber: subscriber}) when is_pid(subscriber) do
+    send(subscriber, {:dp_exchange, :coinbase, :sequence_gap, self()})
+    :ok
+  end
+
+  defp report_sequence_gap(_state), do: :ok
 end

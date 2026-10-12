@@ -20,6 +20,71 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Tick R: family market-data conventions (MD) and order-convention deviations (DV).
+
+### Changed
+
+- **BREAKING (MD1) `get_historical_prices/4` no longer returns the bar still forming**
+  (`opened_at + width > now`). The end defaults to now, so the last element used to be a
+  bar that was still moving. Pass `include_partial: true` to get it as the venue sent it
+  (`Candle` has no flag marking it). A non-boolean is `{:invalid_option, :include_partial,
+  v}`. REST and Fake (`Rest.select_candles/4` is shared).
+- **BREAKING (MD2) `range[:start]` is inclusive and `range[:end]` exclusive on `opened_at`**,
+  filtered client-side for a bound the caller passed. The venue's own treatment of the two
+  bounds is unmeasured; the filter makes the rule exact whatever it does.
+- **BREAKING (MD4) candles `:limit` is sent** (the spec's `limit`, default and maximum 350)
+  where it used to be ignored. Zero, a negative, a non-integer or above 350 is
+  `{:error, {:invalid_option, :limit, v}}`. `validate_candle_request/2` is now
+  `validate_candle_request/3` (it takes the options).
+- **BREAKING (MD4) `get_trades/2` sends `:since` as the ticker's `start` and `:end` as its
+  `end`** (at-spec.yaml:530-541), where it sent only `limit`. A non-`DateTime` is
+  `{:invalid_option, key, v}`; a limit above `int32` is `{:invalid_option, :limit, v}`. A
+  `:since` read that returns `limit` rows may have a hole and is `{:error, :history_truncated}`.
+  Which rows the venue keeps when more match than `limit`, and whether `end` is inclusive,
+  are unmeasured. Fake parity.
+- **BREAKING (MD5) the order book depth option is `:depth`**, sent as the venue's `limit`.
+  `:limit` is `{:error, {:unsupported_option, :limit}}`. A bad depth is
+  `{:error, {:invalid_option, :depth, v}}` (was `{:invalid_limit, v}`), and `0` is refused
+  (it was allowed; whether the venue reads `limit=0` as "none" is unmeasured). REST and Fake.
+- **(MD5) Book levels, REST and stream:** a snapshot level with size `0` is dropped (no
+  liquidity); a price of zero or less, or a negative size, refuses the whole book on REST too
+  (the stream already refused them). A delta keeps its zero (remove this price).
+- **BREAKING (MD6) a traded price of zero or less refuses the item**: `get_price/2`'s quote,
+  `get_trades/2` rows, candle open/high/low/close (`{:error, {:non_positive_price, field, value}}`, the family's tag),
+  a streamed ticker or `market_trades` row (a `:data_quality` notice).
+- **BREAKING (MD7) a streamed `Quote`'s `venue_time` is `nil`.** It was the message envelope's
+  `timestamp`, which the spec defines as "Server time the message was sent"; a `Ticker` row
+  carries no trade time (at-async.json), and the `snapshot` event sent at every (re)subscribe
+  is not a trade at all. A missing or unreadable envelope timestamp no longer drops the
+  quote. Both event types are delivered with `venue_time: nil`; the choice not to drop the
+  `snapshot` event is a judgement (a quiet product would otherwise stream nothing until its
+  next trade), recorded here for review. The Fake's streamed quote matches.
+- **(MD9) A `:sequence_gap` on a `level2` connection re-issues that shard's subscription**
+  for a fresh snapshot (`Socket` reports the gap to `Feed`, which reuses the reconnect's
+  `:resubscribe_shard` step; at most once per five seconds per shard). The notice is
+  unchanged apart from saying so. A frame whose sequence number is not above the last applied
+  was already dropped; tests now pin it.
+- **BREAKING (DV4) sizing errors are tagged tuples:** neither `:quantity` nor `:quote_size`
+  is `{:missing_field, :quantity}` (market orders gave the bare `:missing_order_size`), both
+  is `{:unexpected_field, :quote_size}` (was the bare `:ambiguous_order_size`).
+- **BREAKING (DV5) a `success: true` placement without a readable `order_id`** is
+  `{:error, {:order_unconfirmed, client_order_id, {:missing_required_field, :order_id}}}`
+  (was `{:ok, %Order{id: nil}}`). `close_position/3` keeps its `id: nil` answer.
+- **BREAKING (DV6) every 4xx answered to the first attempt of a write is `{:refused, _}`**
+  (409, 415, 422 and the rest; only 400/401/403/404 were). They were
+  `{:order_unconfirmed, ...}` / `{:write_unconfirmed, ...}`. A venue 429 on the first attempt
+  is a plain `{:error, _}` (was unconfirmed). A 4xx or 429 on an internal retry stays
+  unconfirmed. Prime writes keep their own classification.
+- **BREAKING (DV7) the page-bound errors are `{:error, :history_truncated}`**:
+  `:too_many_product_pages`, `:too_many_account_pages`, `:too_many_fill_pages` and
+  `:too_many_order_pages` are gone.
+- **(DV9) `subscribe([])` and `update_symbols([])` schedule no alias-map fetch**: nothing
+  wanted, nothing fetched. The first call that names a symbol still starts it.
+- **(DV10) A GTD order's `end_time` is checked with the time in force**, before sizing and
+  every price field (`{:missing_field, :end_time}` / `{:invalid_end_time, v}`).
+- **BREAKING (DV2) an absent order `:symbol` is `{:invalid_symbol, nil}`** (was
+  `{:missing_field, :symbol}`), the same tag as a blank or non-text one.
+
 ## [0.3.115] - 2026-10-12
 
 ### Changed

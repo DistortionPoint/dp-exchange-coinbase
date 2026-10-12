@@ -235,15 +235,20 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
   end
 
   describe "place_order/3 and close_position/3 envelopes" do
-    test "success true with no success_response is accepted and unidentified" do
-      # `success` is the only field the spec requires of `NewOrderResponse`. An error here
-      # reads as "nothing was placed", and a retry places a second order.
-      assert {:ok, %{id: nil, status: :pending}} =
+    test "success true with no success_response: unconfirmed to place, unidentified to close" do
+      # `success` is the only field the spec requires of `NewOrderResponse`. A placement
+      # without an order id the caller can name is `{:order_unconfirmed, cid, reason}` (DV5),
+      # carrying the id sent so the order can be looked up.
+      reason = {:missing_required_field, :order_id}
+
+      assert {:error, {:order_unconfirmed, client_order_id, ^reason}} =
                Rest.place_order(
                  @credentials,
                  limit_request(),
                  opts(responding(%{"success" => true}))
                )
+
+      assert byte_size(client_order_id) == 36
 
       assert {:ok, %{id: nil, status: :pending}} =
                Rest.close_position(
@@ -253,12 +258,13 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
                )
     end
 
-    test "an order id that is not a non-empty string is not reported as one" do
+    test "an order id that is not a non-empty string is unconfirmed, with the id that was sent" do
       for bad <- ["", 7, %{}] do
         body = %{"success" => true, "success_response" => %{"order_id" => bad}}
+        request = limit_request(%{client_order_id: "mine-9"})
 
-        assert {:ok, %{id: nil}} =
-                 Rest.place_order(@credentials, limit_request(), opts(responding(body)))
+        assert {:error, {:order_unconfirmed, "mine-9", {:missing_required_field, :order_id}}} =
+                 Rest.place_order(@credentials, request, opts(responding(body)))
       end
     end
 

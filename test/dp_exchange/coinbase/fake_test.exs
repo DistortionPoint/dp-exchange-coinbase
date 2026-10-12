@@ -101,7 +101,7 @@ defmodule DpExchange.Coinbase.FakeTest do
 
   describe "orders are validated by the real checks, in the real order" do
     test "an order with no symbol or side is an error, not a KeyError" do
-      assert {:error, {:missing_field, :symbol}} =
+      assert {:error, {:invalid_symbol, nil}} =
                Fake.place_order(@credentials, Map.delete(limit_order(), :symbol))
 
       assert {:error, {:missing_field, :side}} =
@@ -114,11 +114,11 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert {:error, {:missing_field, :price}} = Fake.preview_order(@credentials, limit)
 
       market = %{symbol: "BTC-USD", side: :buy, order_type: :market, time_in_force: :ioc}
-      assert {:error, :missing_order_size} = Fake.place_order(@credentials, market)
+      assert {:error, {:missing_field, :quantity}} = Fake.place_order(@credentials, market)
     end
 
     test "a request the real path refuses is refused before the credential is looked at" do
-      assert {:error, {:missing_field, :symbol}} = Fake.place_order(%{}, %{side: :buy})
+      assert {:error, {:invalid_symbol, nil}} = Fake.place_order(%{}, %{side: :buy})
     end
 
     test "type and time-in-force are required, and a field the type does not use is refused" do
@@ -143,7 +143,7 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert {:ok, order} = Fake.place_order(@credentials, quote_sized)
       assert order.quantity == nil
 
-      assert {:error, :ambiguous_order_size} =
+      assert {:error, {:unexpected_field, :quote_size}} =
                Fake.place_order(@credentials, limit_order(%{quote_size: "10"}))
 
       fok = %{time_in_force: :fok}
@@ -243,15 +243,54 @@ defmodule DpExchange.Coinbase.FakeTest do
     end
 
     test "a window with only :end set defaults its start as the real path does" do
+      # `:end` is exclusive: the bar opening at 12:00 is inside an end of 13:00 and outside
+      # an end of 12:00 (MD2).
       assert {:ok, [_bar]} =
+               Fake.get_historical_prices("BTC-USD", "1h", end: ~U[2026-08-28 13:00:00Z])
+
+      assert {:ok, []} =
                Fake.get_historical_prices("BTC-USD", "1h", end: ~U[2026-08-28 12:00:00Z])
+    end
+
+    test "start is inclusive, and limit / include_partial are validated as on the real path" do
+      finish = ~U[2026-08-29 00:00:00Z]
+      on_open = [start: ~U[2026-08-28 12:00:00Z], end: finish]
+      after_open = [start: ~U[2026-08-28 12:00:01Z], end: finish]
+
+      assert {:ok, [_bar]} = Fake.get_historical_prices("BTC-USD", "1h", on_open)
+      assert {:ok, []} = Fake.get_historical_prices("BTC-USD", "1h", after_open)
+
+      assert {:error, {:invalid_option, :limit, 351}} =
+               Fake.get_historical_prices("BTC-USD", "1h", [], limit: 351)
+
+      assert {:error, {:invalid_option, :include_partial, "yes"}} =
+               Fake.get_historical_prices("BTC-USD", "1h", [], include_partial: "yes")
+
+      assert {:ok, [_bar]} = Fake.get_historical_prices("BTC-USD", "1h", [], limit: 5)
     end
   end
 
   describe "the book" do
-    test "a limit of zero is an empty book, not the two levels of a descending 1..0" do
-      assert {:ok, %Types.OrderBook{bids: [], asks: []}} =
-               Fake.get_order_book("BTC-USD", limit: 0)
+    test "a depth of zero is refused, as the real path refuses it, not an empty book" do
+      assert {:error, {:invalid_option, :depth, 0}} = Fake.get_order_book("BTC-USD", depth: 0)
+    end
+
+    test "depth bounds the levels per side" do
+      assert {:ok, %Types.OrderBook{bids: [_one], asks: [_other]}} =
+               Fake.get_order_book("BTC-USD", depth: 1)
+    end
+  end
+
+  describe "streamed quotes" do
+    test "carry a rolling 24h volume and no venue_time, as the real stream's do (MD7)" do
+      assert :ok = Fake.subscribe(~w(BTC-USD), to: self())
+
+      assert_receive {:dp_exchange, :coinbase, %Types.Quote{} = streamed}, 5_000
+      assert streamed.volume_window == :rolling_24h
+      assert streamed.venue_time == nil
+
+      # REST keeps the trade's own time: `get_price/2` is a different statement.
+      assert {:ok, %Types.Quote{venue_time: %DateTime{}}} = Fake.get_price("BTC-USD")
     end
   end
 
@@ -483,8 +522,9 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert {:refused, :not_listed} = Fake.get_trades("BTC/USD", limit: 10)
     end
 
-    test "an order book limit that is not a count is an error, not a crash" do
-      assert {:error, {:invalid_limit, "x"}} = Fake.get_order_book("BTC-USD", limit: "x")
+    test "an order book depth that is not a count is an error, not a crash" do
+      assert {:error, {:invalid_option, :depth, "x"}} =
+               Fake.get_order_book("BTC-USD", depth: "x")
     end
 
     test "an unlisted symbol is refused, not an empty tape" do

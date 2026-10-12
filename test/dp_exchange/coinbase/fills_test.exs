@@ -345,7 +345,7 @@ defmodule DpExchange.Coinbase.FillsTest do
         |> Plug.Conn.resp(200, Jason.encode!(%{"fills" => [fill()], "cursor" => sent <> "n"}))
       end
 
-      assert {:error, :too_many_fill_pages} =
+      assert {:error, :history_truncated} =
                Rest.get_trade_history(@credentials, plug: plug, retry_attempts: 0)
     end
 

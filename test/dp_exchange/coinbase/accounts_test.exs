@@ -205,7 +205,7 @@ defmodule DpExchange.Coinbase.AccountsTest do
         )
       end
 
-      assert {:error, :too_many_account_pages} =
+      assert {:error, :history_truncated} =
                Rest.get_balances(@credentials, plug: plug, retry_attempts: 0)
     end
 

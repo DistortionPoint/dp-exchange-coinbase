@@ -251,8 +251,7 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
                  retry_attempts: 0
                )
 
-      assert is_binary(reason)
-      assert reason =~ "missing_required_field"
+      assert reason == {:missing_required_field, :id}
     end
 
     test "a 500 on each write is unconfirmed and a 4xx is still a refusal" do

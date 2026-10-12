@@ -286,6 +286,66 @@ defmodule DpExchange.Coinbase.FeedTest do
       refute_receive {:frame, :book, _frame}, 100
     end
 
+    test "a sequence gap on a level2 shard re-issues THAT shard for a fresh snapshot (MD9)" do
+      ticker_socket = recording_socket(:ticker)
+      book_socket = recording_socket(:book)
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | shards: %{
+              {"ticker", 0} => %{socket: ticker_socket, symbols: ["BTC-USD"]},
+              {"level2", 0} => %{socket: book_socket, symbols: ["BTC-USD", "ETH-USD"]}
+            }
+        }
+      end)
+
+      send(feed, {:dp_exchange, :coinbase, :sequence_gap, book_socket})
+
+      assert_receive {:frame, :book, %{"type" => "subscribe", "channel" => "level2"} = frame},
+                     5_000
+
+      assert Enum.sort(frame["product_ids"]) == ["BTC-USD", "ETH-USD"]
+      refute_receive {:frame, :ticker, _frame}, 100
+
+      # A second gap inside the minimum interval does not answer with another snapshot burst.
+      send(feed, {:dp_exchange, :coinbase, :sequence_gap, book_socket})
+      _settled = :sys.get_state(feed)
+      refute_receive {:frame, :book, _frame}, 300
+    end
+
+    test "a sequence gap on a ticker shard, or from a stranger, re-issues nothing" do
+      ticker_socket = recording_socket(:ticker)
+      stranger = recording_socket(:stranger)
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{state | shards: %{{"ticker", 0} => %{socket: ticker_socket, symbols: ["BTC-USD"]}}}
+      end)
+
+      send(feed, {:dp_exchange, :coinbase, :sequence_gap, ticker_socket})
+      send(feed, {:dp_exchange, :coinbase, :sequence_gap, stranger})
+
+      _settled = :sys.get_state(feed)
+      refute_receive {:frame, _tag, _frame}, 300
+      assert Process.alive?(feed)
+    end
+
+    test "subscribe([]) and update_symbols([]) schedule no alias-map fetch (DV9)" do
+      feed = start_feed()
+      assert :sys.get_state(feed).alias_map_status == :unfetched
+
+      assert :ok = Feed.subscribe(feed, [])
+      assert :ok = Feed.update_symbols(feed, [])
+
+      assert :sys.get_state(feed).alias_map_status == :unfetched
+
+      # The first call that names a symbol still starts it.
+      assert :ok = Feed.subscribe(feed, ["BTC-USD"])
+      wait_until(fn -> :sys.get_state(feed).alias_map_status != :unfetched end)
+    end
+
     test "a reconnect report from a socket this feed does not know sends nothing" do
       stranger = recording_socket(:stranger)
       feed = start_feed()

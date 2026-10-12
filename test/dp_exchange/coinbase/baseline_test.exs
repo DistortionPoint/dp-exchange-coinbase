@@ -164,9 +164,10 @@ defmodule DpExchange.Coinbase.BaselineTest do
       assert quote_struct.symbol == "ETH-USD"
     end
 
-    test "the venue's timestamp is preserved to the microsecond" do
-      # The host pinned `parsed.timestamp.year` (now `venue_time`). This pins the whole instant, because a
-      # timestamp rounded to the second is a timestamp quietly altered.
+    test "the envelope's send time is NOT presented as the trade's venue_time (MD7)" do
+      # The host pinned `parsed.timestamp.year` (now `venue_time`). The ticker envelope's
+      # `timestamp` is "Server time the message was sent", not the last trade's time, and a
+      # `Ticker` row states none, so the Quote's `venue_time` is nil.
       assert {:ok, _state} =
                frame(%{
                  "channel" => "ticker",
@@ -184,7 +185,7 @@ defmodule DpExchange.Coinbase.BaselineTest do
                })
 
       assert_received {:dp_exchange, :coinbase, quote_struct}
-      assert quote_struct.venue_time == ~U[2026-08-28 14:53:45.649112Z]
+      assert quote_struct.venue_time == nil
     end
   end
 

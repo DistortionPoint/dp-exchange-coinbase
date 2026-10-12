@@ -286,7 +286,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
     end
 
     test "a limit order with both sizes or neither is refused before sending" do
-      assert {:error, :ambiguous_order_size} =
+      assert {:error, {:unexpected_field, :quote_size}} =
                place(limit_request(%{quote_size: "10"}), never_sent())
 
       assert {:error, {:missing_field, :quantity}} =
@@ -338,6 +338,42 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       assert {:error, {:missing_field, :end_time}} = place(stop, never_sent())
     end
 
+    test "a GTD expiry is checked with the time in force, before sizing and prices (DV10)" do
+      # Each of these also carries a field that would be refused LATER (an unreadable price,
+      # no quantity); the expiry is what is reported.
+      broken = %{time_in_force: :gtd, price: "abc"}
+
+      assert {:error, {:missing_field, :end_time}} =
+               place(limit_request(broken), never_sent())
+
+      assert {:error, {:missing_field, :end_time}} =
+               place(Map.delete(limit_request(%{time_in_force: :gtd}), :quantity), never_sent())
+
+      assert {:error, {:invalid_end_time, 5}} =
+               place(limit_request(Map.put(broken, :end_time, 5)), never_sent())
+
+      assert {:error, {:invalid_end_time, "  "}} =
+               place(limit_request(Map.put(broken, :end_time, "  ")), never_sent())
+
+      # With a readable expiry the later checks run, in their usual order.
+      assert {:error, {:invalid_price, "abc"}} =
+               place(limit_request(Map.put(broken, :end_time, @expiry)), never_sent())
+    end
+
+    test "sizing errors are tagged tuples: neither is missing quantity, both is unexpected (DV4)" do
+      assert {:error, {:missing_field, :quantity}} =
+               place(Map.delete(limit_request(), :quantity), never_sent())
+
+      assert {:error, {:unexpected_field, :quote_size}} =
+               place(limit_request(%{quote_size: "10"}), never_sent())
+
+      market = %{symbol: "BTC-USD", side: :buy, order_type: :market, time_in_force: :ioc}
+      assert {:error, {:missing_field, :quantity}} = place(market, never_sent())
+
+      assert {:error, {:unexpected_field, :quote_size}} =
+               place(Map.merge(market, %{quantity: "1", quote_size: "10"}), never_sent())
+    end
+
     test "an end_time that is neither text nor a DateTime is refused" do
       assert {:error, {:invalid_end_time, 5}} =
                place(limit_request(%{time_in_force: :gtd, end_time: 5}), never_sent())
@@ -362,7 +398,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       request =
         limit_request(%{order_type: :market, time_in_force: :ioc}) |> Map.delete(:quantity)
 
-      assert {:error, :missing_order_size} = place(request, responding(accepted()))
+      assert {:error, {:missing_field, :quantity}} = place(request, responding(accepted()))
     end
   end
 
@@ -543,7 +579,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
 
       request = market_request(%{quote_size: Decimal.new("100")})
 
-      assert {:error, :ambiguous_order_size} = place(request, plug)
+      assert {:error, {:unexpected_field, :quote_size}} = place(request, plug)
       refute_received :sent
     end
   end
@@ -1093,10 +1129,14 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
 
   describe "an order the caller can track, or an error (2026-10-10)" do
     test "a missing quantity, symbol or side is a named refusal, not a KeyError" do
-      for field <- [:quantity, :symbol, :side] do
+      for field <- [:quantity, :side] do
         assert {:error, {:missing_field, ^field}} =
                  place(Map.delete(limit_request(), field), responding(accepted()))
       end
+
+      # An absent symbol is `{:invalid_symbol, nil}` on every venue of the family (DV2).
+      assert {:error, {:invalid_symbol, nil}} =
+               place(Map.delete(limit_request(), :symbol), responding(accepted()))
     end
 
     test "the placed order echoes Decimals, not the caller's raw values" do
@@ -1243,6 +1283,49 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
 
       assert {:refused, {:venue_error, 400, "bad size"}} =
                place(limit_request(), responding(%{"message" => "bad size"}, 400))
+    end
+
+    test "EVERY 4xx to the first attempt is a refusal; 429 is a plain error (DV6)" do
+      for status <- [400, 401, 403, 409, 415, 422, 418] do
+        assert {:refused, {:venue_error, ^status, "no"}} =
+                 place(limit_request(), responding(%{"message" => "no"}, status))
+      end
+
+      assert {:error, reason} = place(limit_request(), responding(%{"message" => "slow"}, 429))
+      refute match?({:order_unconfirmed, _id, _why}, reason)
+
+      # The same for the other writes that share the decision.
+      assert {:refused, {:venue_error, 409, "no"}} =
+               Rest.close_position(@credentials, "BTC-USD",
+                 plug: responding(%{"message" => "no"}, 409),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a 409 or 422 answered to an internal retry is unconfirmed, not a refusal (DV6)" do
+      for answer <- [409, 422] do
+        counter = :counters.new(1, [])
+
+        plug = fn conn ->
+          :counters.add(counter, 1, 1)
+          status = if :counters.get(counter, 1) == 1, do: 503, else: answer
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(status, Jason.encode!(%{"message" => "x"}))
+        end
+
+        id = "retry-#{answer}"
+
+        assert {:error, {:order_unconfirmed, ^id, _reason}} =
+                 Rest.place_order(
+                   @credentials,
+                   limit_request(%{client_order_id: id}),
+                   plug: plug,
+                   retry_attempts: 3,
+                   retry_delay: 1
+                 )
+      end
     end
 
     test "a 4xx answered to an internal retry is unconfirmed, not a refusal" do

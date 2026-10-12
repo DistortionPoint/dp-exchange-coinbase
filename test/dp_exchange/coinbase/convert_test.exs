@@ -303,7 +303,7 @@ defmodule DpExchange.Coinbase.ConvertTest do
                  accounts ++ [plug: responding(trade(%{"id" => nil}))]
                )
 
-      assert missing =~ "missing_required_field"
+      assert missing == {:missing_required_field, :id}
     end
 
     test "a commit answered 500 is unconfirmed, and 404 is a refusal" do

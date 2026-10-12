@@ -378,6 +378,111 @@ defmodule DpExchange.Coinbase.RestTest do
                  retry_attempts: 0
                )
     end
+
+    defp bar_at(unix, close \\ "1.5") do
+      %{
+        "start" => to_string(unix),
+        "open" => "1",
+        "high" => "2",
+        "low" => "0.5",
+        "close" => close
+      }
+    end
+
+    test "the bar still forming is withheld unless include_partial: true (MD1)" do
+      # A daily bar that opened 30 seconds ago cannot have closed yet, whatever the clock.
+      now = DateTime.to_unix(DateTime.utc_now())
+      body = %{"candles" => [bar_at(now - 30), bar_at(now - 2 * 86_400)]}
+      opts = [plug: responding(body), retry_attempts: 0]
+
+      assert {:ok, [closed]} = Rest.get_historical_prices("BTC-USD", "1d", [], opts)
+      assert closed.opened_at == DateTime.from_unix!(now - 2 * 86_400)
+
+      assert {:ok, [_closed, forming]} =
+               Rest.get_historical_prices(
+                 "BTC-USD",
+                 "1d",
+                 [],
+                 Keyword.put(opts, :include_partial, true)
+               )
+
+      assert forming.opened_at == DateTime.from_unix!(now - 30)
+
+      assert {:ok, [_closed]} =
+               Rest.get_historical_prices(
+                 "BTC-USD",
+                 "1d",
+                 [],
+                 Keyword.put(opts, :include_partial, false)
+               )
+    end
+
+    test "start is inclusive and end exclusive on opened_at, filtered client-side (MD2)" do
+      base = 1_787_900_400
+      body = %{"candles" => [bar_at(base), bar_at(base + 60), bar_at(base + 120)]}
+      start = DateTime.from_unix!(base)
+      finish = DateTime.from_unix!(base + 120)
+
+      assert {:ok, [first, second]} =
+               Rest.get_historical_prices("BTC-USD", "1m", [start: start, end: finish],
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert first.opened_at == start
+      assert second.opened_at == DateTime.from_unix!(base + 60)
+
+      assert {:ok, [only]} =
+               Rest.get_historical_prices(
+                 "BTC-USD",
+                 "1m",
+                 [start: DateTime.from_unix!(base + 1), end: finish],
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert only.opened_at == DateTime.from_unix!(base + 60)
+    end
+
+    test "limit is sent to the venue; anything else is refused, never ignored (MD4)" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, URI.decode_query(conn.query_string)})
+        responding(@candles).(conn)
+      end
+
+      assert {:ok, _bars} =
+               Rest.get_historical_prices("BTC-USD", "1m", [], plug: plug, limit: 100)
+
+      assert_receive {:query, %{"limit" => "100"}}, 5_000
+
+      assert {:ok, _bars} = Rest.get_historical_prices("BTC-USD", "1m", [], plug: plug)
+      assert_receive {:query, query}, 5_000
+      refute Map.has_key?(query, "limit")
+
+      for bad <- [0, -1, 351, "5", 1.5] do
+        assert {:error, {:invalid_option, :limit, ^bad}} =
+                 Rest.get_historical_prices("BTC-USD", "1m", [], plug: plug, limit: bad)
+      end
+
+      assert {:error, {:invalid_option, :include_partial, "yes"}} =
+               Rest.get_historical_prices("BTC-USD", "1m", [], plug: plug, include_partial: "yes")
+
+      refute_received {:query, _query}
+    end
+
+    test "a candle price of zero or less is refused (MD6)" do
+      for bad <- ["0", "-1"] do
+        body = %{"candles" => [bar_at(1_787_928_660, bad)]}
+
+        assert {:error, {:non_positive_price, :close, ^bad}} =
+                 Rest.get_historical_prices("BTC-USD", "1m", [],
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+      end
+    end
   end
 
   describe "get_symbols/1" do
@@ -465,7 +570,7 @@ defmodule DpExchange.Coinbase.RestTest do
         |> Plug.Conn.resp(200, Jason.encode!(response))
       end
 
-      assert {:error, :too_many_product_pages} =
+      assert {:error, :history_truncated} =
                Rest.get_symbols(plug: plug, retry_attempts: 0)
     end
 

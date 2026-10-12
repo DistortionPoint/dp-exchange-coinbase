@@ -283,6 +283,24 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert notice.severity == :warning
 
       for _each <- 1..2, do: assert_received({:dp_exchange, :coinbase, %Types.Quote{}})
+
+      # MD9: the owner of the subscription is told WHICH connection gapped, so it can ask
+      # for a fresh level2 snapshot (`Feed` does).
+      me = self()
+      assert_received {:dp_exchange, :coinbase, :sequence_gap, ^me}
+    end
+
+    test "consecutive numbers report no gap to the feed" do
+      feed([numbered(10), numbered(11)], state())
+
+      refute_received {:dp_exchange, :coinbase, :sequence_gap, _socket}
+    end
+
+    test "a repeated sequence number is dropped, never applied (MD9)" do
+      feed([numbered(10), numbered(10)], state())
+
+      assert_received {:dp_exchange, :coinbase, %Types.Quote{}}
+      refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
     end
 
     test "a message older than the last is ignored, as the venue advises, and said so" do
@@ -421,7 +439,11 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert_received {:dp_exchange, :coinbase, %Types.Quote{} = quote_struct}
       assert quote_struct.symbol == "BTC-USD"
       assert Decimal.equal?(quote_struct.price, Decimal.new("79478.7"))
-      assert quote_struct.venue_time == ~U[2026-08-28 14:53:45.649112Z]
+
+      # MD7: the envelope `timestamp` is when the gateway SENT the message, and a `Ticker`
+      # row states no trade time, so the Quote claims none. It is neither the envelope's
+      # send time nor `now`.
+      assert quote_struct.venue_time == nil
 
       # A rolling 24-hour total, labelled as one: summed as per-print volume it read about
       # 1000× too high in a consumer (dp-exchange-core issue #42).
@@ -429,15 +451,99 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert quote_struct.volume_window == :rolling_24h
     end
 
-    test "a tick with NO venue timestamp is not delivered" do
-      # Fails closed, exactly as the REST path does. Substituting `now` would make a
-      # stale tick indistinguishable from a live one.
-      ticker = Map.delete(@ticker, "timestamp")
+    test "a tick is delivered with venue_time nil whatever the envelope says, snapshot or update" do
+      # Neither a missing, a garbled nor a present envelope timestamp becomes the Quote's
+      # `venue_time`: the `snapshot` event sent at every (re)subscribe is not a fresh trade.
+      envelopes = [
+        Map.delete(@ticker, "timestamp"),
+        Map.put(@ticker, "timestamp", "junk"),
+        @ticker
+      ]
 
-      assert {:ok, _state} = frame(ticker)
+      for type <- ["snapshot", "update"], envelope <- envelopes do
+        ticker = update_in(envelope["events"], fn [event] -> [Map.put(event, "type", type)] end)
 
-      refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
-      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+        assert {:ok, _state} = frame(ticker)
+
+        assert_received {:dp_exchange, :coinbase, %Types.Quote{venue_time: nil}}
+        refute_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+      end
+    end
+
+    test "a ticker price of zero or less is refused, not delivered (MD6)" do
+      for bad <- ["0", "-1", "0.00"] do
+        ticker =
+          update_in(@ticker["events"], fn [event] ->
+            [update_in(event["tickers"], fn [t] -> [Map.put(t, "price", bad)] end)]
+          end)
+
+        assert {:ok, _state} = frame(ticker)
+
+        refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
+        assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}
+      end
+    end
+
+    test "a level2 snapshot drops a zero-size level and keeps the delta's zero (MD5)" do
+      row = fn side, price, size ->
+        %{
+          "side" => side,
+          "price_level" => price,
+          "new_quantity" => size,
+          "event_time" => "2026-08-28T14:53:45.000000Z"
+        }
+      end
+
+      rows = [row.("bid", "100", "1"), row.("bid", "99", "0"), row.("offer", "101", "2")]
+
+      for type <- ["snapshot", "update"] do
+        payload = %{
+          "channel" => "l2_data",
+          "timestamp" => "2026-08-28T14:53:45.649112Z",
+          "events" => [%{"type" => type, "product_id" => "BTC-USD", "updates" => rows}]
+        }
+
+        assert {:ok, _state} = frame(payload)
+      end
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
+      assert [{bid, _size}] = book.bids
+      assert [_ask] = book.asks
+      assert Decimal.equal?(bid, Decimal.new("100"))
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBookDelta{levels: levels}}
+      assert length(levels) == 3
+    end
+
+    test "a trade price of zero or less is refused (MD6)" do
+      payload = fn price ->
+        %{
+          "channel" => "market_trades",
+          "timestamp" => "2026-08-28T14:53:45.649112Z",
+          "events" => [
+            %{
+              "type" => "update",
+              "trades" => [
+                %{
+                  "trade_id" => "1",
+                  "product_id" => "BTC-USD",
+                  "price" => price,
+                  "size" => "1",
+                  "side" => "BUY",
+                  "time" => "2026-08-28T14:53:45.000000Z"
+                }
+              ]
+            }
+          ]
+        }
+      end
+
+      assert {:ok, _state} = frame(payload.("0"))
+      assert {:ok, _state} = frame(payload.("-3"))
+      refute_received {:dp_exchange, :coinbase, %Types.Trade{}}
+
+      assert {:ok, _state} = frame(payload.("3"))
+      assert_received {:dp_exchange, :coinbase, %Types.Trade{}}
     end
 
     test "a non-numeric price does not crash the socket" do

@@ -10,7 +10,7 @@ defmodule DpExchange.Coinbase.OrderBookTest do
 
   use ExUnit.Case, async: true
 
-  alias DpExchange.Coinbase.Rest
+  alias DpExchange.Coinbase.{Fake, Rest}
   alias DpExchange.Core.{Config, Types}
 
   @moduletag :capture_log
@@ -383,7 +383,7 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       assert private_path =~ "/product_book"
     end
 
-    test "limit and aggregation go to the venue" do
+    test "depth (sent as the venue's limit) and aggregation go to the venue" do
       me = self()
 
       plug = fn conn ->
@@ -396,7 +396,7 @@ defmodule DpExchange.Coinbase.OrderBookTest do
 
       assert {:ok, _book} =
                Rest.get_order_book("BTC-USD",
-                 limit: 50,
+                 depth: 50,
                  aggregation_price_increment: "0.01",
                  plug: plug,
                  retry_attempts: 0
@@ -463,6 +463,102 @@ defmodule DpExchange.Coinbase.OrderBookTest do
                Rest.get_trades("BTC-USD", limit: 10, plug: responding(body), retry_attempts: 0)
 
       assert t.side == nil
+    end
+
+    defp tape_row(id, price, time) do
+      %{"trade_id" => id, "price" => price, "size" => "1", "time" => time, "side" => "BUY"}
+    end
+
+    test "since and end go to the venue as the ticker's start and end (MD4)" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, URI.decode_query(conn.query_string)})
+        responding(%{"trades" => [tape_row("t-1", "10", "2026-08-28T14:53:45Z")]}).(conn)
+      end
+
+      since = ~U[2026-08-28 14:00:00Z]
+      finish = ~U[2026-08-28 15:00:00Z]
+
+      assert {:ok, [_trade]} =
+               Rest.get_trades("BTC-USD",
+                 limit: 10,
+                 since: since,
+                 end: finish,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}, 5_000
+      assert query["start"] == to_string(DateTime.to_unix(since))
+      assert query["end"] == to_string(DateTime.to_unix(finish))
+      assert query["limit"] == "10"
+
+      assert {:ok, [_trade]} = Rest.get_trades("BTC-USD", limit: 10, plug: plug)
+      assert_receive {:query, bare}, 5_000
+      refute Map.has_key?(bare, "start")
+      refute Map.has_key?(bare, "end")
+    end
+
+    test "a bound that is not a DateTime is refused, and a limit above int32 too" do
+      for key <- [:since, :end], bad <- [1_700_000_000, "now", ~D[2026-01-01]] do
+        assert {:error, {:invalid_option, ^key, ^bad}} =
+                 Rest.get_trades("BTC-USD", [{:limit, 10}, {key, bad}])
+      end
+
+      assert {:error, {:invalid_option, :limit, 2_147_483_648}} =
+               Rest.get_trades("BTC-USD", limit: 2_147_483_648)
+    end
+
+    test "a since read that fills the page may have a hole and is history_truncated" do
+      rows = [
+        tape_row("t-1", "10", "2026-08-28T14:53:45Z"),
+        tape_row("t-2", "10", "2026-08-28T14:53:46Z")
+      ]
+
+      since = ~U[2026-08-28 14:00:00Z]
+      opts = [since: since, plug: responding(%{"trades" => rows}), retry_attempts: 0]
+
+      assert {:error, :history_truncated} = Rest.get_trades("BTC-USD", [{:limit, 2} | opts])
+      assert {:ok, [_one, _two]} = Rest.get_trades("BTC-USD", [{:limit, 3} | opts])
+
+      # Without :since there is no hole to speak of: the newest `limit` rows are the answer.
+      assert {:ok, [_one, _two]} =
+               Rest.get_trades("BTC-USD",
+                 limit: 2,
+                 plug: responding(%{"trades" => rows}),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a trade price of zero or less refuses the reply (MD6)" do
+      for bad <- ["0", "-1"] do
+        body = %{"trades" => [tape_row("t-1", bad, "2026-08-28T14:53:45Z")]}
+
+        assert {:error, {:non_positive_price, :price, ^bad}} =
+                 Rest.get_trades("BTC-USD", limit: 10, plug: responding(body), retry_attempts: 0)
+
+        assert {:error, {:non_positive_price, :price, ^bad}} =
+                 Rest.get_price("BTC-USD", plug: responding(body), retry_attempts: 0)
+      end
+    end
+
+    test "the fake honours since and end the same way" do
+      assert {:ok, [only]} =
+               Fake.get_trades("BTC-USD", limit: 10, since: ~U[2026-08-28 12:00:00Z])
+
+      assert only.id == "t-1"
+
+      assert {:ok, [early]} =
+               Fake.get_trades("BTC-USD", limit: 10, end: ~U[2026-08-28 12:00:00Z])
+
+      assert early.id == "t-2"
+
+      assert {:error, :history_truncated} =
+               Fake.get_trades("BTC-USD", limit: 1, since: ~U[2026-08-28 12:00:00Z])
+
+      assert {:error, {:invalid_option, :since, "x"}} =
+               Fake.get_trades("BTC-USD", limit: 1, since: "x")
     end
 
     test "side is inverted from the venue's maker side to the taker Core.Types.Trade wants" do
@@ -725,9 +821,9 @@ defmodule DpExchange.Coinbase.OrderBookTest do
   end
 
   describe "get_order_book/2 options" do
-    # `limit` and `aggregation_price_increment` were stringified and sent as given: a map
+    # `depth` and `aggregation_price_increment` were stringified and sent as given: a map
     # raised in the caller's process and `"abc"` or `-1` went to the venue.
-    test "a limit that is not a count is refused before any request" do
+    test "a depth that is not a positive count is refused before any request" do
       test_pid = self()
 
       plug = fn conn ->
@@ -735,12 +831,63 @@ defmodule DpExchange.Coinbase.OrderBookTest do
         responding(%{"pricebook" => pricebook()}).(conn)
       end
 
-      for bad <- [-1, "5", 1.5, %{}, [3], 2_147_483_648] do
-        assert {:error, {:invalid_limit, ^bad}} =
-                 Rest.get_order_book("BTC-USD", limit: bad, plug: plug, retry_attempts: 0)
+      for bad <- [0, -1, "5", 1.5, %{}, [3], 2_147_483_648] do
+        assert {:error, {:invalid_option, :depth, ^bad}} =
+                 Rest.get_order_book("BTC-USD", depth: bad, plug: plug, retry_attempts: 0)
       end
 
       refute_received {:request_sent, _path}
+    end
+
+    test "the old :limit spelling is refused, never read as :depth (MD5)" do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:request_sent, conn.request_path})
+        responding(%{"pricebook" => pricebook()}).(conn)
+      end
+
+      for value <- [5, nil, "x"] do
+        assert {:error, {:unsupported_option, :limit}} =
+                 Rest.get_order_book("BTC-USD", limit: value, plug: plug, retry_attempts: 0)
+      end
+
+      assert {:error, {:unsupported_option, :limit}} =
+               Fake.get_order_book("BTC-USD", limit: 5)
+
+      refute_received {:request_sent, _path}
+    end
+
+    test "a snapshot level with size zero is dropped, a negative size or price <= 0 refuses" do
+      book =
+        pricebook(%{
+          "bids" => [
+            %{"price" => "79478.00", "size" => "0.5"},
+            %{"price" => "79477.00", "size" => "0"}
+          ]
+        })
+
+      assert {:ok, %Types.OrderBook{bids: [{bid, _size}]}} =
+               Rest.get_order_book("BTC-USD",
+                 plug: responding(%{"pricebook" => book}),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(bid, Decimal.new("79478.00"))
+
+      for bad <- [
+            %{"price" => "79478", "size" => "-1"},
+            %{"price" => "0", "size" => "1"},
+            %{"price" => "-5", "size" => "1"}
+          ] do
+        refused = pricebook(%{"asks" => [bad]})
+
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_order_book("BTC-USD",
+                   plug: responding(%{"pricebook" => refused}),
+                   retry_attempts: 0
+                 )
+      end
     end
 
     test "an aggregation increment that is not a finite positive number is refused" do
@@ -773,7 +920,7 @@ defmodule DpExchange.Coinbase.OrderBookTest do
 
       assert {:ok, _book} =
                Rest.get_order_book("BTC-USD",
-                 limit: 5,
+                 depth: 5,
                  aggregation_price_increment: Decimal.new("1E-8"),
                  plug: plug,
                  retry_attempts: 0
@@ -786,15 +933,14 @@ defmodule DpExchange.Coinbase.OrderBookTest do
     end
 
     test "the fake refuses the same options in the same order" do
-      alias DpExchange.Coinbase.Fake
-
-      assert {:error, {:invalid_limit, %{}}} = Fake.get_order_book("BTC-USD", limit: %{})
+      assert {:error, {:invalid_option, :depth, %{}}} = Fake.get_order_book("BTC-USD", depth: %{})
 
       assert {:error, {:invalid_aggregation_price_increment, "abc"}} =
                Fake.get_order_book("BTC-USD", aggregation_price_increment: "abc")
 
       # Refused locally, ahead of the venue naming a symbol unlisted.
-      assert {:error, {:invalid_limit, -1}} = Fake.get_order_book("NOPE-USD", limit: -1)
+      assert {:error, {:invalid_option, :depth, -1}} =
+               Fake.get_order_book("NOPE-USD", depth: -1)
     end
   end
 
