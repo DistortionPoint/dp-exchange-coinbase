@@ -133,7 +133,10 @@ defmodule DpExchange.Coinbase.Rest do
       `opts[:include_partial]` is `true`. With it, the last bar is returned as the venue
       sent it and may still change; `Core.Types.Candle` has no flag for that.
     * `opts[:limit]` (an integer 1..350, the spec's `limit`, whose default and maximum are
-      both 350) is sent to the venue. Anything else is
+      both 350) is sent to the venue, one higher (up to 350) when the forming bar is withheld,
+      and the newest `limit` closed bars are returned, so `limit: 1` is the latest closed bar
+      rather than `[]`. At `limit: 350` the forming bar still takes a slot and 349 may come
+      back. Anything else is
       `{:error, {:invalid_option, :limit, v}}`. An `:include_partial` that is not a boolean
       is `{:error, {:invalid_option, :include_partial, v}}`.
   """
@@ -172,7 +175,7 @@ defmodule DpExchange.Coinbase.Rest do
   Applies the family's range and forming-bar rules to decoded bars: a bar is kept when its
   `opened_at` is at or after `range[:start]` (when given), strictly before `range[:end]`
   (when given), and, unless `opts[:include_partial]` is `true`, when it has closed
-  (`opened_at + width <= now`).
+  (`opened_at + width <= now`). `opts[:limit]` then keeps the newest that many.
 
   Shared by `get_historical_prices/4` and `DpExchange.Coinbase.Fake`, so the two cannot
   drift. `range` and `opts` must already have passed `validate_candle_request/3`.
@@ -186,11 +189,18 @@ defmodule DpExchange.Coinbase.Rest do
     start = Keyword.get(range, :start)
     finish = Keyword.get(range, :end)
 
-    Enum.filter(bars, fn %{opened_at: at} ->
-      (partial? or DateTime.compare(DateTime.add(at, width, :second), now) != :gt) and
-        (is_nil(start) or DateTime.compare(at, start) != :lt) and
-        (is_nil(finish) or DateTime.compare(at, finish) == :lt)
-    end)
+    kept =
+      Enum.filter(bars, fn %{opened_at: at} ->
+        (partial? or DateTime.compare(DateTime.add(at, width, :second), now) != :gt) and
+          (is_nil(start) or DateTime.compare(at, start) != :lt) and
+          (is_nil(finish) or DateTime.compare(at, finish) == :lt)
+      end)
+
+    # `bars` are oldest first; a `:limit` keeps the newest that many.
+    case Keyword.get(opts, :limit) do
+      limit when is_integer(limit) -> Enum.take(kept, -limit)
+      _none -> kept
+    end
   end
 
   @doc """
@@ -2372,8 +2382,19 @@ defmodule DpExchange.Coinbase.Rest do
          :ok <- include_partial_option(opts),
          {:ok, start, finish} <- candle_window(range, width),
          {:ok, params} <- candle_span(start, finish, width, enum) do
-      {:ok, put_unless_nil(params, :limit, limit)}
+      {:ok, put_unless_nil(params, :limit, wire_candle_limit(limit, opts))}
     end
+  end
+
+  # The newest bar is the one still forming, and `select_candles/4` withholds it, so a caller's
+  # `limit: 1` sent as `limit=1` would be answered with that one forming bar and come back as
+  # `[]`, which reads as "no data". One extra is asked for (the venue maximum is a ceiling, so
+  # `limit: 350` may come back as 349 closed bars) and `select_candles/4` trims to the newest
+  # `limit` after the forming bar is dropped. Which end the venue truncates is unmeasured here.
+  defp wire_candle_limit(nil, _opts), do: nil
+
+  defp wire_candle_limit(limit, opts) do
+    if Keyword.get(opts, :include_partial) == true, do: limit, else: min(limit + 1, @max_candles)
   end
 
   # The candles endpoint has a `limit` ("350 by default, max 350", at-spec.yaml:455-462), so
@@ -2667,10 +2688,12 @@ defmodule DpExchange.Coinbase.Rest do
   documents no default itself, so a caller must say how many prints it wants.
 
   **`opts[:since]` and `opts[:end]`** (a `DateTime` each) are sent to the venue as the ticker's
-  `start` and `end` (at-spec.yaml:530-541, UNIX seconds), not applied to the page it
-  returned (family convention MD4). A `:since` read that returns `limit` rows may have a hole
-  between `since` and the first row, and is `{:error, :history_truncated}`. Which rows the
-  venue keeps when more than `limit` match, and whether `end` is inclusive, are unmeasured.
+  `start` and `end` (at-spec.yaml:530-541, UNIX seconds; family convention MD4). `:end` is
+  **exclusive** (MD2): the reply is also filtered client-side to trades stamped strictly before
+  it, so the rule holds whatever the venue does with `end`. A `:since` read that returns
+  `limit` rows may have a hole between `since` and the first row, and is
+  `{:error, :history_truncated}`. Which rows the venue keeps when more than `limit` match is
+  unmeasured.
 
   A trade whose price is zero or negative refuses the reply (MD6).
 
@@ -2748,7 +2771,7 @@ defmodule DpExchange.Coinbase.Rest do
         # `limit` are unmeasured, so such a reply is refused rather than returned short.
         if since != nil and length(trades) >= limit,
           do: {:error, :history_truncated},
-          else: decode_trades(trades, symbol)
+          else: decode_trades(trades, symbol, finish)
 
       {:ok, _unexpected} ->
         {:error, :unexpected_response_shape}
@@ -2758,7 +2781,18 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  defp decode_trades(trades, symbol) do
+  @doc """
+  Keeps the trades stamped strictly before `finish` (`nil` keeps all): the family's exclusive
+  `:end` (MD2), applied client-side so it holds whatever the venue does with its `end`
+  parameter. Shared by `get_trades/2` and `DpExchange.Coinbase.Fake`.
+  """
+  @spec trades_before([Types.Trade.t()], DateTime.t() | nil) :: [Types.Trade.t()]
+  def trades_before(trades, nil), do: trades
+
+  def trades_before(trades, %DateTime{} = finish),
+    do: Enum.filter(trades, &(DateTime.compare(&1.timestamp, finish) == :lt))
+
+  defp decode_trades(trades, symbol, finish) do
     trades
     |> Enum.reduce_while({:ok, []}, fn trade, {:ok, acc} ->
       case to_trade(trade, symbol) do
@@ -2768,8 +2802,12 @@ defmodule DpExchange.Coinbase.Rest do
     end)
     |> case do
       # Oldest first, by the venue's own time — see `Core.Venue`'s callback doc.
-      {:ok, decoded} -> {:ok, decoded |> Enum.reverse() |> Enum.sort_by(& &1.timestamp, DateTime)}
-      error -> error
+      {:ok, decoded} ->
+        sorted = decoded |> Enum.reverse() |> Enum.sort_by(& &1.timestamp, DateTime)
+        {:ok, trades_before(sorted, finish)}
+
+      error ->
+        error
     end
   end
 

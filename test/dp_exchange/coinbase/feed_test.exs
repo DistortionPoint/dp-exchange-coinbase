@@ -313,6 +313,23 @@ defmodule DpExchange.Coinbase.FeedTest do
       send(feed, {:dp_exchange, :coinbase, :sequence_gap, book_socket})
       _settled = :sys.get_state(feed)
       refute_receive {:frame, :book, _frame}, 300
+
+      # ...but it is deferred, not lost: ONE trailing re-issue is scheduled however many gaps
+      # arrive meanwhile, and when it fires the shard is re-issued once more.
+      send(feed, {:dp_exchange, :coinbase, :sequence_gap, book_socket})
+      state = :sys.get_state(feed)
+      assert [{"level2", 0}] = Map.keys(state.gap_resubscribe_due)
+
+      send(feed, {:gap_resubscribe_due, {"level2", 0}})
+      assert_receive {:frame, :book, %{"type" => "subscribe", "channel" => "level2"}}, 5_000
+      assert :sys.get_state(feed).gap_resubscribe_due == %{}
+    end
+
+    test "a deferred gap re-issue for a shard that is gone does nothing" do
+      feed = start_feed()
+      send(feed, {:gap_resubscribe_due, {"level2", 7}})
+      assert %{gap_resubscribe_due: %{}} = :sys.get_state(feed)
+      assert Process.alive?(feed)
     end
 
     test "a sequence gap on a ticker shard, or from a stranger, re-issues nothing" do

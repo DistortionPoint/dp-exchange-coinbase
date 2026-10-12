@@ -417,6 +417,20 @@ defmodule DpExchange.Coinbase.RestTest do
                )
     end
 
+    test "limit: 1 still returns the newest CLOSED bar when the forming one is withheld" do
+      now = DateTime.to_unix(DateTime.utc_now())
+      body = %{"candles" => [bar_at(now - 30), bar_at(now - 86_400), bar_at(now - 2 * 86_400)]}
+
+      assert {:ok, [newest_closed]} =
+               Rest.get_historical_prices("BTC-USD", "1d", [],
+                 plug: responding(body),
+                 limit: 1,
+                 retry_attempts: 0
+               )
+
+      assert newest_closed.opened_at == DateTime.from_unix!(now - 86_400)
+    end
+
     test "start is inclusive and end exclusive on opened_at, filtered client-side (MD2)" do
       base = 1_787_900_400
       body = %{"candles" => [bar_at(base), bar_at(base + 60), bar_at(base + 120)]}
@@ -454,6 +468,16 @@ defmodule DpExchange.Coinbase.RestTest do
 
       assert {:ok, _bars} =
                Rest.get_historical_prices("BTC-USD", "1m", [], plug: plug, limit: 100)
+
+      # One more than asked: the forming bar takes a slot and is withheld afterwards.
+      assert_receive {:query, %{"limit" => "101"}}, 5_000
+
+      assert {:ok, _bars} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: plug,
+                 limit: 100,
+                 include_partial: true
+               )
 
       assert_receive {:query, %{"limit" => "100"}}, 5_000
 

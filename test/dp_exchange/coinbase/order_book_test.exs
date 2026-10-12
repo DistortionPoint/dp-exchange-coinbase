@@ -531,6 +531,23 @@ defmodule DpExchange.Coinbase.OrderBookTest do
                )
     end
 
+    test "a trade stamped exactly at :end is excluded, whatever the venue returned (MD2)" do
+      rows = [
+        tape_row("t-1", "10", "2026-08-28T14:53:45Z"),
+        tape_row("t-2", "10", "2026-08-28T14:53:46Z")
+      ]
+
+      assert {:ok, [only]} =
+               Rest.get_trades("BTC-USD",
+                 limit: 5,
+                 end: ~U[2026-08-28 14:53:46Z],
+                 plug: responding(%{"trades" => rows}),
+                 retry_attempts: 0
+               )
+
+      assert only.id == "t-1"
+    end
+
     test "a trade price of zero or less refuses the reply (MD6)" do
       for bad <- ["0", "-1"] do
         body = %{"trades" => [tape_row("t-1", bad, "2026-08-28T14:53:45Z")]}

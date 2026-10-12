@@ -306,7 +306,11 @@ defmodule DpExchange.Coinbase.Fake do
   defp trades_for(symbol, limit, since, finish) do
     case Map.fetch(@price, native(symbol)) do
       {:ok, price} ->
-        in_window = Enum.filter(tape(symbol, price), &in_trade_window?(&1, since, finish))
+        in_window =
+          symbol
+          |> tape(price)
+          |> Enum.filter(&since_or_later?(&1, since))
+          |> Rest.trades_before(finish)
 
         if since != nil and length(in_window) >= limit,
           do: {:error, :history_truncated},
@@ -317,10 +321,8 @@ defmodule DpExchange.Coinbase.Fake do
     end
   end
 
-  defp in_trade_window?(%Types.Trade{timestamp: at}, since, finish) do
-    (is_nil(since) or DateTime.compare(at, since) != :lt) and
-      (is_nil(finish) or DateTime.compare(at, finish) == :lt)
-  end
+  defp since_or_later?(%Types.Trade{timestamp: at}, since),
+    do: is_nil(since) or DateTime.compare(at, since) != :lt
 
   defp tape(symbol, price) do
     # More than one print, because the whole point of the tape is that get_price/2

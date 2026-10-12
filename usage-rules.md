@@ -274,7 +274,9 @@ to be the last element): pass `include_partial: true` to get it, as the venue se
 still change; `Candle` has no flag for that). `range[:start]` is **inclusive** and
 `range[:end]` **exclusive** on `opened_at`, filtered client-side because the venue's own
 treatment of the bounds is unmeasured (only a bound you passed is filtered on). `:limit`
-(1..350, the venue's `limit`) is now sent; it used to be ignored. Anything else is
+(1..350, the venue's `limit`) is now sent, one higher when the forming bar is withheld so
+that `limit: 1` returns the latest closed bar and not `[]` (at 350, 349 may come back); the
+newest `limit` closed bars are kept. It used to be ignored. Anything else is
 `{:error, {:invalid_option, :limit, v}}`, and a non-boolean `:include_partial` is
 `{:error, {:invalid_option, :include_partial, v}}`. A candle open/high/low/close of zero or
 less refuses the reply (`{:error, {:non_positive_price, field, value}}`).

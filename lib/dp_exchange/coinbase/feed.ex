@@ -1864,6 +1864,11 @@ defmodule DpExchange.Coinbase.Feed do
        # all, and cleared (per symbol) the moment a retry actually sends. Absent from a
        # key entirely is the ordinary case — this map is normally empty.
        pending_unsubscribes: %{},
+       # {"level2", index} => monotonic ms of the last gap-triggered re-issue, and the keys
+       # with a trailing re-issue already scheduled (`:gap_resubscribe_due`). Bounded by the
+       # number of shard keys. See `gap_resubscribe/3`.
+       gap_resubscribed_at: %{},
+       gap_resubscribe_due: %{},
        # {channel, index} => %{ref: reference(), timer: reference(), symbols: [...]} — a deferred
        # `:open_shard` that has been scheduled and has not fired. At most one per key: a later
        # `reshard/1` replaces it (`schedule_open/4`) and one for a key nobody wants any more
@@ -2192,29 +2197,27 @@ defmodule DpExchange.Coinbase.Feed do
   # `@gap_resubscribe_min_ms` per shard: a venue that keeps dropping messages must not be
   # answered with a snapshot burst per gap, which is itself load on the same connection. The
   # `:sequence_gap` notice reaches consumers through the notice clause above, once per gap.
+  #
+  # **A gap inside the interval is deferred, not dropped.** The snapshot the earlier gap asked
+  # for was already on its way when the later gap happened, so the book it built is unreliable
+  # again, and dropping that gap would leave it so until the 60-second timer. One trailing
+  # re-issue per shard is scheduled for when the interval ends (`:gap_resubscribe_due`), however
+  # many gaps arrive meanwhile: at most one burst per interval, and the last gap is never lost.
   def handle_info({:dp_exchange, :coinbase, :sequence_gap, socket}, state) do
     case shard_key_for_socket(state, socket) do
-      {"level2", _index} = key ->
-        now = System.monotonic_time(:millisecond)
-        last = state |> Map.get(:gap_resubscribed_at, %{}) |> Map.get(key)
+      {"level2", _index} = key -> {:noreply, gap_resubscribe(state, key, socket)}
+      _not_a_level2_shard -> {:noreply, state}
+    end
+  end
 
-        if is_nil(last) or now - last >= @gap_resubscribe_min_ms do
-          %{symbols: symbols} = Map.fetch!(state.shards, key)
-          pending = Map.get(state.pending_unsubscribes, key, [])
+  # Keyed by shard, not by socket: a shard whose socket was replaced while this was pending is
+  # re-issued on its CURRENT socket (the gap that scheduled this may be the new one's).
+  def handle_info({:gap_resubscribe_due, key}, state) do
+    state = %{state | gap_resubscribe_due: Map.delete(state.gap_resubscribe_due, key)}
 
-          send(
-            self(),
-            {:resubscribe_shard, key, socket, "level2", pending, symbols, state.credentials}
-          )
-
-          stamps = state |> Map.get(:gap_resubscribed_at, %{}) |> Map.put(key, now)
-          {:noreply, Map.put(state, :gap_resubscribed_at, stamps)}
-        else
-          {:noreply, state}
-        end
-
-      _not_a_level2_shard ->
-        {:noreply, state}
+    case Map.get(state.shards, key) do
+      %{socket: socket} -> {:noreply, issue_gap_resubscribe(state, key, socket)}
+      nil -> {:noreply, state}
     end
   end
 
@@ -2459,6 +2462,48 @@ defmodule DpExchange.Coinbase.Feed do
   def handle_info(_other, state), do: {:noreply, state}
 
   # --- internal ------------------------------------------------------------
+
+  # Re-issues the `level2` shard now when the interval since the last gap-triggered re-issue has
+  # passed, otherwise schedules ONE trailing re-issue for when it ends. See the `:sequence_gap`
+  # clause.
+  defp gap_resubscribe(state, key, socket) do
+    now = System.monotonic_time(:millisecond)
+    last = Map.get(state.gap_resubscribed_at, key)
+
+    cond do
+      is_nil(last) or now - last >= @gap_resubscribe_min_ms ->
+        issue_gap_resubscribe(state, key, socket)
+
+      Map.has_key?(state.gap_resubscribe_due, key) ->
+        state
+
+      true ->
+        timer =
+          Process.send_after(
+            self(),
+            {:gap_resubscribe_due, key},
+            @gap_resubscribe_min_ms - (now - last)
+          )
+
+        %{state | gap_resubscribe_due: Map.put(state.gap_resubscribe_due, key, timer)}
+    end
+  end
+
+  defp issue_gap_resubscribe(state, key, socket) do
+    %{symbols: symbols} = Map.fetch!(state.shards, key)
+    pending = Map.get(state.pending_unsubscribes, key, [])
+
+    send(
+      self(),
+      {:resubscribe_shard, key, socket, "level2", pending, symbols, state.credentials}
+    )
+
+    %{
+      state
+      | gap_resubscribed_at:
+          Map.put(state.gap_resubscribed_at, key, System.monotonic_time(:millisecond))
+    }
+  end
 
   # **A symbol that cannot be sent is refused before it reaches shared state.** This feed is
   # one process for every caller of the instance, and `Socket.subscribe/4` converts each

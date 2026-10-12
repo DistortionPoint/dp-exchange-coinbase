@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Tick S: regression review of tick R.
+
+### Fixed
+
+- `Rest.get_historical_prices/4` with `limit: n` sent `limit=n`, which the venue answers
+  newest-first, so the forming bar took a slot and was then withheld: `limit: 1` returned `[]`
+  (read as "no data"). The venue is now asked for one more (up to 350) when the forming bar is
+  withheld, and `Rest.select_candles/4` keeps the newest `limit` closed bars. Which end the
+  venue truncates is unmeasured here.
+- A `level2` sequence gap inside the 5-second re-issue interval was dropped, leaving a book
+  the gap had made unreliable until the 60-second timer. One trailing re-issue per shard is
+  now scheduled for when the interval ends (`:gap_resubscribe_due`), keyed by shard so a
+  replaced socket is not missed; still at most one snapshot burst per interval.
+
 ## [0.3.116] - 2026-10-12
 
 Tick R: family market-data conventions (MD) and order-convention deviations (DV).
@@ -42,8 +56,8 @@ Tick R: family market-data conventions (MD) and order-convention deviations (DV)
   `end`** (at-spec.yaml:530-541), where it sent only `limit`. A non-`DateTime` is
   `{:invalid_option, key, v}`; a limit above `int32` is `{:invalid_option, :limit, v}`. A
   `:since` read that returns `limit` rows may have a hole and is `{:error, :history_truncated}`.
-  Which rows the venue keeps when more match than `limit`, and whether `end` is inclusive,
-  are unmeasured. Fake parity.
+  Which rows the venue keeps when more match than `limit` is unmeasured. Fake parity. (Tick
+  S: `:end` is now also applied client-side, exclusive, so it holds whatever the venue does.)
 - **BREAKING (MD5) the order book depth option is `:depth`**, sent as the venue's `limit`.
   `:limit` is `{:error, {:unsupported_option, :limit}}`. A bad depth is
   `{:error, {:invalid_option, :depth, v}}` (was `{:invalid_limit, v}`), and `0` is refused
