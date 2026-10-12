@@ -469,13 +469,13 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       ref = Process.monitor(subscriber)
       Process.exit(subscriber, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^subscriber, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^subscriber, _reason}, 5_000
 
-      # A call is answered only after the feed's own `:DOWN` has been handled.
-      _settled = Feed.coverage(feed)
+      # The feed gets its own `:DOWN` independently of this test's, so wait for the effect
+      # rather than assume the order the two arrive in.
+      wait_until(fn -> not MapSet.member?(:sys.get_state(feed).subscribers, subscriber) end)
 
       state = :sys.get_state(feed)
-      refute MapSet.member?(state.subscribers, subscriber)
       refute Map.has_key?(state.monitors, subscriber)
     end
 
@@ -488,10 +488,11 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       ref = Process.monitor(watcher)
       Process.exit(watcher, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^watcher, _reason}
-      _settled = Feed.coverage(feed)
+      assert_receive {:DOWN, ^ref, :process, ^watcher, _reason}, 5_000
 
-      refute MapSet.member?(:sys.get_state(feed).notice_subscribers, watcher)
+      wait_until(fn ->
+        not MapSet.member?(:sys.get_state(feed).notice_subscribers, watcher)
+      end)
     end
 
     test "a REGISTERED NAME is never monitored, and survives its holder dying" do
@@ -509,10 +510,11 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       ref = Process.monitor(holder)
       Process.exit(holder, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^holder, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^holder, _reason}, 5_000
       _settled = Feed.coverage(feed)
 
       assert MapSet.member?(:sys.get_state(feed).subscribers, name)
+      assert :sys.get_state(feed).monitors == %{}
     end
 
     test "subscribing twice from one pid monitors it once" do

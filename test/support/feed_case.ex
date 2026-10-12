@@ -65,7 +65,7 @@ defmodule DpExchange.Coinbase.FeedCase do
   tests were written that way and one of them did exactly that.
   """
   @spec wait_until((-> boolean()), non_neg_integer(), non_neg_integer()) :: :ok
-  def wait_until(fun, timeout \\ 2_000, waited \\ 0) do
+  def wait_until(fun, timeout \\ 5_000, waited \\ 0) do
     cond do
       fun.() -> :ok
       waited >= timeout -> flunk("condition was still false after #{timeout}ms")

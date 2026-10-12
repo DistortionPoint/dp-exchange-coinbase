@@ -226,6 +226,22 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert {:ok, []} = Fake.get_trade_history(@credentials, start: ~U[2026-09-01 00:00:00Z])
       assert {:ok, []} = Fake.get_trade_history(@credentials, end: ~U[2026-08-01 00:00:00Z])
     end
+
+    test "the window is [start, end): a fill stamped exactly at :start is kept, at :end not" do
+      at = ~U[2026-08-28 12:00:00Z]
+
+      assert {:ok, [%Types.Fill{timestamp: ^at}]} =
+               Fake.get_trade_history(@credentials, start: at)
+
+      assert {:ok, []} = Fake.get_trade_history(@credentials, end: at)
+      assert {:ok, []} = Fake.get_trade_history(@credentials, start: ~U[2026-08-28 12:00:01Z])
+
+      assert {:ok, [%Types.Fill{timestamp: ^at}]} =
+               Fake.get_trade_history(@credentials,
+                 start: at,
+                 end: ~U[2026-08-28 12:00:01Z]
+               )
+    end
   end
 
   describe "candles are validated before the symbol, as the real path validates them" do
@@ -849,6 +865,40 @@ defmodule DpExchange.Coinbase.FakeTest do
 
       :ok = Fake.unsubscribe(["BTC-USD"])
       refute Map.has_key?(Fake.coverage_by_kind(), :order_book)
+    end
+
+    test "channels: [:trades] alone pushes no quote and covers no quotes, as the real feed" do
+      :ok = Fake.subscribe(["BTC-USD"], to: self(), channels: [:trades])
+
+      assert_received {:dp_exchange, :coinbase, %Types.Trade{symbol: "BTC-USD"}}
+      refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
+      assert Fake.coverage_by_kind() == %{trades: %{"BTC-USD" => :stream}}
+      assert Fake.coverage() == %{"BTC-USD" => :stream}
+
+      # Asking for quotes later adds that kind; it does not need the trades call repeated.
+      :ok = Fake.subscribe(["BTC-USD"], to: self())
+      assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "BTC-USD"}}
+
+      assert %{quotes: %{"BTC-USD" => :stream}, trades: %{"BTC-USD" => :stream}} =
+               Fake.coverage_by_kind()
+    end
+
+    test "an unknown or empty :channels is refused before anything is pushed or covered" do
+      for bad <- [[:candles], [:quotes, :candles], [], :quotes, [:quotes | :trades]] do
+        assert {:error, {:invalid_option, :channels, ^bad}} =
+                 Fake.subscribe(["BTC-USD"], to: self(), channels: bad)
+      end
+
+      refute_received {:dp_exchange, :coinbase, _anything}
+      assert Fake.coverage() == %{}
+    end
+
+    test "update_symbols does not give a trades-only symbol quote coverage" do
+      :ok = Fake.subscribe(["BTC-USD"], to: self(), channels: [:trades])
+      :ok = Fake.update_symbols(["BTC-USD"])
+
+      refute Map.has_key?(Fake.coverage_by_kind(), :quotes)
+      assert Fake.coverage() == %{"BTC-USD" => :stream}
     end
 
     test "update_symbols pushes for a symbol it adds" do

@@ -584,18 +584,24 @@ defmodule DpExchange.Coinbase.Fake do
   #
   # `opts[:channels]` mirrors `DpExchange.Coinbase.Feed`'s `:channels` (see its moduledoc's
   # "`:trades` is opt-in" section), per call here because this fake has no connection to
-  # configure. `:trades` in the list also pushes one `Types.Trade` per carried symbol, and
-  # `:order_book` one `Types.OrderBook` snapshot (never a delta). The default is `[:quotes]`
-  # — exactly what this fake pushed before either existed — and `coverage_by_kind/1` reports
-  # only the kinds a call actually pushed.
+  # configure. Each kind named is pushed per carried symbol and no other: `:quotes` a
+  # `Types.Quote`, `:trades` a `Types.Trade`, `:order_book` a `Types.OrderBook` snapshot (never
+  # a delta), so `channels: [:trades]` pushes no quote, as the real feed opens only
+  # `market_trades` then. The default is `[:quotes]`, and `coverage_by_kind/1` reports only
+  # the kinds a call actually pushed.
   @impl true
   def subscribe(symbols, opts \\ []) do
     symbols = canonical_case(symbols)
 
-    # Refused as `Feed.subscribe/3` refuses, in the same order: symbols, then subscriber.
+    channels = Config.opt(opts, :channels, [:quotes])
+
+    # Refused as `Feed.subscribe/3` refuses, in the same order: symbols, then subscriber. An
+    # unknown `:channels` kind raises when a real Feed starts; this has no start step, so it
+    # is refused here, before anything is pushed.
     with :ok <- Feed.check_symbols(symbols),
-         {:ok, target} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
-      do_subscribe(symbols, target, Config.opt(opts, :channels, [:quotes]))
+         {:ok, target} <- Feed.valid_subscriber(Config.opt(opts, :to, self())),
+         :ok <- Feed.check_channels(channels) do
+      do_subscribe(symbols, target, channels)
     end
   end
 
@@ -606,14 +612,13 @@ defmodule DpExchange.Coinbase.Fake do
 
   defp do_subscribe(symbols, target, channels) do
     for symbol <- symbols, symbol in @symbols do
-      case fake_quote(symbol) do
-        # The real stream's volume is `volume_24_h`, a rolling total, where `get_price/2`'s is
-        # one print — so the pushed quote says what the real one says.
-        {:ok, quote_struct} ->
-          deliver(target, {:dp_exchange, :coinbase, streamed_quote(quote_struct)})
-
-        _refused ->
-          :ok
+      # `channels: [:trades]` opens `market_trades` and nothing else on the real feed, so a
+      # quote is pushed (and covered, below) only when `:quotes` was asked for.
+      with true <- :quotes in channels,
+           # The real stream's volume is `volume_24_h`, a rolling total, where `get_price/2`'s
+           # is one print — so the pushed quote says what the real one says.
+           {:ok, quote_struct} <- fake_quote(symbol) do
+        deliver(target, {:dp_exchange, :coinbase, streamed_quote(quote_struct)})
       end
 
       if :trades in channels, do: deliver(target, {:dp_exchange, :coinbase, trade_for(symbol)})
@@ -655,10 +660,12 @@ defmodule DpExchange.Coinbase.Fake do
     # symbols. Neither has any purpose if `subscribe/2` already replaces — you would
     # just subscribe the new list. Two callbacks the contract distinguishes,
     # implemented as one function, is the tell.
-    Process.put(
-      __MODULE__,
-      MapSet.union(subscribed(), MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
-    )
+    if :quotes in channels do
+      Process.put(
+        __MODULE__,
+        MapSet.union(subscribed(), MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
+      )
+    end
 
     :ok
   end
@@ -690,12 +697,15 @@ defmodule DpExchange.Coinbase.Fake do
     # A symbol this adds is pushed for, as `subscribe/2` pushes, so `coverage/1` never
     # answers `:stream` for one that delivered nothing. To the caller, with the default
     # channel: the contract's callback takes neither a `to:` nor `:channels` (2026-10-10).
-    for symbol <- MapSet.difference(wanted, subscribed()) do
+    added = MapSet.difference(wanted, all_subscribed())
+
+    for symbol <- added do
       with {:ok, quote_struct} <- fake_quote(symbol),
            do: send(self(), {:dp_exchange, :coinbase, streamed_quote(quote_struct)})
     end
 
-    Process.put(__MODULE__, wanted)
+    # A symbol subscribed only for trades or the book does not gain quote coverage here.
+    Process.put(__MODULE__, MapSet.union(MapSet.intersection(subscribed(), wanted), added))
     # Narrowed, never widened: `update_symbols/2` carries no `:channels`, so a symbol it
     # adds cannot be assumed to want trades.
     Process.put(@trades_key, MapSet.intersection(subscribed_trades(), wanted))
@@ -707,17 +717,18 @@ defmodule DpExchange.Coinbase.Fake do
   # It reports only symbols it actually pushed for, so a consumer testing the
   # subscribed-but-not-delivering case gets the same shape the real venue would give.
   @impl true
-  def coverage(_opts \\ []), do: Map.new(subscribed(), &{&1, :stream})
+  def coverage(_opts \\ []), do: Map.new(all_subscribed(), &{&1, :stream})
 
   @doc """
   `coverage/1`, split by kind — see `DpExchange.Coinbase.coverage_by_kind/1`.
 
-  `subscribe/2` pushes a `DpExchange.Core.Types.Quote` for every carried symbol, and
-  additionally one `DpExchange.Core.Types.Trade` and/or one `DpExchange.Core.Types.OrderBook`
-  snapshot when `opts[:channels]` names `:trades` and/or `:order_book` (the default is
-  `[:quotes]`). It never pushes an `OrderBookDelta`. A kind appears here only for the symbols
-  a `subscribe/2` call actually pushed it for, and a kind with no symbols is omitted — the
-  same "only what arrived" rule the real `Feed` follows. Claiming a kind this fake never
+  `subscribe/2` pushes, for every carried symbol, what `opts[:channels]` names (the default
+  is `[:quotes]`): a `DpExchange.Core.Types.Quote` for `:quotes`, a
+  `DpExchange.Core.Types.Trade` for `:trades` and a `DpExchange.Core.Types.OrderBook`
+  snapshot for `:order_book`, and nothing for a kind not named, as the real feed opens
+  only the channels it was given. It never pushes an `OrderBookDelta`. A kind appears here
+  only for the symbols a `subscribe/2` call actually pushed it for, and a kind with no
+  symbols is omitted — the same "only what arrived" rule the real `Feed` follows. Claiming a kind this fake never
   sent would be the "differently capable" divergence this module's own moduledoc forbids.
   """
   @impl true
@@ -749,6 +760,11 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())
+
+  # Any kind: `coverage/1` is "what is delivering", whichever channel carries it.
+  defp all_subscribed do
+    subscribed() |> MapSet.union(subscribed_trades()) |> MapSet.union(subscribed_books())
+  end
 
   # Kept apart from `subscribed/0`: a symbol can be subscribed for quotes without trades.
   defp subscribed_trades, do: Process.get(@trades_key, MapSet.new())

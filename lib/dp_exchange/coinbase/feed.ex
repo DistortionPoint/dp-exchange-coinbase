@@ -1548,6 +1548,27 @@ defmodule DpExchange.Coinbase.Feed do
   # declares — so a caller who says nothing gets exactly today's behaviour.
   @default_channels [:quotes, :order_book]
 
+  @doc """
+  Whether `kinds` is a `:channels` value this feed accepts: a non-empty list drawn from
+  `:quotes`, `:order_book` and `:trades`.
+
+  `Feed.start_link/1` raises `ArgumentError` for anything else. A caller with no start step,
+  such as `DpExchange.Coinbase.Fake`, refuses with the returned
+  `{:error, {:invalid_option, :channels, value}}` instead, so both refuse the same values.
+  """
+  @spec check_channels(term()) :: :ok | {:error, {:invalid_option, :channels, term()}}
+  def check_channels(kinds) do
+    known = Enum.map(@channels_in_order, fn {kind, _channel} -> kind end)
+
+    if kinds != [] and known_kinds?(kinds, known),
+      do: :ok,
+      else: {:error, {:invalid_option, :channels, kinds}}
+  end
+
+  defp known_kinds?([kind | rest], known), do: kind in known and known_kinds?(rest, known)
+  defp known_kinds?([], _known), do: true
+  defp known_kinds?(_not_a_proper_list, _known), do: false
+
   # Same fail-closed shape as `validate_level2_pairs_per_socket!/1`: a value that cannot
   # name a channel fails `init/1` loudly rather than being coerced or quietly ignored.
   #

@@ -1302,8 +1302,8 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                )
     end
 
-    test "a 409 or 422 answered to an internal retry is unconfirmed, not a refusal (DV6)" do
-      for answer <- [409, 422] do
+    test "a 4xx answered to an internal retry is unconfirmed, not a refusal (DV6)" do
+      for answer <- [400, 409, 422] do
         counter = :counters.new(1, [])
 
         plug = fn conn ->
@@ -1325,30 +1325,10 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                    retry_attempts: 3,
                    retry_delay: 1
                  )
+
+        # One 503, then the 4xx: exactly two attempts were sent.
+        assert :counters.get(counter, 1) == 2
       end
-    end
-
-    test "a 4xx answered to an internal retry is unconfirmed, not a refusal" do
-      counter = :counters.new(1, [])
-
-      plug = fn conn ->
-        :counters.add(counter, 1, 1)
-
-        status = if :counters.get(counter, 1) == 1, do: 503, else: 400
-
-        conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(status, Jason.encode!(%{"message" => "x"}))
-      end
-
-      assert {:error, {:order_unconfirmed, "retry-4xx", _reason}} =
-               Rest.place_order(@credentials, limit_request(%{client_order_id: "retry-4xx"}),
-                 plug: plug,
-                 retry_attempts: 3,
-                 retry_delay: 1
-               )
-
-      assert :counters.get(counter, 1) == 2
     end
 
     test "our own rate limiter refusing is decided before sending: a plain error" do

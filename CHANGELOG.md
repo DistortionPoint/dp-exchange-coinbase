@@ -20,6 +20,29 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Tick U: test-suite quality, regression review of tick T.
+
+### Fixed
+
+- `Fake.subscribe/2` pushed a `Quote` (and covered `:quotes`) whatever `:channels` said, so
+  `channels: [:trades]` delivered a kind the real feed would not open. A kind not named is now
+  not pushed. `Fake.coverage/1` reports a symbol delivering on any kind, and `update_symbols/2`
+  no longer gives a trades-only or book-only symbol quote coverage.
+- `Fake.subscribe/2` accepted any `:channels`, where `Feed.start_link/1` raises for an unknown
+  kind or an empty list. The Fake has no start step, so it now answers
+  `{:error, {:invalid_option, :channels, value}}` before pushing anything. The check is the new
+  public `Feed.check_channels/1`, which both share as the one definition of a valid value.
+
+### Tests
+
+- The Fake's `[start, end)` fill window is pinned at both boundaries (the tick T `:start` fix
+  had no test).
+- `FeedCase.wait_until/1` defaults to a 5s limit (was 2s); the dead-subscriber tests wait for
+  the feed's own `:DOWN` handling instead of assuming it ran before their `Feed.coverage/1`
+  call, and use 5s margins on the `:DOWN` receives.
+- Two near-identical tests of "a 4xx answered to an internal retry is unconfirmed" are one,
+  covering 400, 409 and 422 and asserting exactly two attempts were sent.
+
 ## [0.3.118] - 2026-10-12
 
 Tick T: regression review of tick S, docs against code, hot paths.

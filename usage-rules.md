@@ -475,7 +475,11 @@ each print as a `DpExchange.Core.Types.Trade`. It is **not** in the default, whi
   measured** for this channel, and the venue publishes no ceiling for it. The frame shape and
   the side direction were observed live on 2026-10-02 (BTC-USD, about 10 seconds).
 - The fake takes the same option per call: `Fake.subscribe(symbols, channels: [:quotes,
-  :trades])` pushes one `Trade` per symbol and reports `:trades` in `coverage_by_kind/1`.
+  :trades])` pushes one `Trade` per symbol and reports `:trades` in `coverage_by_kind/1`. As
+  on the real feed, a kind not named is not pushed: `channels: [:trades]` pushes no `Quote`
+  and reports no `:quotes` coverage. An unknown kind or an empty list is refused as
+  `{:error, {:invalid_option, :channels, value}}` (the real feed raises `ArgumentError` at
+  start), before anything is pushed.
 
 ### `level2` delivers deltas, not a maintained book — BREAKING as of 0.2.0
 
