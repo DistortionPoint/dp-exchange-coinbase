@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.115] - 2026-10-12
+
 ### Changed
 
 - **Limit orders (GTC, GTD, FOK) accept `:quote_size`** as the market leaves do, since all
