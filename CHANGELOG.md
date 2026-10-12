@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.116] - 2026-10-12
+
 Tick R: family market-data conventions (MD) and order-convention deviations (DV).
 
 ### Changed
