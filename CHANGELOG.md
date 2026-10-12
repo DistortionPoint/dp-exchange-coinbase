@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.121] - 2026-10-12
+
 - **A deferred shard reconcile acted on a stale snapshot.** It carried the symbol lists computed
   when it was scheduled (up to `(shards - 1) * shard_spacing_ms` earlier), and its unsubscribe
   retry resent them too. A symbol unsubscribed in between was subscribed at the venue anyway,
