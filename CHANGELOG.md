@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.122] - 2026-10-12
+
 - **Docs (`usage-rules.md` checked line by line against the code):** `:ssl_options` is not a
   consumer override (`Feed` passes only `:url` to `Socket`); only a credential map that can sign
   buys the authenticated ceiling; `get_trades/2` requires `:limit` (its error shapes named); a REST
