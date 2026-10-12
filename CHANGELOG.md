@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.120] - 2026-10-12
+
 - Docs: every public facade function is documented in HexDocs (152 added); docs build is warning-free.
 
 ## [0.3.119] - 2026-10-12
