@@ -96,27 +96,65 @@ defmodule DpExchange.Coinbase.Fake do
   @new_portfolio_id "0e6b8d25-9c3a-4f71-b2d8-5a41c7e90f36"
   @preview_id "b40bbff9-17ce-4726-8b64-9de7ae57ad26"
 
+  @doc """
+  A child spec for this fake; `opts[:name]` or this module is the child id.
+
+  `start_link/1` returns `:ignore`, so nothing is started. See
+  `c:DpExchange.Core.Venue.child_spec/1`.
+  """
   @impl true
   def child_spec(opts),
     do: %{id: Keyword.get(opts, :name, __MODULE__), start: {__MODULE__, :start_link, [opts]}}
 
+  @doc """
+  Starts nothing and answers `:ignore`: this fake keeps its state in the calling process.
+
+  See `c:DpExchange.Core.Venue.start_link/1`.
+  """
   @impl true
   def start_link(_opts), do: :ignore
 
+  @doc """
+  The real venue's display name, `DpExchange.Coinbase.provider_name/0`.
+
+  See `c:DpExchange.Core.Venue.provider_name/0`.
+  """
   @impl true
   def provider_name, do: DpExchange.Coinbase.provider_name()
 
+  @doc """
+  The real venue's runtime id, `DpExchange.Coinbase.runtime_id/0`.
+
+  See `c:DpExchange.Core.Venue.runtime_id/0`.
+  """
   @impl true
   def runtime_id, do: DpExchange.Coinbase.runtime_id()
 
+  @doc """
+  The real venue's asset classes, `DpExchange.Coinbase.asset_classes/0`.
+
+  See `c:DpExchange.Core.Venue.asset_classes/0`.
+  """
   @impl true
   def asset_classes, do: DpExchange.Coinbase.asset_classes()
 
   # The real declaration, deliberately. A fake declaring different capabilities from the
   # venue it stands in for is a fake a consumer cannot use to test capability branching.
+  @doc """
+  The real venue's declaration, `DpExchange.Coinbase.capabilities/0`, unchanged.
+
+  See `c:DpExchange.Core.Venue.capabilities/0`.
+  """
   @impl true
   def capabilities, do: DpExchange.Coinbase.capabilities()
 
+  @doc """
+  In-memory price for a listed symbol (`BTC-USD`, `BTC-USDC`, `ETH-USD`, `ETH-EUR`);
+  `{:refused, :not_listed}` for any other. A credential is optional but must be well formed
+  if given.
+
+  See `c:DpExchange.Core.Venue.get_price/2`.
+  """
   @impl true
   def get_price(symbol, opts \\ []) do
     with_injection(symbol, fn ->
@@ -162,6 +200,12 @@ defmodule DpExchange.Coinbase.Fake do
   # the one call where that gap matters — a consumer's test would pass without credentials
   # and the same call would refuse in production, which is the silent "differently
   # capable" divergence this module's own moduledoc says it exists to prevent.
+  @doc """
+  In-memory best bid and ask with sizes. Needs a credential, as the venue does: without one
+  it answers `{:error, {:missing_credentials, :coinbase}}`.
+
+  See `c:DpExchange.Core.Venue.get_top_of_book/2`.
+  """
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
     with_injection(symbol, fn ->
@@ -195,6 +239,12 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  One in-memory candle, kept or dropped by the real range rules. A timeframe the venue does
+  not serve (including `12h`) or an over-wide range is refused locally, as on the venue.
+
+  See `c:DpExchange.Core.Venue.get_historical_prices/4`.
+  """
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []) do
     with_injection(symbol, fn ->
@@ -235,11 +285,22 @@ defmodule DpExchange.Coinbase.Fake do
     }
   end
 
+  @doc """
+  The four symbols this fake carries: `BTC-USD`, `BTC-USDC`, `ETH-USD`, `ETH-EUR`.
+
+  See `c:DpExchange.Core.Venue.get_symbols/1`.
+  """
   @impl true
   def get_symbols(_opts \\ []) do
     with_injection(fn -> {:ok, @symbols} end)
   end
 
+  @doc """
+  An in-memory book around the symbol's price: `opts[:depth]` levels (default 3) a side,
+  bids descending and asks ascending, with no sequence.
+
+  See `c:DpExchange.Core.Venue.get_order_book/2`.
+  """
   @impl true
   def get_order_book(symbol, opts \\ []),
     do: with_injection(symbol, fn -> fake_order_book(symbol, opts) end)
@@ -276,6 +337,12 @@ defmodule DpExchange.Coinbase.Fake do
     }
   end
 
+  @doc """
+  Two in-memory prints, oldest first, at most `opts[:limit]` of them. `opts[:limit]` is
+  required, as on the venue; `:since` and `:end` narrow the window.
+
+  See `c:DpExchange.Core.Venue.get_trades/2`.
+  """
   @impl true
   def get_trades(symbol, opts \\ []) do
     with_injection(symbol, fn ->
@@ -361,6 +428,11 @@ defmodule DpExchange.Coinbase.Fake do
     end
   end
 
+  @doc """
+  An in-memory snapshot (price, 24h change, volume, high/low, status) for each carried symbol.
+
+  See `c:DpExchange.Core.Venue.get_market_overview/1`.
+  """
   @impl true
   def get_market_overview(_opts) do
     with_injection(fn ->
@@ -381,12 +453,25 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_auction_imbalance/2`.
+  """
   @impl true
   def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_volume_profile/3`.
+  """
   @impl true
   def get_volume_profile(_symbol, _timeframe, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  The carried symbols as spot `DpExchange.Core.Instrument` structs, all `:tradable`.
+
+  See `c:DpExchange.Core.Venue.list_instruments/1`.
+  """
   @impl true
   def list_instruments(_opts) do
     with_injection(fn ->
@@ -405,6 +490,12 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Two in-memory balances (BTC with a non-zero hold, and USD). Needs a credential; another
+  `opts[:portfolio]` than the default holds nothing.
+
+  See `c:DpExchange.Core.Venue.get_balances/2`.
+  """
   @impl true
   def get_balances(credentials, opts) do
     with_checks(credentials, Rest.validate_balance_options(opts), fn ->
@@ -438,6 +529,12 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  One in-memory account record in the venue's own shape. `opts[:uuid]` reads it by id; an
+  unknown id is `{:refused, :not_found}`. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.get_accounts/2`.
+  """
   @impl true
   def get_accounts(credentials, opts) do
     with_checks(credentials, Rest.validate_account_options(opts), fn ->
@@ -464,6 +561,12 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  An in-memory fee summary with a promotion running, so the promotional and non-promotional
+  tiers differ. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.get_fees/2`.
+  """
   @impl true
   def get_fees(credentials, opts) do
     with_checks(credentials, Rest.validate_summary_filters(opts), fn ->
@@ -488,11 +591,21 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_transfers/2`.
+  """
   @impl true
   def get_transfers(_credentials, _opts), do: Venue.not_supported()
   # Both refused, matching the real venue. A fake that answered where the real one
   # refuses lets a consumer's suite go green against behaviour that cannot happen.
 
+  @doc """
+  A `FILL` and a `REVERSAL` row; only `FILL` comes back unless `opts[:trade_types]` says
+  otherwise. `:order_id`, `:symbol`, `:start` and `:end` narrow the rows. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.get_trade_history/2`.
+  """
   @impl true
   def get_trade_history(credentials, opts) do
     # The real function's local filter checks first, then the credential, in that order.
@@ -589,6 +702,13 @@ defmodule DpExchange.Coinbase.Fake do
   # a delta), so `channels: [:trades]` pushes no quote, as the real feed opens only
   # `market_trades` then. The default is `[:quotes]`, and `coverage_by_kind/1` reports only
   # the kinds a call actually pushed.
+  @doc """
+  Pushes at once, to `opts[:to]` (default the caller), one message per carried symbol for each
+  kind in `opts[:channels]` (default `[:quotes]`), and unions the symbols into the subscription.
+
+  Symbols are upper-cased and refused as `DpExchange.Coinbase.Feed` refuses them. See
+  `c:DpExchange.Core.Venue.subscribe/2`.
+  """
   @impl true
   def subscribe(symbols, opts \\ []) do
     symbols = canonical_case(symbols)
@@ -670,6 +790,11 @@ defmodule DpExchange.Coinbase.Fake do
     :ok
   end
 
+  @doc """
+  Removes the named symbols from every subscribed kind (quotes, trades, order book).
+
+  See `c:DpExchange.Core.Venue.unsubscribe/2`.
+  """
   @impl true
   def unsubscribe(symbols, _opts \\ []) do
     symbols = canonical_case(symbols)
@@ -682,6 +807,12 @@ defmodule DpExchange.Coinbase.Fake do
     end
   end
 
+  @doc """
+  Replaces the subscription's symbol set. A symbol it adds gets a quote pushed to the caller;
+  trade and order-book subscriptions are only narrowed, never widened.
+
+  See `c:DpExchange.Core.Venue.update_symbols/2`.
+  """
   @impl true
   def update_symbols(symbols, opts \\ []) do
     symbols = canonical_case(symbols)
@@ -716,6 +847,11 @@ defmodule DpExchange.Coinbase.Fake do
   # Observed, not intended — the fake models the real rule rather than shortcutting it.
   # It reports only symbols it actually pushed for, so a consumer testing the
   # subscribed-but-not-delivering case gets the same shape the real venue would give.
+  @doc """
+  `:stream` for every symbol this process subscribed (any kind) and pushed for.
+
+  See `c:DpExchange.Core.Venue.coverage/1`.
+  """
   @impl true
   def coverage(_opts \\ []), do: Map.new(all_subscribed(), &{&1, :stream})
 
@@ -741,6 +877,12 @@ defmodule DpExchange.Coinbase.Fake do
     |> Map.new(fn {kind, symbols} -> {kind, Map.new(symbols, &{&1, :stream})} end)
   end
 
+  @doc """
+  Registers `opts[:to]` (default the caller) for notices and sends nothing: the real feed
+  announces no `:link_up` on registration either.
+
+  See `c:DpExchange.Core.Venue.subscribe_notices/1`.
+  """
   @impl true
   def subscribe_notices(opts \\ []) do
     # Registers and sends nothing: the real feed announces no `:link_up` on registration
@@ -787,6 +929,12 @@ defmodule DpExchange.Coinbase.Fake do
     }
   end
 
+  @doc """
+  Reachability without a credential; with one, the key's permissions (`can_view`,
+  `can_trade`, `can_transfer: false`). A credential that cannot sign is refused.
+
+  See `c:DpExchange.Core.Venue.test_connection/2`.
+  """
   @impl true
   def test_connection(credentials, _opts) do
     with_injection(fn ->
@@ -810,13 +958,29 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_rate_limit_status/2`.
+  """
   @impl true
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
+
+  @doc """
+  Always `{:ok, :open}`, as on the real venue.
+
+  See `c:DpExchange.Core.Venue.market_status/1`.
+  """
   @impl true
   def market_status(_opts) do
     with_injection(fn -> {:ok, :open} end)
   end
 
+  @doc """
+  In-memory increments and limits for a carried symbol; the price and quantity increments
+  differ on purpose. `{:refused, :not_listed}` for any other.
+
+  See `c:DpExchange.Core.Venue.quantization/1`.
+  """
   @impl true
   def quantization(symbol) do
     with_injection(symbol, fn ->
@@ -855,6 +1019,12 @@ defmodule DpExchange.Coinbase.Fake do
   # `venue_does_not_serve/0` is the first kind. Where the venue genuinely does not offer
   # something, the comment beside it says so.
 
+  @doc """
+  One in-memory short futures position with a `nil` `realised_pnl`. Needs a credential in
+  `opts[:credentials]`; `opts[:portfolio]` is refused, as the futures endpoints take none.
+
+  See `c:DpExchange.Core.Venue.get_positions/1`.
+  """
   @impl true
   def get_positions(opts \\ []) do
     # The futures endpoints take no portfolio scope; refused, as the real read refuses it.
@@ -889,27 +1059,65 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Not served by this package: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_funding/2`.
+  """
   @impl true
   def get_funding(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this package: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_contract_stats/2`.
+  """
   @impl true
   def get_contract_stats(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_staking_rates/1`.
+  """
   @impl true
   def get_staking_rates(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_staking_balances/1`.
+  """
   @impl true
   def get_staking_balances(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_staking_rewards/1`.
+  """
   @impl true
   def get_staking_rewards(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_staking_history/1`.
+  """
   @impl true
   def get_staking_history(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  An in-memory stake. Refuses what the real path refuses: no `opts[:portfolio_id]` is
+  `{:error, :missing_portfolio}`, Prime credentials are required, and the same
+  `DpExchange.Coinbase.Prime` write checks run. A reused idempotency key answers the same
+  transaction.
+
+  See `c:DpExchange.Core.Venue.stake/3`.
+  """
   @impl true
   def stake(asset, amount, opts \\ []), do: fake_staking(:stake, asset, amount, opts)
 
+  @doc """
+  An in-memory unstake, checked as `stake/3` is. Reports nothing paid: `amount_remaining` is
+  the whole amount.
+
+  See `c:DpExchange.Core.Venue.unstake/3`.
+  """
   @impl true
   def unstake(asset, amount, opts \\ []), do: fake_staking(:unstake, asset, amount, opts)
 
@@ -959,6 +1167,12 @@ defmodule DpExchange.Coinbase.Fake do
     end
   end
 
+  @doc """
+  An in-memory `:quoted` conversion with a fresh id and no expiry, remembered so a later
+  commit or read finds it. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.quote_conversion/4`.
+  """
   @impl true
   def quote_conversion(from, to, amount, opts \\ []) do
     checked = Rest.validate_conversion_quote(from, to, amount)
@@ -989,6 +1203,12 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Commits a conversion this fake quoted; an unknown id is `{:refused, :not_found}`.
+  `opts[:from]` and `opts[:to]` are required, as on the venue.
+
+  See `c:DpExchange.Core.Venue.commit_conversion/2`.
+  """
   @impl true
   def commit_conversion(id, opts \\ []) do
     with_injection(fn ->
@@ -1019,6 +1239,12 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  A conversion's state: still `:quoted`, or `:settled` once committed here. An unknown id is
+  `{:refused, :not_found}`; `opts[:from]` and `opts[:to]` are required.
+
+  See `c:DpExchange.Core.Venue.get_conversion/2`.
+  """
   @impl true
   def get_conversion(id, opts \\ []) do
     with_injection(fn ->
@@ -1057,9 +1283,19 @@ defmodule DpExchange.Coinbase.Fake do
 
   defp conversions, do: Process.get(@conversions_key, %{})
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.convert/4`.
+  """
   @impl true
   def convert(_from, _to, _amount, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  An in-memory spot volume row, with the Advanced Trade and Pro totals beside the breakdown
+  rather than folded into it. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.get_trade_volume/2`.
+  """
   @impl true
   def get_trade_volume(credentials, opts \\ []) do
     with_checks(credentials, Rest.validate_summary_filters(opts), fn ->
@@ -1079,6 +1315,12 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  A live portfolio and a deleted one, since the venue keeps deleted ones in the listing.
+  Needs a credential in `opts[:credentials]`.
+
+  See `c:DpExchange.Core.Venue.list_portfolios/1`.
+  """
   @impl true
   def list_portfolios(opts \\ []) do
     with_checks(opts_credentials(opts), Rest.validate_portfolio_filter(opts), fn ->
@@ -1105,60 +1347,134 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_deposit_address/3`.
+  """
   @impl true
   def get_deposit_address(_asset, _network, _opts \\ []),
     do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.list_approved_addresses/1`.
+  """
   @impl true
   def list_approved_addresses(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.estimate_withdrawal_fee/4`.
+  """
   @impl true
   def estimate_withdrawal_fee(_asset, _network, _amount, _opts \\ []),
     do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.withdraw/5`.
+  """
   @impl true
   def withdraw(_asset, _network, _amount, _address, _opts \\ []),
     do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_option_chain/2`.
+  """
   @impl true
   def get_option_chain(_underlying, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_option_expirations/2`.
+  """
   @impl true
   def get_option_expirations(_underlying, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_option_greeks/2`.
+  """
   @impl true
   def get_option_greeks(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.list_watchlists/1`.
+  """
   @impl true
   def list_watchlists(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_watchlist/2`.
+  """
   @impl true
   def get_watchlist(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.create_watchlist/3`.
+  """
   @impl true
   def create_watchlist(_name, _symbols, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.update_watchlist/2`.
+  """
   @impl true
   def update_watchlist(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.delete_watchlist/2`.
+  """
   @impl true
   def delete_watchlist(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_financials/3`.
+  """
   @impl true
   def get_financials(_symbol, _kind, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_corporate_events/1`.
+  """
   @impl true
   def get_corporate_events(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_filings/2`.
+  """
   @impl true
   def get_filings(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_news/1`.
+  """
   @impl true
   def get_news(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_screener/2`.
+  """
   @impl true
   def get_screener(_name, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Creates an in-memory portfolio (this venue's sub-account) named `opts[:name]`, which is
+  required. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.create_account/1`.
+  """
   @impl true
   def create_account(opts \\ []) do
     with_injection(fn ->
@@ -1177,6 +1493,11 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Renames a portfolio in memory; only the name changes. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.rename_account/3`.
+  """
   @impl true
   def rename_account(id, name, opts \\ []) do
     checked = Rest.validate_portfolio_rename(id, name)
@@ -1193,6 +1514,12 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  An in-memory key-permissions map: `can_view` and `can_trade` true, `can_transfer` false,
+  with the default portfolio. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.get_roles/1`.
+  """
   @impl true
   def get_roles(opts \\ []) do
     with_credentials(opts_credentials(opts), fn ->
@@ -1209,6 +1536,13 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Places an in-memory order after the real package's own request and credential checks.
+  The order is remembered, so a later read or cancel finds it. A repeated caller-supplied
+  `client_order_id` answers the original order, as the venue does.
+
+  See `c:DpExchange.Core.Venue.place_order/3`.
+  """
   @impl true
   def place_order(credentials, request, _opts \\ []) do
     with_injection(fn ->
@@ -1302,11 +1636,26 @@ defmodule DpExchange.Coinbase.Fake do
     end
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.place_orders/3`.
+  """
   @impl true
   def place_orders(_credentials, _requests, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.cancel_all_orders/2`.
+  """
   @impl true
   def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
+
+  @doc """
+  Cancels an open order this fake holds. An order that is not open, or an unknown id, is
+  `{:refused, {:cancel_rejected, reason}}`. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.cancel_order/3`.
+  """
   @impl true
   def cancel_order(credentials, order_id, _opts \\ []) do
     with_checks(credentials, Rest.validate_order_id(order_id), fn ->
@@ -1332,6 +1681,12 @@ defmodule DpExchange.Coinbase.Fake do
   defp cancel_found(:error, _unknown),
     do: {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}}
 
+  @doc """
+  An order this process placed, or the one canned order `"fake-order-1"`; any other id is
+  `{:refused, :not_found}`. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.get_order/3`.
+  """
   @impl true
   def get_order(credentials, order_id, _opts \\ []) do
     with_checks(credentials, Rest.validate_order_id(order_id), fn ->
@@ -1347,6 +1702,12 @@ defmodule DpExchange.Coinbase.Fake do
   # `:status` and `:symbol` narrow the list as the real package's venue-side filters do.
   # They were ignored, so a caller asking for FILLED orders or ETH-USD's was handed the one
   # open BTC-USD order — the "plausible answer to a question not asked" this fake must not give.
+  @doc """
+  The canned order plus those this process placed, narrowed by `opts[:status]` (one or a
+  list) and `opts[:symbol]`. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.get_orders/2`.
+  """
   @impl true
   def get_orders(credentials, opts \\ []) do
     # The real function's local filter checks first, then the credential, in that order.
@@ -1399,6 +1760,12 @@ defmodule DpExchange.Coinbase.Fake do
     }
   end
 
+  @doc """
+  A fixed in-memory preview, after the same request and credential checks `place_order/3`
+  runs. Nothing is placed or remembered.
+
+  See `c:DpExchange.Core.Venue.preview_order/3`.
+  """
   @impl true
   def preview_order(credentials, request, _opts \\ []) do
     with_injection(fn ->
@@ -1421,6 +1788,12 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Edits a working order's price and size, both required as on the venue. An id this fake
+  never issued is `{:refused, :not_found}`. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.replace_order/4`.
+  """
   @impl true
   def replace_order(credentials, order_id, changes, _opts \\ []) do
     with_injection(fn ->
@@ -1457,6 +1830,12 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  A fixed in-memory pricing of an edit, with the same price-and-size requirement as
+  `replace_order/4`. Nothing is changed.
+
+  See `c:DpExchange.Core.Venue.preview_replace/4`.
+  """
   @impl true
   def preview_replace(credentials, order_id, changes, _opts \\ []) do
     with_injection(fn ->
@@ -1482,6 +1861,12 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Places an in-memory closing market order with a `nil` side, as the real package returns.
+  Needs a credential.
+
+  See `c:DpExchange.Core.Venue.close_position/3`.
+  """
   @impl true
   def close_position(credentials, symbol, opts \\ []) do
     with_checks(credentials, symbol, Rest.validate_close_request(symbol, opts), fn ->
@@ -1506,6 +1891,11 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Two in-memory payment methods, one verified for deposit only. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.list_payment_methods/2`.
+  """
   @impl true
   def list_payment_methods(credentials, _opts \\ []) do
     with_credentials(credentials, fn ->
@@ -1531,6 +1921,11 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  An in-memory payment method echoing `id`. Needs a credential.
+
+  See `c:DpExchange.Core.Venue.get_payment_method/3`.
+  """
   @impl true
   def get_payment_method(credentials, id, _opts \\ []) do
     with_checks(credentials, Rest.validate_id(id, :payment_method_id), fn ->
@@ -1538,6 +1933,12 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Moves funds between two portfolios in memory, answering the two uuids as the venue does.
+  `opts[:from]` and `opts[:to]` are required; the credential is read from `request_opts`.
+
+  See `c:DpExchange.Core.Venue.transfer_internal/4`.
+  """
   @impl true
   def transfer_internal(asset, amount, opts, request_opts) do
     with_injection(fn ->
@@ -1560,31 +1961,67 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.add_payment_method/2`.
+  """
   @impl true
   def add_payment_method(_details, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.request_approved_address/4`.
+  """
   @impl true
   def request_approved_address(_asset, _network, _address, _opts \\ []),
     do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.remove_approved_address/3`.
+  """
   @impl true
   def remove_approved_address(_network, _address, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.list_networks/2`.
+  """
   @impl true
   def list_networks(_asset, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_transactions/2`.
+  """
   @impl true
   def get_transactions(_credentials, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.list_fee_promos/1`.
+  """
   @impl true
   def list_fee_promos(_opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_fx_rate/3`.
+  """
   @impl true
   def get_fx_rate(_pair, _at, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.get_notional_balances/3`.
+  """
   @impl true
   def get_notional_balances(_credentials, _currency, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`, as `DpExchange.Coinbase` does.
+  See `c:DpExchange.Core.Venue.list_custody_fees/2`.
+  """
   @impl true
   def list_custody_fees(_credentials, _opts \\ []), do: Venue.not_supported()
 

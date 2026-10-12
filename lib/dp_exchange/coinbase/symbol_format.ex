@@ -59,11 +59,22 @@ defmodule DpExchange.Coinbase.SymbolFormat do
   @spec quotes() :: [String.t()]
   def quotes, do: @quotes
 
+  @doc """
+  The canonical `BASE-QUOTE` form of a native `product_id`: upper-cased, and otherwise
+  unchanged for a dashed pair. A string with no dash comes back upper-cased and unsplit.
+
+  See `c:DpExchange.Core.SymbolNormalizer.to_canonical_symbol/1`.
+  """
   @impl true
   @spec to_canonical_symbol(String.t()) :: String.t()
   def to_canonical_symbol(native) when is_binary(native),
     do: CanonicalPair.to_canonical(@mapping, native)
 
+  @doc """
+  The native `product_id` for a canonical symbol: upper-cased, and nothing more.
+
+  See `c:DpExchange.Core.SymbolNormalizer.to_exchange_symbol/1`.
+  """
   @impl true
   @spec to_exchange_symbol(String.t()) :: String.t()
   def to_exchange_symbol(canonical) when is_binary(canonical),

@@ -427,11 +427,14 @@ defmodule DpExchange.Coinbase.Socket do
   defp default_endpoint, do: Config.get(:dp_exchange_coinbase, :websocket_url, @endpoint)
 
   # Explicit rather than inherited — see the moduledoc's budget arithmetic.
-  # `Keyword.put_new/3` so a caller supplying either key wins. Exposed (not `defp`) and
-  # `@doc false` purely so a test can pin this exact keyword list — what `start_link/1`
-  # hands to `WebSockex.start_link/4` unchanged — without opening a real socket to
-  # observe it.
-  @doc false
+  # `Keyword.put_new/3` so a caller supplying either key wins. Exposed (not `defp`) purely so
+  # a test can pin this exact keyword list — what `start_link/1` hands to
+  # `WebSockex.start_link/4` unchanged — without opening a real socket to observe it.
+  @doc """
+  The connection options handed unchanged to `WebSockex.start_link/4`: `opts` with the connect
+  and receive timeouts defaulted (a caller-supplied value wins) and TLS verification on
+  unless the caller gave its own `:ssl_options`.
+  """
   @spec connection_opts(keyword()) :: keyword()
   def connection_opts(opts) do
     opts
@@ -485,10 +488,15 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   # The subscribe message exactly as `subscribe/4` sends it: symbols converted to the venue's
-  # native form, and the JWT attached or withheld by channel. Exposed (not `defp`) and
-  # `@doc false` so a test can pin the message itself. Those tests used to rebuild it with a
-  # copy of the same `cond` and assert on the copy, which passes whatever this does.
-  @doc false
+  # native form, and the JWT attached or withheld by channel. Exposed (not `defp`) so a test
+  # can pin the message itself. Those tests used to rebuild it with a copy of the same `cond`
+  # and assert on the copy, which passes whatever this does.
+  @doc """
+  The subscribe message for `channel` and canonical `symbols`, exactly as `subscribe/4` sends
+  it: symbols in the venue's native form, the JWT attached or withheld by channel.
+
+  Answers `{:ok, message}` or `{:error, reason}`.
+  """
   @spec subscription_frame(String.t(), [String.t()], map() | nil) ::
           {:ok, map()} | {:error, term()}
   def subscription_frame(channel, symbols, credentials) do

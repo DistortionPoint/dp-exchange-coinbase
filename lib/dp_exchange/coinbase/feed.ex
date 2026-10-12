@@ -3528,12 +3528,15 @@ defmodule DpExchange.Coinbase.Feed do
   @crash_backoff_base_ms 1_000
   @crash_backoff_max_ms 60_000
 
-  @doc false
-  # How long to wait before reopening `key`'s shard after its socket crashed at `now_ms`, and
-  # the updated record. A crash within `@crash_streak_window_ms` of the previous one extends
-  # a streak: the first crash waits nothing, the second `@crash_backoff_base_ms`, doubling to
-  # `@crash_backoff_max_ms`. A shard that stayed up longer than the window starts again at
-  # nothing. Exposed (not `defp`) purely so a test can pin the schedule without waiting it out.
+  # Exposed (not `defp`) purely so a test can pin the schedule without waiting it out.
+  @doc """
+  How long to wait before reopening shard `key` after its socket crashed at `now_ms`
+  (milliseconds), and the updated crash record.
+
+  A crash within the streak window of the previous one extends a streak: the first crash
+  waits nothing, the second waits the base backoff, doubling up to the maximum. A shard that
+  stayed up longer than the window starts again at nothing.
+  """
   @spec crash_reopen_delay(map(), term(), integer()) :: {non_neg_integer(), map()}
   def crash_reopen_delay(crashes, key, now_ms) do
     streak =

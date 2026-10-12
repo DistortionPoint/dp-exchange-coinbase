@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- Docs: every public facade function is documented in HexDocs (152 added); docs build is warning-free.
+
 ## [0.3.119] - 2026-10-12
 
 Tick U: test-suite quality, regression review of tick T.
@@ -399,7 +401,7 @@ Found by reading the load, security and leftovers paths of `lib/`.
   there: the venue frame and the socket's state. `details.reason` and the message of the
   `:link_down` crash notice, and the reasons quoted into the subscribe, unsubscribe and
   alias-catalogue log lines and notices, are bounded (`limit: 50`, `printable_limit: 1_024`).
-- **`Supervisor.start_link/1` stored a raw `:credentials` map.** Only
+- **`DpExchange.Coinbase.Supervisor.start_link/1` stored a raw `:credentials` map.** Only
   `DpExchange.Coinbase.child_spec/1` wrapped it, so starting `DpExchange.Coinbase.Supervisor`
   directly left the key pair in the supervisor's state and in the `Start Call:` line of its
   `Feed` child, which OTP prints when it crashes. It wraps (idempotently) in `start_link/1`
@@ -450,7 +452,8 @@ caller's. `DpExchange.Coinbase.Credentials.wrap/1` is public for a caller that w
 
 ### Changed
 
-- **`Feed.start_link/1` and `Supervisor.start_link/1` carry a `@doc`.** Both were public with a
+- **`DpExchange.Coinbase.Feed.start_link/1` and `DpExchange.Coinbase.Supervisor.start_link/1`
+  carry a `@doc`.** Both were public with a
   `@spec` and no documentation. No behaviour change.
 - **Tests that wait on a spawned process or timer now wait at least 5_000 ms.** Several
   `assert_receive`s on the feed, socket and alias-catalogue task (1_000 / 2_000 / 500 ms)
@@ -1643,7 +1646,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   which raises. A consumer's tier-1 tests could not have shown them the real behaviour even
   by accident: the fake crashed where the venue went quiet.
 
-  **`:limiter`** returned `nil` from `Supervisor.limiter_name/1`: the limiter started
+  **`:limiter`** returned `nil` from `DpExchange.Coinbase.Supervisor.limiter_name/1`: the limiter started
   unnamed while REST carried `limiter: nil` down to `Core.DefaultRateLimiter`, which resolved
   it to its own global default — a different limiter, usually not running, so calls failed
   closed against a venue limiter that was running the whole time.
@@ -1719,8 +1722,8 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   a fake exists not to have.
 
   `c:DpExchange.Core.Venue.subscribe/2`'s own doc does not state which it is, and it does not
-  need to — the contract settles it by shape. `c:update_symbols/2` exists to "change a live
-  subscription's symbol set" and `c:unsubscribe/2` to stop delivery for named symbols; neither
+  need to — the contract settles it by shape. `c:DpExchange.Core.Venue.update_symbols/2` exists to "change a live
+  subscription's symbol set" and `c:DpExchange.Core.Venue.unsubscribe/2` to stop delivery for named symbols; neither
   has any purpose if `subscribe/2` already replaces, since a caller would just subscribe the
   new list. Two callbacks the contract distinguishes, implemented as one function, is the tell.
 
