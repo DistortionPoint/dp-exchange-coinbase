@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.117] - 2026-10-12
+
 Tick S: regression review of tick R.
 
 ### Fixed
