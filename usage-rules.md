@@ -292,7 +292,9 @@ of zero or less or a negative size refuses the whole book, on REST and on the st
 
 `get_trades/2` sends `opts[:since]` as the ticker's `start` and `opts[:end]` as its `end`
 (a `DateTime` each; anything else is `{:error, {:invalid_option, key, v}}`), where it used to
-send only `limit`. A `:since` read that returns exactly `limit` rows may have a hole and is
+send only `limit`. `:end` is **exclusive** (MD2): the reply is also filtered client-side to
+trades stamped strictly before it, so the rule holds whatever the venue does with `end`
+(`:since` is inclusive). A `:since` read that returns exactly `limit` rows may have a hole and is
 `{:error, :history_truncated}`. A trade (or quote) price of zero or less refuses the reply
 (`{:error, {:non_positive_price, :price, value}}`; an unreadable one keeps
 `{:invalid_decimal, field, value}`).
@@ -513,8 +515,9 @@ asked for it, not as the venue tagged it, and one you no longer want is left out
 numbering is per connection, so any of those could be the one that lost a message. Treat it
 exactly as `:link_up` below: the book you built from deltas is no longer reliable, so
 re-read it. This package does it for you: on a gap it re-issues the `level2` subscription of
-the connection that gapped (at most once per five seconds per shard), and the venue answers a
-subscribe with a fresh snapshot. A frame whose sequence number is not above the last one
+the connection that gapped (at most one snapshot burst per five seconds per shard; a gap inside
+that interval is not dropped but answered by one trailing re-issue when the interval ends), and
+the venue answers a subscribe with a fresh snapshot. A frame whose sequence number is not above the last one
 applied is dropped, never applied. A `level2` snapshot level with size `0` is dropped; a delta
 keeps its zero, which means "remove this price".
 

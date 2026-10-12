@@ -1064,10 +1064,7 @@ defmodule DpExchange.Coinbase.Socket do
   defp snapshot(state, symbol, rows, levels) do
     # A snapshot level with size zero is no liquidity and is dropped (family convention
     # MD5). A DELTA keeps its zero, which means "remove this price".
-    {bids, asks} =
-      levels
-      |> Enum.reject(fn {_side, _price, quantity} -> Decimal.eq?(quantity, 0) end)
-      |> split_sides()
+    {bids, asks} = split_sides(levels)
 
     case latest_event_time(rows) do
       {:ok, at} ->
@@ -1246,11 +1243,17 @@ defmodule DpExchange.Coinbase.Socket do
   # concretely for two numerically-equal, differently-scaled prices in one snapshot
   # (e.g. `"1.5"` and `"1.50"`), both of which now survive as separate rows rather
   # than being folded into one.
+  #
+  # One pass over the ~44,000 rows of a snapshot: a zero-size level (MD5) is dropped in the
+  # same pass that files the rest by side, instead of a separate `Enum.reject/2` pass.
   defp split_sides(levels) do
     {bids, asks} =
-      Enum.reduce(levels, {[], []}, fn
-        {:bid, price, quantity}, {bids, asks} -> {[{price, quantity} | bids], asks}
-        {:ask, price, quantity}, {bids, asks} -> {bids, [{price, quantity} | asks]}
+      Enum.reduce(levels, {[], []}, fn {side, price, quantity}, {bids, asks} = acc ->
+        cond do
+          Decimal.eq?(quantity, 0) -> acc
+          side == :bid -> {[{price, quantity} | bids], asks}
+          side == :ask -> {bids, [{price, quantity} | asks]}
+        end
       end)
 
     {Enum.reverse(bids), Enum.reverse(asks)}

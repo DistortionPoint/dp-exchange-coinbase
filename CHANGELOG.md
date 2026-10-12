@@ -20,6 +20,18 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Tick T: regression review of tick S, docs against code, hot paths.
+
+### Changed
+
+- `Socket`: a `level2` snapshot drops zero-size levels in the same pass that files the rest by
+  side (one pass over ~44,000 rows instead of two). Behaviour unchanged.
+
+### Documentation
+
+- `usage-rules.md` now states that `get_trades/2`'s `:end` is exclusive and filtered
+  client-side, and that a `level2` gap inside the 5-second interval gets one trailing re-issue.
+
 ## [0.3.117] - 2026-10-12
 
 Tick S: regression review of tick R.
