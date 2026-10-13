@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.124] - 2026-10-13
+
 - **Security: a credentialed `Socket` given a `%URI{}` URL skipped the plaintext check** and could
   send its JWT over `ws://`. A `%URI{}` is now checked like its string, and a URL that cannot be
   inspected is refused (`{:error, :insecure_websocket_url}`) rather than assumed safe.
