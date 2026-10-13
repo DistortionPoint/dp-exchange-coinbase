@@ -252,7 +252,7 @@ defmodule DpExchange.Coinbase.Socket do
   """
 
   alias DpExchange.Coinbase.{Auth, Credentials, FrameSender, SymbolFormat}
-  alias DpExchange.Core.{Config, Notice, Telemetry, Types}
+  alias DpExchange.Core.{Config, Fanout, Notice, Telemetry, Types}
 
   # `use` and `start_link/4` go to this package's vendored fork, never the real
   # `WebSockex`, whose `open_loop/3` has no handshake deadline and whose `websocket_loop/3`
@@ -451,15 +451,25 @@ defmodule DpExchange.Coinbase.Socket do
   # not echoed: it can carry userinfo.
   defp check_transport(_url, nil), do: :ok
 
-  defp check_transport(url, _credentials) when is_binary(url) do
-    case URI.parse(url) do
+  defp check_transport(url, _credentials) when is_binary(url),
+    do: check_scheme(URI.parse(url))
+
+  # A `%URI{}` is a URL `WebSockex` dials as readily as a string (`URI.parse/1` returns it
+  # unchanged), and this clause used to be `_url -> :ok`: a credentialed socket pointed at
+  # `URI.parse("ws://remote.example/")` skipped the check and sent its JWT in the clear.
+  defp check_transport(%URI{} = uri, _credentials), do: check_scheme(uri)
+
+  # Anything else cannot be inspected, so with a credential in hand it is refused rather
+  # than assumed safe (fail closed).
+  defp check_transport(_other, _credentials), do: {:error, :insecure_websocket_url}
+
+  defp check_scheme(uri) do
+    case uri do
       %URI{scheme: scheme} when scheme in ["wss", "https"] -> :ok
       %URI{host: host} when host in ["localhost", "127.0.0.1", "::1"] -> :ok
       _plaintext_remote -> {:error, :insecure_websocket_url}
     end
   end
-
-  defp check_transport(_url, _credentials), do: :ok
 
   # The venue's own endpoint, unless the application config names another with
   # `:websocket_url`. The seam exists for tests. A tier-1 run sets it in `config/test.exs` to
@@ -1603,12 +1613,27 @@ defmodule DpExchange.Coinbase.Socket do
 
   # Lossy by contract: a notice that cannot be delivered is dropped rather than retried.
   # Reporting on the work must never become the reason the work does not happen.
-  defp notify(%{subscriber: subscriber}, notice) when is_pid(subscriber) do
-    send(subscriber, {:dp_exchange, :coinbase, notice})
+  defp notify(%{subscriber: subscriber}, notice),
+    do: tell(subscriber, {:dp_exchange, :coinbase, notice})
+
+  # DELIBERATE: a state with no `:subscriber` at all (one a test built by hand) has nobody to
+  # tell; the work goes on.
+  defp notify(_state, _notice), do: :ok
+
+  # `:subscriber` is "the process events are delivered to" and data reaches a registered
+  # name as readily as a pid, but these reports were guarded `is_pid/1`: a socket started
+  # with a registered name delivered quotes and silently dropped every notice and every
+  # link report, so its `Feed`-side coverage never learned of a drop. Resolved the way
+  # `Core.Fanout` resolves every other subscriber; a name that is not registered, or a pid
+  # that has exited, is nobody and skipped.
+  defp tell(subscriber, message) do
+    case Fanout.resolve(subscriber) do
+      pid when is_pid(pid) -> send(pid, message)
+      nil -> :ok
+    end
+
     :ok
   end
-
-  defp notify(_state, _notice), do: :ok
 
   # Sent alongside the `:link_down` notice rather than folded into it. `Feed` has to know
   # WHICH link dropped — it narrows `coverage/1` to that shard's symbols and that shard's
@@ -1619,11 +1644,10 @@ defmodule DpExchange.Coinbase.Socket do
   # Lossy by contract, exactly as `notify/2` above: a report that cannot be delivered is
   # dropped, never retried. Reporting on the work must never become the reason the work
   # does not happen.
-  defp report_link_down(%{subscriber: subscriber}) when is_pid(subscriber) do
-    send(subscriber, {:dp_exchange, :coinbase, :link_down, self()})
-    :ok
-  end
+  defp report_link_down(%{subscriber: subscriber}),
+    do: tell(subscriber, {:dp_exchange, :coinbase, :link_down, self()})
 
+  # DELIBERATE: no `:subscriber` in a hand-built state, as `notify/2`.
   defp report_link_down(_state), do: :ok
 
   # The counterpart of `report_link_down/1`. WebSockex reconnects inside this process, and a
@@ -1633,11 +1657,10 @@ defmodule DpExchange.Coinbase.Socket do
   # connect is not reported, because `Feed` subscribes a new shard itself once
   # `start_link/1` returns, and a report would only send the same subscription twice.
   # Lossy by contract, like `report_link_down/1`.
-  defp report_reconnected(%{subscriber: subscriber}) when is_pid(subscriber) do
-    send(subscriber, {:dp_exchange, :coinbase, :reconnected, self()})
-    :ok
-  end
+  defp report_reconnected(%{subscriber: subscriber}),
+    do: tell(subscriber, {:dp_exchange, :coinbase, :reconnected, self()})
 
+  # DELIBERATE: no `:subscriber` in a hand-built state, as `notify/2`.
   defp report_reconnected(_state), do: :ok
 
   # Sent alongside the `:sequence_gap` notice, for the same reason `report_link_down/1` is
@@ -1645,10 +1668,9 @@ defmodule DpExchange.Coinbase.Socket do
   # has no business in a `Core.Notice`. `Feed` re-issues the level2 subscription of that
   # shard so a fresh snapshot replaces the book the gap made unreliable. Lossy by contract,
   # like `report_link_down/1`; the 60-second re-issue is the net.
-  defp report_sequence_gap(%{subscriber: subscriber}) when is_pid(subscriber) do
-    send(subscriber, {:dp_exchange, :coinbase, :sequence_gap, self()})
-    :ok
-  end
+  defp report_sequence_gap(%{subscriber: subscriber}),
+    do: tell(subscriber, {:dp_exchange, :coinbase, :sequence_gap, self()})
 
+  # DELIBERATE: no `:subscriber` in a hand-built state, as `notify/2`.
   defp report_sequence_gap(_state), do: :ok
 end

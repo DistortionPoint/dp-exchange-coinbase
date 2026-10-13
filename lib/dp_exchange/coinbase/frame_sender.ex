@@ -107,5 +107,10 @@ defmodule DpExchange.Coinbase.FrameSender do
   # channel carries a signed JWT, so a socket that died mid-send put a live credential into
   # the logs. Only the reason is kept: `:noproc`, `:normal`, and so on.
   defp without_frame({reason, {_module, :call, _args}}), do: reason
+
+  # DELIBERATE DEFENSIVE CLAUSE, unreachable today: `send_frame/3` re-exits every failure as
+  # `{reason, {module, :call, [client, frame]}}`, so the clause above always matches. Kept so
+  # an exit of any other shape (a future `send_frame` change) is still reported as itself
+  # instead of raising `FunctionClauseError` inside the handler whose job is to survive it.
   defp without_frame(reason), do: reason
 end

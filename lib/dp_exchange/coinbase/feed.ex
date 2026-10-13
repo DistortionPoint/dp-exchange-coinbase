@@ -1999,6 +1999,11 @@ defmodule DpExchange.Coinbase.Feed do
      }}
   end
 
+  # The symbol checks in the three clauses below are DELIBERATE DEFENCE IN DEPTH. The public
+  # wrappers (`subscribe/3`, `unsubscribe/2`, `update_symbols/2`) refuse in the caller first,
+  # so through them these refusals cannot fire. But this is a named GenServer that any process
+  # can `GenServer.call/3`, and one bad `symbols` reaching `SymbolFormat` in here would crash
+  # the shared feed and drop every caller's subscription (see `check_symbols/1`).
   @impl true
   def handle_call({:subscribe, symbols, subscriber}, _from, state) do
     case check_symbols(symbols) do
@@ -2867,11 +2872,12 @@ defmodule DpExchange.Coinbase.Feed do
     end
   end
 
+  # Only asked of a key that is not new, i.e. one already in `state.shards` (`wanted_keys`
+  # minus `existing_keys` is `new_keys`; a vanishing key is by definition existing), so the
+  # shard is always there. A missing one would raise here rather than read as "unchanged".
   defp shard_changed?(state, key, new_shards) do
-    case get_in(state.shards[key]) do
-      nil -> false
-      %{symbols: current} -> current != Map.fetch!(new_shards, key)
-    end
+    %{symbols: current} = Map.fetch!(state.shards, key)
+    current != Map.fetch!(new_shards, key)
   end
 
   # Drops only a vanishing key whose release is ALREADY confirmed clear — never one that

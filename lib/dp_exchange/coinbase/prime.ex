@@ -771,6 +771,13 @@ defmodule DpExchange.Coinbase.Prime do
 
   defp pre_send_failure?({:exchange_error, _venue, "Rate limiter unavailable"}), do: true
   defp pre_send_failure?({:exchange_error, _venue, _reason}), do: false
+
+  # DELIBERATE DEFENSIVE CLAUSES, unreachable today: `request_opts/1` always sets `provider`,
+  # so `Core.HttpClient` tags every message it builds as `{:exchange_error, provider, msg}`
+  # and a bare string never arrives. Core builds a bare one only when no provider is given.
+  # Kept so that, should that ever change, a bare "Throttled…" is still decided before
+  # sending and any other message (a response the venue gave) still falls into the
+  # unconfirmed class instead of the catch-all below, which means "raised before the request".
   defp pre_send_failure?("Throttled by our own rate limiter" <> _rest), do: true
   defp pre_send_failure?("Rate limiter unavailable"), do: true
   defp pre_send_failure?(reason) when is_binary(reason), do: false
@@ -787,6 +794,10 @@ defmodule DpExchange.Coinbase.Prime do
   defp bounded_reason({:exchange_error, venue, message}) when is_atom(venue),
     do: {:exchange_error, venue, bounded_reason(message)}
 
+  # DELIBERATE CATCH-ALL: whatever else rides in an unconfirmed write's reason — today only
+  # `{:response_too_large, limit}` inside an `:exchange_error` (an over-16 MiB reply, which
+  # no tier-1 test sends) — is bounded here rather than copied whole into the return value.
+  # Without it that reason would raise `FunctionClauseError` on a money-adjacent write.
   defp bounded_reason(reason) do
     reason
     |> inspect(limit: 20, printable_limit: 200)
@@ -909,6 +920,9 @@ defmodule DpExchange.Coinbase.Prime do
     if refusal?(message), do: {:refused, message}, else: {:error, reason}
   end
 
+  # DELIBERATE DEFENSIVE CLAUSE, unreachable today: `request_opts/1` always sets `provider`,
+  # so Core's client never answers a bare message. Kept so a 4xx still reads as a refusal if
+  # that ever changes, rather than as a possibly-transient `{:error, _}`.
   defp unwrap({:error, message}) when is_binary(message) do
     if refusal?(message), do: {:refused, message}, else: {:error, message}
   end

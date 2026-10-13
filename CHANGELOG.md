@@ -20,6 +20,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Security: a credentialed `Socket` given a `%URI{}` URL skipped the plaintext check** and could
+  send its JWT over `ws://`. A `%URI{}` is now checked like its string, and a URL that cannot be
+  inspected is refused (`{:error, :insecure_websocket_url}`) rather than assumed safe.
+- **A `Socket` whose subscriber is a registered name delivered data but dropped every notice**
+  and every `:link_down`, `:reconnected` and `:sequence_gap` report: those were sent to a pid
+  only. They now reach a name as they reach a pid.
+- **Tests:** every line the suite never executed was read and either tested, proven dead and
+  removed (`Fake.cast_decimal/1`'s nil branch, `Fake.native/1`'s non-binary clause,
+  `Feed.shard_changed?/3`'s nil arm, `Rest.wire_number/1`'s fallback), or kept as a commented
+  defensive clause.
+
 ## [0.3.123] - 2026-10-12
 
 - **Security: credentials never go over a plaintext socket.** `Socket.start_link/1` with

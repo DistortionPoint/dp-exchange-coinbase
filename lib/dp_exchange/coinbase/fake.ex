@@ -1627,13 +1627,13 @@ defmodule DpExchange.Coinbase.Fake do
     end
   end
 
-  defp cast_decimal(nil), do: nil
-
+  # Only called after `Rest.validate_order_edit/2` has passed, which requires both `price` and
+  # `quantity` present and a finite positive integer, `Decimal` or numeric string — exactly
+  # what `Decimal.cast/1` accepts. A `nil` or uncastable value cannot arrive here, and the
+  # match fails loudly rather than substituting `nil` if that ever changes.
   defp cast_decimal(value) do
-    case Decimal.cast(value) do
-      {:ok, decimal} -> decimal
-      :error -> nil
-    end
+    {:ok, decimal} = Decimal.cast(value)
+    decimal
   end
 
   @doc """
@@ -2053,10 +2053,10 @@ defmodule DpExchange.Coinbase.Fake do
 
   # The spelling `Rest` sends: `SymbolFormat.to_exchange_symbol/1`, which upper-cases and
   # nothing more. `btc-usd` is the product `BTC-USD`; `BTC/USD` is not a pair it can split
-  # and is refused by the venue as unlisted, so it is here too. A non-string is left as it
-  # is and matches nothing.
+  # and is refused by the venue as unlisted, so it is here too. Every caller has already
+  # passed `Rest.validate_symbol/1` (or filters `subscribe` input to listed binaries), so
+  # the argument is always a string; a non-string would fail loudly here, not match nothing.
   defp native(symbol) when is_binary(symbol), do: SymbolFormat.to_exchange_symbol(symbol)
-  defp native(symbol), do: symbol
 
   defp with_injection(symbol \\ nil, fun) do
     case FakeInjection.next_outcome(:coinbase, symbol) do

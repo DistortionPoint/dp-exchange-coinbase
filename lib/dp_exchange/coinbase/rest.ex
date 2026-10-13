@@ -3978,8 +3978,12 @@ defmodule DpExchange.Coinbase.Rest do
   # in this very repo, `dp_exchange_robinhood`'s `decimal_string/1` ("Full notation, never
   # scientific: `1.0e-4` is not a quantity this venue reads"), and two others. None of them
   # covered the ORDER path, which is the one that spends money.
+  #
+  # Only a `%Decimal{}` is accepted: every caller passes an amount `normalise_amounts/2` (or
+  # `order_amount/1`) already turned into one, so a `to_string/1` fallback for anything else
+  # was unreachable and would only have re-opened the hole this comment describes.
   defp wire_number(%Decimal{} = value), do: Decimal.to_string(value, :normal)
-  defp wire_number(value), do: to_string(value)
+
   # The venue's own object, sent as it was given. `put_unless_nil/3` stringifies, which turns
   # a nested map into its inspect form and the venue into a caller error.
   defp put_raw_unless_nil(map, _key, nil), do: map
@@ -4198,6 +4202,14 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp pre_send_failure?({:exchange_error, _venue, "Rate limiter unavailable"}), do: true
   defp pre_send_failure?({:exchange_error, _venue, _reason}), do: false
+
+  # DELIBERATE DEFENSIVE CLAUSES, unreachable today: a response (or an oversized one) means
+  # the request left the process, so these must never fall into the catch-all below, which
+  # reads "decided before anything was sent". `request_opts` always sets `provider`, so
+  # `Core.HttpClient` wraps `:response_too_large` in an `:exchange_error`, and the only
+  # `{:http_status, _, _}` a write sees is a 4xx that `write_classify/1` has already turned
+  # into a refusal (404 and 429 included: 429 is the client's own tagged message). Should
+  # either shape ever arrive bare, it fails closed as unconfirmed rather than plain.
   defp pre_send_failure?({:http_status, _status, _body}), do: false
   defp pre_send_failure?({:response_too_large, _limit}), do: false
   # What is left is raised before the request: the header function's signing error or
