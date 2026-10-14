@@ -587,7 +587,8 @@ defmodule DpExchange.Coinbase.Feed do
 
   **What `transient_frame_failure?/1`'s real reach turns out to be, stated plainly rather
   than assumed generous.** Every reason `Socket.unsubscribe/3` can return comes from
-  `FrameSender` alone — `:send_timeout` or `{:send_exit, reason}` — and both are classified
+  `FrameSender` alone — `:send_timeout`, `{:send_exit, reason}`, or a socket between
+  connections answering `%WebSockex.NotConnectedError{}` — and all three are classified
   transient. `Socket.unsubscribe/3` has no analogue of a subscribe's
   `{:credentials_required, channel}`: it builds no JWT and checks no credentials, per its
   own definition (contrast `Socket.subscribe/4`'s `subscription_message/3`). So the
@@ -2353,14 +2354,14 @@ defmodule DpExchange.Coinbase.Feed do
   end
 
   def handle_info({:channel_subscribe, socket, channel, symbols, credentials}, state) do
-    attempt_channel_subscribe(socket, channel, symbols, credentials, 1, state)
+    subscribe_still_wanted(socket, channel, symbols, credentials, 1, state)
   end
 
   # The retry this module schedules on a transient failure — see the moduledoc's "a
   # timed-out subscribe used to be thrown away" section. `attempt` starts at `2` here;
   # the first attempt is always the 5-tuple clause above.
   def handle_info({:channel_subscribe, socket, channel, symbols, credentials, attempt}, state) do
-    attempt_channel_subscribe(socket, channel, symbols, credentials, attempt, state)
+    subscribe_still_wanted(socket, channel, symbols, credentials, attempt, state)
   end
 
   # `removed` is unsubscribed here before `added` is subscribed — see the moduledoc's
@@ -2533,6 +2534,42 @@ defmodule DpExchange.Coinbase.Feed do
 
       _gone_or_replaced ->
         {removed, added}
+    end
+  end
+
+  # **A deferred `:channel_subscribe` is a snapshot too** — the third message of the family
+  # (`:resubscribe_shard`, `:channel_reconcile`) that carried a symbol list computed when it
+  # was scheduled. Interleaving, step by step:
+  #
+  #   1. A shard opens (or reconciles) and its subscribe for `[A, B]` times out on a busy
+  #      socket. `handle_subscribe_failure/7` schedules a retry carrying `[A, B]` in 8s.
+  #   2. Inside that window `unsubscribe(["B"])` runs. The shard's symbols become `[A]` and
+  #      the reconcile sends the unsubscribe frame for `B`, which succeeds.
+  #   3. The retry fires and subscribes `[A, B]`: the venue streams `B` again. Nothing ever
+  #      releases it (the shard no longer lists it, so neither the unconditional resubscribe
+  #      nor a stranded-unsubscribe retry names it), and on a `level2` socket it holds one of
+  #      the 30 slots the venue allows per session for as long as the socket lives.
+  #
+  # So when the socket still carries a shard, the retry is cut to what that shard wants now,
+  # and a retry with nothing left sends nothing at all (an empty `product_ids` subscribe is
+  # not a no-op to send). A socket that carries no shard is left as given, as
+  # `current_reconcile/5` does: the dead-socket guard downstream makes that a no-op, and a
+  # message for a socket this state never opened is its sender's to stand behind.
+  defp subscribe_still_wanted(socket, channel, symbols, credentials, attempt, state) do
+    live =
+      case shard_key_for_socket(state, socket) do
+        nil ->
+          symbols
+
+        key ->
+          %{symbols: shard_symbols} = Map.fetch!(state.shards, key)
+          wanted = MapSet.new(shard_symbols)
+          Enum.filter(symbols, &MapSet.member?(wanted, &1))
+      end
+
+    case live do
+      [] -> {:noreply, state}
+      _some -> attempt_channel_subscribe(socket, channel, live, credentials, attempt, state)
     end
   end
 
@@ -2935,10 +2972,14 @@ defmodule DpExchange.Coinbase.Feed do
   defp open_shard(state, {channel, _index} = key, symbols, true, _delay) do
     # Opening it now settles any deferred open of the same key; left scheduled it would fire
     # later, find the shard present, and do nothing.
-    state = cancel_pending_open(state, key)
-
+    #
+    # Cancelled only once the socket is OPEN. It was cancelled first, so a connect that
+    # failed here also threw away the deferred open a crash backoff had scheduled for this
+    # key, and the shard stayed closed until the next `:resubscribe` tick (up to 60s). A
+    # failed open now leaves that deferred open to try again.
     case get_socket(state) do
       {:ok, socket, state} ->
+        state = cancel_pending_open(state, key)
         state = put_in(state.shards[key], %{socket: socket, symbols: symbols})
         result = Socket.subscribe(socket, channel, symbols, state.credentials)
         {result, state}
@@ -3254,10 +3295,12 @@ defmodule DpExchange.Coinbase.Feed do
   # Every reason `Socket.unsubscribe/3` can return comes from `FrameSender` alone —
   # `Socket.unsubscribe/3` builds no JWT and checks no credentials the way
   # `subscription_message/3` does for a subscribe, so it has no analogue of
-  # `{:credentials_required, channel}` to return. `FrameSender.send/3`'s only two error
-  # shapes, `:send_timeout` and `{:send_exit, reason}`, are both `transient_frame_failure?/1`
-  # `true`. The branch is kept anyway, for the same "do not assume a shape that happens to
-  # hold today" reason `handle_subscribe_failure/7` keeps its own non-transient branch —
+  # `{:credentials_required, channel}` to return. `FrameSender.send/3`'s error shapes,
+  # `:send_timeout`, `{:send_exit, reason}` and the socket's own
+  # `%WebSockex.NotConnectedError{}` (see `transient_frame_failure?/1`), are all
+  # `transient_frame_failure?/1` `true`. The branch is kept anyway, for the same "do not
+  # assume a shape that happens to hold today" reason `handle_subscribe_failure/7` keeps its
+  # own non-transient branch —
   # if `Socket.unsubscribe/3`'s own contract ever grows a real permanent-failure reason,
   # this is already wired to handle it identically to an exhausted retry chain, not
   # silently.
@@ -3412,9 +3455,25 @@ defmodule DpExchange.Coinbase.Feed do
   # that no amount of waiting changes — retrying it would only loop. Shared between a
   # channel subscribe and the unsubscribe half of a reconcile
   # (`handle_unsubscribe_failure/8`): both send frames through the identical
-  # `FrameSender` path and fail in the identical two shapes.
+  # `FrameSender` path and fail in the identical three shapes (below).
+  #
+  # **Three shapes, not two.** `FrameSender` returns whatever `send_frame` returns, and a
+  # socket that is between connections answers `{:error, %WebSockex.NotConnectedError{}}`
+  # at once (`open_loop/3` and `close_loop/4` reply to a queued send rather than leave it).
+  # Interleaving: the socket drops and reconnects with no backoff (a stable session's first
+  # retry waits nothing), and this process, still inside the callback that sent the frame,
+  # has not yet read the `:link_down` that would have put the socket in `down_links`. The
+  # frame comes back `NotConnectedError`. Classified permanent, that logged "failed
+  # permanently" and sent every notice subscriber "this will keep failing every cycle until
+  # it is corrected" for an ordinary blip the `:reconnected` re-issue repairs within
+  # milliseconds, and ended the retry chain; on the unsubscribe half it stranded the symbols
+  # and withheld the new ones. It is the textbook transient: the socket is not gone, only not
+  # connected yet. If the link is still down when the retry fires `sendable?/2` ends the
+  # chain (the re-issue on `:reconnected` covers the shard); if it is back, the retry is
+  # an idempotent duplicate.
   defp transient_frame_failure?(:send_timeout), do: true
   defp transient_frame_failure?({:send_exit, _reason}), do: true
+  defp transient_frame_failure?(%WebSockex.NotConnectedError{}), do: true
   defp transient_frame_failure?(_reason), do: false
 
   defp handle_subscribe_failure(socket, channel, symbols, credentials, attempt, reason, state) do

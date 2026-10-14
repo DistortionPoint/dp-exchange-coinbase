@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **A retried channel subscribe re-subscribed a symbol unsubscribed while it was pending.** It
+  carried the list from when it failed; it now sends only what its shard still holds, and
+  nothing at all when that is empty. On `level2` the resurrected symbol held one of the 30
+  session slots until the socket died.
+- **A frame sent to a socket between connections was treated as a permanent failure.** The
+  socket answers `%WebSockex.NotConnectedError{}` at once for a send queued during a
+  reconnect; that logged "failed permanently", sent a false "will keep failing every cycle"
+  coverage notice and stranded an unsubscribe. It is now transient and retried.
+- **A synchronous shard open whose connect failed discarded a pending crash-backoff open** for
+  the same shard, leaving it closed until the next resubscribe tick (up to 60s). The pending
+  open is now cancelled only once the socket is up.
+- **Docs:** `{:error, :feed_timeout}` is documented as "no answer", not "not applied": the
+  request is still applied when the feed reaches it, and the streaming calls are idempotent.
+
 ## [0.3.124] - 2026-10-13
 
 - **Security: a credentialed `Socket` given a `%URI{}` URL skipped the plaintext check** and could

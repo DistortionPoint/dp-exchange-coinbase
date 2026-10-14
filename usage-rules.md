@@ -1289,6 +1289,11 @@ when it dies while answering. `coverage/1` and `coverage_by_kind/1` answer an em
 all three cases, which means "not observed". Treat `:feed_timeout` as transient and retry.
 Treat the other two as a feed your supervision tree has to bring back.
 
+**`:feed_timeout` means "no answer", not "not applied".** The request is already in the
+feed's mailbox and is applied when the feed reaches it. Retrying is safe because each of
+these calls is idempotent (add, remove or replace a symbol set, applied in order), and
+`coverage/1` shows what is being delivered once the feed answers.
+
 **Symbols are upper-cased on the way in** (`subscribe/2`, `unsubscribe/2`, `update_symbols/2`):
 `"btc-usd"` means `"BTC-USD"`. Case is the only difference normalised; anything else that is
 not canonical is yours to fix.
