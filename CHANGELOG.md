@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.126] - 2026-10-14
+
 ### Fixed
 
 Decoder robustness against hostile or malformed venue payloads. Every item is a value that
