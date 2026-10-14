@@ -574,6 +574,17 @@ defmodule DpExchange.Coinbase.FakeTest do
       refute Map.has_key?(coverage, "NOPE-USD")
     end
 
+    test "wanted/1 holds every symbol subscribed, sorted, and follows unsubscribe" do
+      assert Fake.wanted() == []
+
+      Fake.subscribe(~w(ETH-USD BTC-USD), to: self())
+      assert Fake.wanted() == ~w(BTC-USD ETH-USD)
+      assert Enum.all?(Map.keys(Fake.coverage()), &(&1 in Fake.wanted()))
+
+      assert :ok = Fake.unsubscribe(~w(BTC-USD))
+      assert Fake.wanted() == ~w(ETH-USD)
+    end
+
     test "unsubscribe drops coverage" do
       Fake.subscribe(~w(BTC-USD ETH-USD), to: self())
       assert :ok = Fake.unsubscribe(~w(BTC-USD))

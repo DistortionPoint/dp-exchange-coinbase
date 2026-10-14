@@ -586,6 +586,9 @@ defmodule DpExchange.CoinbaseTest do
       # No sleep: `coverage/1` is a `GenServer.call`, so it queues behind the raw `send/2`
       # in the same mailbox and cannot be answered until that message is handled.
       assert Coinbase.coverage(feed: pid) == %{"BTC-USD" => :stream}
+      assert Coinbase.wanted(feed: pid) == []
+      assert :ok = DpExchange.Coinbase.Feed.update_symbols(pid, ["BTC-USD"])
+      assert Coinbase.wanted(feed: pid) == ["BTC-USD"]
       assert %{quotes: %{"BTC-USD" => :stream}} = Coinbase.coverage_by_kind(feed: pid)
 
       # The negative control on the same branch: a dead pid is not a live feed, and `%{}`
@@ -593,6 +596,7 @@ defmodule DpExchange.CoinbaseTest do
       GenServer.stop(pid)
       refute Process.alive?(pid)
       assert Coinbase.coverage(feed: pid) == %{}
+      assert Coinbase.wanted(feed: pid) == []
     end
 
     test "place_order reaches the venue through the facade" do

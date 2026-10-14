@@ -2166,7 +2166,8 @@ defmodule DpExchange.Coinbase.Rest do
   (absent, or a `DateTime`; when both are given `:start` must be before `:end`). Errors:
   `{:invalid_trade_types, v}`, `{:invalid_symbol, v}`, `{:invalid_limit, v}`,
   `{:invalid_order_id, v}`, `{:invalid_time, :start | :end, v}`,
-  `{:invalid_range, start: s, end: e}`, `{:invalid_option, :portfolio, v}`. A string or map in `:start` / `:end` went to the
+  `{:invalid_range, [start: s, end: e]}` (the window the caller passed),
+  `{:invalid_option, :portfolio, v}`. A string or map in `:start` / `:end` went to the
   venue as given (or raised in the query encoder), and what it makes of an inverted window is
   unmeasured.
   """
@@ -2201,7 +2202,7 @@ defmodule DpExchange.Coinbase.Rest do
   defp ordered_window(%DateTime{} = start, %DateTime{} = finish) do
     if DateTime.compare(start, finish) == :lt,
       do: :ok,
-      else: {:error, {:invalid_range, start: start, end: finish}}
+      else: {:error, {:invalid_range, [start: start, end: finish]}}
   end
 
   defp ordered_window(_start, _finish), do: :ok
@@ -2256,7 +2257,8 @@ defmodule DpExchange.Coinbase.Rest do
   The local checks `get_historical_prices/4` runs before any request: a timeframe Coinbase
   serves (`{:unsupported_timeframe, tf}`), a `:limit` of 1..#{@max_candles} and a boolean
   `:include_partial` (`{:invalid_option, key, value}`), and a `range` that is a keyword list
-  of `DateTime` bounds forming a non-empty window (`{:invalid_range, _}`) of at most
+  of `DateTime` bounds forming a non-empty window (`{:invalid_range, range}`, the `range`
+  exactly as passed) of at most
   `max_candles/0` candles (`{:range_too_wide, requested: n, max: m}`).
   """
   @spec validate_candle_request(String.t(), keyword(), keyword()) :: :ok | {:error, term()}
@@ -2425,7 +2427,7 @@ defmodule DpExchange.Coinbase.Rest do
     with {:ok, limit} <- candle_limit(opts),
          :ok <- include_partial_option(opts),
          {:ok, start, finish} <- candle_window(range, width),
-         {:ok, params} <- candle_span(start, finish, width, enum) do
+         {:ok, params} <- candle_span(start, finish, width, enum, range) do
       {:ok, put_unless_nil(params, :limit, wire_candle_limit(limit, opts))}
     end
   end
@@ -2469,7 +2471,7 @@ defmodule DpExchange.Coinbase.Rest do
 
       if is_struct(start, DateTime) and is_struct(finish, DateTime),
         do: {:ok, start, finish},
-        else: {:error, {:invalid_range, start: start, end: finish}}
+        else: {:error, {:invalid_range, range}}
     else
       {:error, {:invalid_range, range}}
     end
@@ -2481,7 +2483,7 @@ defmodule DpExchange.Coinbase.Rest do
   # Only reached with a bad `:end`; the caller's refusal then names it.
   defp default_start(_not_a_datetime, _width), do: nil
 
-  defp candle_span(start, finish, width, enum) do
+  defp candle_span(start, finish, width, enum, range) do
     span = DateTime.diff(finish, start, :second)
     requested = div(span, width)
 
@@ -2489,7 +2491,7 @@ defmodule DpExchange.Coinbase.Rest do
       # An empty or inverted window is not a request for "no candles": the venue's answer to
       # `start >= end` is unmeasured, and an empty list would read as "no data".
       span <= 0 ->
-        {:error, {:invalid_range, start: start, end: finish}}
+        {:error, {:invalid_range, range}}
 
       requested > @max_candles ->
         {:error, {:range_too_wide, requested: requested, max: @max_candles}}

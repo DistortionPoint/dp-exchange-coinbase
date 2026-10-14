@@ -82,6 +82,28 @@ defmodule DpExchange.Coinbase.SocketVendoredWebSockexTest do
     assert Process.alive?(socket_pid)
   end
 
+  test "a large frame delivered in hundreds of chunks is decoded whole, and the next one too" do
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade_then_send_chunked/1])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port))
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    # The frame is valid JSON only if every one of its ~400 KB arrived and was joined in
+    # order: a lost or reordered chunk would be a `:data_quality` notice, never this one.
+    assert_receive {:dp_exchange, :coinbase,
+                    %Notice{kind: :credentials_rejected, message: message}},
+                   10_000
+
+    assert String.length(message) == 1_024
+    assert String.starts_with?(message, "authentication failure")
+
+    # A small frame straight behind the large one: the buffer carried on correctly.
+    assert_receive {:dp_exchange, :coinbase,
+                    %Notice{kind: :credentials_rejected, message: "unauthorized after"}},
+                   10_000
+  end
+
   test "a wss peer whose certificate nothing trusts is refused" do
     # websockex's own default is `verify: :verify_none`. Against this server, the TLS
     # handshake used to complete and the upgrade request went out.
@@ -170,6 +192,41 @@ defmodule DpExchange.Coinbase.SocketVendoredWebSockexTest do
     # Waits for the client to tear down, so the close cannot race the frame.
     _client_closed = :gen_tcp.recv(socket, 0, 5_000)
     :gen_tcp.close(socket)
+  end
+
+  # A ~400 KB text frame (64-bit length form) sent as 400 chunks of 1 KB with a pause between
+  # them, so they arrive as separate TCP reads; then one small frame, in the same breath as
+  # the last chunk.
+  defp upgrade_then_send_chunked(socket) do
+    upgrade(socket)
+    :ok = :inet.setopts(socket, nodelay: true)
+
+    padding = String.duplicate("x", 400 * 1_024)
+    large = Jason.encode!(%{"type" => "error", "message" => "authentication failure " <> padding})
+    small = Jason.encode!(%{"type" => "error", "message" => "unauthorized after"})
+
+    large_frame = <<0x81, 127, byte_size(large)::64, large::binary>>
+    small_frame = <<0x81, byte_size(small), small::binary>>
+
+    {init, [last]} = large_frame |> chunk_binary(1_024) |> Enum.split(-1)
+
+    for chunk <- init do
+      :ok = :gen_tcp.send(socket, chunk)
+      Process.sleep(1)
+    end
+
+    :ok = :gen_tcp.send(socket, last <> small_frame)
+
+    # Waits for the client to tear down, so the close cannot race the frames.
+    _client_closed = :gen_tcp.recv(socket, 0, 15_000)
+    :gen_tcp.close(socket)
+  end
+
+  defp chunk_binary(binary, size) when byte_size(binary) <= size, do: [binary]
+
+  defp chunk_binary(binary, size) do
+    <<chunk::binary-size(size), rest::binary>> = binary
+    [chunk | chunk_binary(rest, size)]
   end
 
   defp upgrade(socket) do

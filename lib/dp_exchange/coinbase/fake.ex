@@ -856,6 +856,16 @@ defmodule DpExchange.Coinbase.Fake do
   def coverage(_opts \\ []), do: Map.new(all_subscribed(), &{&1, :stream})
 
   @doc """
+  The symbols this process subscribed (any kind), sorted. The fake carries four symbols and
+  ignores any other, so a symbol it never carried is not wanted here either.
+
+  See `DpExchange.Coinbase.wanted/1`.
+  """
+  @spec wanted(keyword()) :: [String.t()]
+  @impl true
+  def wanted(_opts \\ []), do: all_subscribed() |> MapSet.to_list() |> Enum.sort()
+
+  @doc """
   `coverage/1`, split by kind — see `DpExchange.Coinbase.coverage_by_kind/1`.
 
   `subscribe/2` pushes, for every carried symbol, what `opts[:channels]` names (the default

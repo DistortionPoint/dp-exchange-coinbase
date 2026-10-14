@@ -94,7 +94,7 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
 
   ## What changed from upstream 0.5.1
 
-  **Exactly three things**, each marked `## VENDORED FIX` at its call site below:
+  **Exactly four things**, each marked `## VENDORED FIX` at its call site below:
 
   1. `websocket_loop/3` gains a clause for `{:error, %WebSockex.FrameError{}}`, routed
      through the *already-existing* `handle_close({:error, reason}, ...)` path that
@@ -119,6 +119,13 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
      task is killed and the attempt ends as `%WebSockex.ConnError{original: :timeout}`, the
      error a timed-out `recv` already produces, so the existing start and reconnect paths
      handle it unchanged. Added 2026-09-27.
+  4. The receive path no longer re-joins the whole buffer on every TCP chunk of a large
+     frame (`buffer_chunks/2`, `frame_need/1`, `read_all_data/3` returning the chunks
+     rather than a joined binary, and the `pending`/`pending_size`/`need` state fields).
+     Upstream copied the accumulated buffer once per chunk, quadratic in the chunk count;
+     here the chunks of an incomplete frame are held until the frame's own header says its
+     last byte has arrived, then joined once. The bytes handed to the parser and their
+     order are unchanged. Added 2026-10-14.
 
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
@@ -177,7 +184,7 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
   this exact defect, drop this vendor module, restore `use WebSockex` /
   `WebSockex` calls in `DpExchange.Coinbase.Socket`, and
   relax `mix.exs`'s pin back to `~>`. Until then, every future upstream release should be
-  diffed here for anything beyond this file's own three marked changes.
+  diffed here for anything beyond this file's own four marked changes.
 
   ---
 
@@ -813,6 +820,10 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
       name: name,
       reply_fun: reply_fun,
       buffer: <<>>,
+      # ## VENDORED FIX (4, added 2026-10-14): chunks of a large frame still arriving. See `buffer_chunks/2`.
+      pending: [],
+      pending_size: 0,
+      need: nil,
       fragment: nil
     }
 
@@ -957,8 +968,8 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
             sync_send(frame, from, parent, debug, state)
 
           {^transport, ^socket, message} ->
-            buffer = read_all_data(transport, socket, [message, state.buffer])
-            websocket_loop(parent, debug, %{state | buffer: buffer})
+            chunks = read_all_data(transport, socket, [message])
+            websocket_loop(parent, debug, buffer_chunks(state, chunks))
 
           {:tcp_closed, ^socket} ->
             handle_close({:remote, :closed}, parent, debug, state)
@@ -983,20 +994,42 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
     after
       0 ->
         :lists.reverse(buffer)
-        |> join_bitstrings()
     end
   end
 
-  defp join_bitstrings([a, b]), do: <<a::bitstring, b::bitstring>>
-  defp join_bitstrings([a]), do: a
-  defp join_bitstrings([]), do: <<>>
+  # ## VENDORED FIX (4, added 2026-10-14) — a large frame arriving in many TCP chunks.
+  #
+  # Upstream joined `state.buffer` with every chunk received and re-parsed the result, so a
+  # frame of N chunks copied the whole accumulated buffer N times: quadratic in the chunk
+  # count (a 400 KB `level2` snapshot arrives in hundreds of chunks). Frame semantics are
+  # unchanged: the same bytes reach `WebSockex.Frame.parse_frame/1` in the same order, and
+  # every frame it would have parsed is parsed, just not until its last byte is here.
+  #
+  # `parse_frame/1` has just answered `:incomplete` for `state.buffer`, so the buffer holds
+  # a frame header. `frame_need/1` reads the exact total that frame needs; chunks are held
+  # (newest first, as `pending`) and counted until `buffer + pending` reaches it, and only
+  # then joined, once, linearly. A header that cannot be read (too short, masked, not a
+  # whole number of bytes) has no `need`, and joins on every chunk exactly as upstream did.
+  defp buffer_chunks(state, chunks) do
+    need = state.need || frame_need(state.buffer)
+    pending_size = state.pending_size + Enum.reduce(chunks, 0, &(byte_size(&1) + &2))
+    pending = Enum.reverse(chunks, state.pending)
 
-  defp join_bitstrings(rest) do
-    {a, b} = Enum.split(rest, div(length(rest), 2))
-    a = join_bitstrings(a)
-    b = join_bitstrings(b)
-    <<a::bitstring, b::bitstring>>
+    if is_integer(need) and byte_size(state.buffer) + pending_size < need do
+      %{state | pending: pending, pending_size: pending_size, need: need}
+    else
+      joined = :erlang.list_to_bitstring([state.buffer | Enum.reverse(pending)])
+      %{state | buffer: joined, pending: [], pending_size: 0, need: nil}
+    end
   end
+
+  # Total bytes (header plus payload) the frame at the head of `buffer` occupies, or `nil`
+  # when its header cannot be read yet. An unmasked server frame only: a masked one is not
+  # one `parse_frame/1` accepts, so it is left to the join-every-chunk path.
+  defp frame_need(<<_fin_opcode, 0::1, len::7, _rest::binary>>) when len < 126, do: 2 + len
+  defp frame_need(<<_fin_opcode, 0::1, 126::7, len::16, _rest::binary>>), do: 4 + len
+  defp frame_need(<<_fin_opcode, 0::1, 127::7, len::64, _rest::binary>>), do: 10 + len
+  defp frame_need(_unreadable), do: nil
 
   defp close_loop(reason, parent, debug, %{conn: conn, timer_ref: timer_ref} = state) do
     transport = state.conn.transport
@@ -1327,7 +1360,16 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
 
     case result do
       {:ok, new_module_state} ->
-        state = Map.merge(state, %{buffer: <<>>, fragment: nil, module_state: new_module_state})
+        state =
+          Map.merge(state, %{
+            buffer: <<>>,
+            pending: [],
+            pending_size: 0,
+            need: nil,
+            fragment: nil,
+            module_state: new_module_state
+          })
+
         websocket_loop(parent, debug, state)
 
       {:"$EXIT", reason} ->

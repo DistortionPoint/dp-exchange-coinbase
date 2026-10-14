@@ -147,7 +147,7 @@ defmodule DpExchange.Coinbase.SocketTest do
         opts = [subscriber: self(), credentials: @fake_credentials, url: url]
         result = Socket.start_link(opts)
 
-        assert result == {:error, :insecure_websocket_url}
+        assert result == {:error, {:insecure_url, :coinbase}}
         refute inspect(result) =~ "example.invalid"
       end
     end
@@ -741,7 +741,7 @@ defmodule DpExchange.Coinbase.SocketTest do
                        }}
     end
 
-    test "any other venue error is degraded, not a credential problem" do
+    test "any other venue error is a refusal, not a credential problem" do
       # Everything that was not "too many" became `:credentials_rejected`, so a bad product
       # id on the public `ticker` channel told the host to rotate a key never involved.
       assert {:ok, _state} =
@@ -750,8 +750,31 @@ defmodule DpExchange.Coinbase.SocketTest do
                  "message" => "Failed to subscribe: invalid product_ids"
                })
 
-      assert_received {:dp_exchange, :coinbase, %Notice{kind: :degraded}}
+      assert_received {:dp_exchange, :coinbase,
+                       %Notice{
+                         kind: :refusal,
+                         message: "Failed to subscribe: invalid product_ids",
+                         details: %{reason: :subscription_rejected, symbols: []}
+                       }}
+
       refute_received {:dp_exchange, :coinbase, %Notice{kind: :credentials_rejected}}
+    end
+
+    test "a refusal names the symbols this socket was asked to carry, sorted" do
+      {:ok, tracked} =
+        Socket.handle_info({:track_subscription, :add, ~w(ETH-USD BTC-USD)}, state())
+
+      {:ok, tracked} = Socket.handle_info({:track_subscription, :add, ~w(SOL-USD)}, tracked)
+      {:ok, tracked} = Socket.handle_info({:track_subscription, :remove, ~w(ETH-USD)}, tracked)
+
+      payload = Jason.encode!(%{"type" => "error", "message" => "invalid product_ids"})
+      assert {:ok, _state} = Socket.handle_frame({:text, payload}, tracked)
+
+      assert_received {:dp_exchange, :coinbase,
+                       %Notice{
+                         kind: :refusal,
+                         details: %{reason: :subscription_rejected, symbols: ~w(BTC-USD SOL-USD)}
+                       }}
     end
 
     test "a huge venue error message is classified whole but quoted bounded" do
@@ -769,7 +792,9 @@ defmodule DpExchange.Coinbase.SocketTest do
 
     test "an error whose message is not a string is reported, and does not crash the socket" do
       assert {:ok, _state} = frame(%{"type" => "error", "message" => %{"code" => 7}})
-      assert_received {:dp_exchange, :coinbase, %Notice{kind: :degraded}}
+
+      assert_received {:dp_exchange, :coinbase,
+                       %Notice{kind: :refusal, details: %{reason: :subscription_rejected}}}
     end
   end
 

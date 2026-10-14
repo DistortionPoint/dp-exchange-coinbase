@@ -978,6 +978,22 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       refute_received {:request_sent, _path}
     end
 
+    test "{:invalid_range, range} carries the range exactly as the caller passed it" do
+      early = ~U[2026-08-01 00:00:00Z]
+      late = ~U[2026-08-02 00:00:00Z]
+
+      for range <- [[start: late, end: early], [end: "now"], :bad, [start: early, end: early]] do
+        assert {:error, {:invalid_range, ^range}} =
+                 Rest.get_historical_prices("BTC-USD", "1h", range,
+                   plug: responding(%{"candles" => []}),
+                   retry_attempts: 0
+                 )
+
+        assert {:error, {:invalid_range, ^range}} =
+                 Fake.get_historical_prices("BTC-USD", "1h", range)
+      end
+    end
+
     test "a nil bound is an absent one" do
       assert {:ok, []} =
                Rest.get_historical_prices(

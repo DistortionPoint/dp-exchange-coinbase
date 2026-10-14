@@ -45,7 +45,7 @@ defmodule DpExchange.Coinbase.SocketBranchesTest do
       opts = [subscriber: self(), credentials: @credentials, url: "wss://127.0.0.1:1/"]
 
       assert {:error, reason} = Socket.start_link(opts)
-      refute reason == :insecure_websocket_url
+      refute reason == {:insecure_url, :coinbase}
     end
 
     test "a %URI{} for a remote plaintext host is refused like its string" do
@@ -54,14 +54,14 @@ defmodule DpExchange.Coinbase.SocketBranchesTest do
 
       result = Socket.start_link(opts)
 
-      assert result == {:error, :insecure_websocket_url}
+      assert result == {:error, {:insecure_url, :coinbase}}
       refute inspect(result) =~ "example.invalid"
     end
 
     test "a URL that cannot be inspected is refused, not assumed safe" do
       opts = [subscriber: self(), credentials: @credentials, url: ~c"ws://example.invalid/"]
 
-      assert Socket.start_link(opts) == {:error, :insecure_websocket_url}
+      assert Socket.start_link(opts) == {:error, {:insecure_url, :coinbase}}
     end
   end
 

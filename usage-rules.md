@@ -179,6 +179,10 @@ Both come from a private, patched fork of websockex 0.5.1's process loop,
 - **A close frame with an invalid status code disconnects.** Upstream raised on it and
   crashed the socket before its reconnect logic ran. It now produces an ordinary
   `:link_down` and reconnect.
+- **A large frame arriving in many TCP chunks is joined once** (2026-10-14). Upstream copied
+  the whole accumulated buffer on every chunk, quadratic in the chunk count; the fork holds
+  the chunks until the frame header's own length says the last byte is in. Same bytes, same
+  order, same frames.
 
 **This package depends on `{:websockex, "== 0.5.1"}` exactly.** The fork calls that
 release's internals. If your application pins a different websockex version, dependency
@@ -269,10 +273,10 @@ Widening your window to "get more per call" gets you nothing, and nothing reads 
 data for this period*. Page it yourself.
 
 An empty or inverted window (`start` at or after `end`) is refused too, as
-`{:error, {:invalid_range, start: start, end: end}}`. The venue's answer to one is
-unmeasured, and an empty list would read as *no data*. So is a `range` that is not a
-keyword list, or a `:start` / `:end` that is not a `DateTime` (`nil` means absent): the
-same `{:invalid_range, _}`, never a raise in your process.
+`{:error, {:invalid_range, range}}`, `range` being the value you passed. The venue's answer
+to one is unmeasured, and an empty list would read as *no data*. So is a `range` that is not
+a keyword list, or a `:start` / `:end` that is not a `DateTime` (`nil` means absent): the
+same `{:invalid_range, range}`, never a raise in your process.
 
 **The forming bar, the range and `:limit` (BREAKING).** `get_historical_prices/4` no longer
 returns the bar still forming (`opened_at + width > now`; the end defaults to now, so it used
@@ -378,7 +382,27 @@ account rather than with the key you passed. **An unsigned token is worse than n
 
 `subscribe/2` opens and manages a connection internally. You never see it, and
 `coverage/1` reports what is **observed arriving** — a symbol you subscribed that has
-delivered nothing is simply absent.
+delivered nothing is simply absent. `wanted/1` is the other half: the symbols you asked for
+(sorted, `[]` with no feed), delivering or not; a symbol in `wanted/1` and not in
+`coverage/1` is asked for and not arriving. `Fake.wanted/1` answers the same way.
+
+**A subscription the venue refuses arrives as a `:refusal` `Core.Notice`.** Any `error` frame
+that is neither an authentication failure (`:credentials_rejected`) nor "too many" streams
+(`:rate_limited`) is `kind: :refusal`, `details: %{reason: :subscription_rejected, symbols:
+[...]}` and the venue's own text, bounded, in `message`. The frame names no product, so
+`symbols` is everything that socket was asked to carry (sorted), a superset of what was
+refused. It was `:degraded` before, which is a breaking change of the notice kind.
+The Fake emits no notices.
+
+**A credentialed socket pointed at a plaintext remote URL is refused as
+`{:error, {:insecure_url, :coinbase}}`** (it was `{:error, :insecure_websocket_url}`;
+breaking change of the returned reason). The URL is never echoed.
+
+**A malformed range is `{:error, {:invalid_range, range}}`, `range` being what you passed**
+(the keyword list given to `get_historical_prices/4`; `[start: s, end: e]` for
+`get_trade_history/2`'s bounds). It was `{:invalid_range, start: s, end: e}` with the window
+after defaults were applied; breaking change of the returned reason for an inverted or empty
+window on `get_historical_prices/4`.
 
 Public channels carry no token. Attaching one is actively harmful: Coinbase answers a
 bogus token with an authentication failure, which is how a book channel once produced
@@ -1237,7 +1261,7 @@ None of these raises in your process, and the fake runs the same check in the sa
 - **Fill filters.** `get_trade_history/2` needs `:order_id` to be a non-empty string or list
   of them (`{:invalid_order_id, v}`) and `:start` / `:end` to be `DateTime`s
   (`{:invalid_time, :start | :end, v}`), with `:start` before `:end`
-  (`{:invalid_range, start: s, end: e}`). Strings used to be forwarded as given.
+  (`{:invalid_range, [start: s, end: e]}`). Strings used to be forwarded as given.
 - **Conversions and transfers.** `quote_conversion/4` needs a finite positive `Decimal`, and
   `from`/`to` must be non-empty strings (`{:invalid_id, :from | :to, v}`);
   `opts[:from]`/`opts[:to]` on commit and read must both be non-empty strings

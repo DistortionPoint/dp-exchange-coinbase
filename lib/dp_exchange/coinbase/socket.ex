@@ -410,6 +410,9 @@ defmodule DpExchange.Coinbase.Socket do
       # Observed delivery, not intended: a symbol enters this set when a payload for it
       # arrives, never when it is subscribed.
       delivering: MapSet.new(),
+      # What this socket was asked to carry (intended, unlike `delivering`), kept only so a
+      # subscription-rejecting error frame can name the symbols it may concern.
+      subscribed: MapSet.new(),
       # Whether `handle_connect/2` has run before — so only a RE-connect is reported to
       # `Feed`. See `report_reconnected/1`.
       connected_once?: false,
@@ -461,13 +464,13 @@ defmodule DpExchange.Coinbase.Socket do
 
   # Anything else cannot be inspected, so with a credential in hand it is refused rather
   # than assumed safe (fail closed).
-  defp check_transport(_other, _credentials), do: {:error, :insecure_websocket_url}
+  defp check_transport(_other, _credentials), do: {:error, {:insecure_url, :coinbase}}
 
   defp check_scheme(uri) do
     case uri do
       %URI{scheme: scheme} when scheme in ["wss", "https"] -> :ok
       %URI{host: host} when host in ["localhost", "127.0.0.1", "::1"] -> :ok
-      _plaintext_remote -> {:error, :insecure_websocket_url}
+      _plaintext_remote -> {:error, {:insecure_url, :coinbase}}
     end
   end
 
@@ -535,9 +538,23 @@ defmodule DpExchange.Coinbase.Socket do
   @spec subscribe(pid(), String.t(), [String.t()], Credentials.t() | nil) ::
           :ok | {:error, term()}
   def subscribe(socket, channel, symbols, credentials \\ nil) do
-    with {:ok, message} <- subscription_frame(channel, symbols, credentials) do
-      FrameSender.send(socket, {:text, Jason.encode!(message)}, "coinbase subscribe #{channel}")
+    with {:ok, message} <- subscription_frame(channel, symbols, credentials),
+         :ok <-
+           FrameSender.send(
+             socket,
+             {:text, Jason.encode!(message)},
+             "coinbase subscribe #{channel}"
+           ) do
+      track_subscription(socket, :add, symbols)
     end
+  end
+
+  # Tells the socket which symbols it was asked to carry, so an error frame (which names
+  # none) can be reported against them. Fire-and-forget: a socket that is gone has nothing
+  # to report, and the subscribe itself already succeeded.
+  defp track_subscription(socket, action, symbols) do
+    send(socket, {:track_subscription, action, symbols})
+    :ok
   end
 
   # The subscribe message exactly as `subscribe/4` sends it: symbols converted to the venue's
@@ -566,7 +583,14 @@ defmodule DpExchange.Coinbase.Socket do
       channel: channel
     }
 
-    FrameSender.send(socket, {:text, Jason.encode!(message)}, "coinbase unsubscribe #{channel}")
+    with :ok <-
+           FrameSender.send(
+             socket,
+             {:text, Jason.encode!(message)},
+             "coinbase unsubscribe #{channel}"
+           ) do
+      track_subscription(socket, :remove, symbols)
+    end
   end
 
   # --- WebSockex callbacks -----------------------------------------------
@@ -631,6 +655,20 @@ defmodule DpExchange.Coinbase.Socket do
       schedule_silence_check(check)
       {:ok, state}
     end
+  end
+
+  def handle_info({:track_subscription, action, symbols}, state)
+      when action in [:add, :remove] and is_list(symbols) do
+    current = Map.get(state, :subscribed, MapSet.new())
+    wanted = MapSet.new(symbols)
+
+    updated =
+      case action do
+        :add -> MapSet.union(current, wanted)
+        :remove -> MapSet.difference(current, wanted)
+      end
+
+    {:ok, Map.put(state, :subscribed, updated)}
   end
 
   def handle_info(_message, state), do: {:ok, state}
@@ -875,6 +913,10 @@ defmodule DpExchange.Coinbase.Socket do
     # Once per channel per connection, through the same remembered set as `report_quality/5`:
     # a venue that pushes `status` or `ticker_batch` unasked does so on every tick, and one
     # notice per frame is the flood that set exists to prevent.
+    #
+    # `channel` is copied: it is a sub-binary of the frame, and this tuple outlives it in
+    # `reported_faults` (see `brief/1`).
+    channel = :binary.copy(channel)
     fault = {:unsubscribed_channel, channel, :received}
     reported = Map.get(state, :reported_faults, MapSet.new())
 
@@ -897,9 +939,14 @@ defmodule DpExchange.Coinbase.Socket do
     # Classified on the whole text, quoted bounded: the venue's `message` went whole into a
     # notice sent to every subscriber, and a frame can be as large as the venue cares to
     # make it. Same cut as the other venue strings quoted in this module (see `brief/1`).
+    kind = error_kind(message)
+
     notify(
       state,
-      Notice.new(error_kind(message), :coinbase, message: String.slice(message, 0, 1_024))
+      Notice.new(kind, :coinbase,
+        message: message |> String.slice(0, 1_024) |> :binary.copy(),
+        details: error_details(kind, state)
+      )
     )
 
     state
@@ -910,8 +957,13 @@ defmodule DpExchange.Coinbase.Socket do
   defp dispatch(%{"type" => "error"} = frame, state) do
     notify(
       state,
-      Notice.new(:degraded, :coinbase,
-        details: %{venue_error: inspect(frame, limit: 50, printable_limit: 1_024)}
+      Notice.new(:refusal, :coinbase,
+        details:
+          Map.put(
+            error_details(:refusal, state),
+            :venue_error,
+            inspect(frame, limit: 50, printable_limit: 1_024)
+          )
       )
     )
 
@@ -953,7 +1005,10 @@ defmodule DpExchange.Coinbase.Socket do
   # **Only an authentication failure is `:credentials_rejected`.** Everything else fell
   # through to it, so a bad `product_ids` entry or a malformed subscribe on the public
   # `ticker` channel told the host to rotate a key that was never involved. Anything that is
-  # neither pressure nor authentication is `:degraded`, carrying the venue's own text.
+  # neither pressure nor authentication is the venue refusing a subscription: `:refusal`
+  # (Core.Notice, D4), carrying the venue's own text in `message`, an atom `details.reason`,
+  # and `details.symbols`. The frame names no product, so the symbols are everything this
+  # socket was asked to carry - a superset of what was refused, never a guess at one.
   defp error_kind(message) do
     lowered = String.downcase(message)
 
@@ -965,9 +1020,16 @@ defmodule DpExchange.Coinbase.Socket do
         :credentials_rejected
 
       true ->
-        :degraded
+        :refusal
     end
   end
+
+  defp error_details(:refusal, state) do
+    symbols = state |> Map.get(:subscribed, MapSet.new()) |> MapSet.to_list() |> Enum.sort()
+    %{reason: :subscription_rejected, symbols: symbols}
+  end
+
+  defp error_details(_kind, _state), do: %{}
 
   # `is_binary/1` on `product_id` here and in `decode_book_event/2`: `SymbolFormat` raises
   # on anything else, and a raise in a frame handler takes this whole connection down.
@@ -1075,7 +1137,14 @@ defmodule DpExchange.Coinbase.Socket do
   # after the dedupe check it exists for. Under a burst of malformed frames that was the whole
   # frame inspected, once per frame, inside the socket process. A binary is cut by
   # characters; anything else is inspected with small limits.
-  defp brief(value) when is_binary(value), do: String.slice(value, 0, 120)
+  #
+  # **A binary is copied, not sliced.** `Jason.decode/1` hands back strings as sub-binaries
+  # that reference the whole frame, and `String.slice/3` of one is another reference into it.
+  # The cut is quoted into `reported_faults` (up to `@max_reported_faults` of them, for the
+  # life of the connection) and into notices sitting in subscribers' mailboxes, so one
+  # retained 120-character subject kept a frame of up to hundreds of kilobytes alive per
+  # fault. `:binary.copy/1` detaches it.
+  defp brief(value) when is_binary(value), do: value |> String.slice(0, 120) |> :binary.copy()
   defp brief(value), do: inspect(value, limit: 20, printable_limit: 120)
 
   # `is_binary/1` on `product_id` for the reason `deliver_ticker/3` records: `SymbolFormat`
@@ -1606,7 +1675,9 @@ defmodule DpExchange.Coinbase.Socket do
   # subjects cannot grow it. At the cap the set starts over with only the new fault (see
   # `remember_fault/3`), so each fault is reported at most once per fill of the set.
   defp report_quality(state, channel, detail, reason, extra) do
-    subject = String.slice(to_string(detail), 0, 120)
+    # Copied for the reason `brief/1` gives: `detail` is often a sub-binary of the frame, and
+    # `subject` is kept in `reported_faults` and sent in the notice.
+    subject = detail |> to_string() |> String.slice(0, 120) |> :binary.copy()
     fault = {channel, subject, fault_kind(reason)}
     reported = Map.get(state, :reported_faults, MapSet.new())
 

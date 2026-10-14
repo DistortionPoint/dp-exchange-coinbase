@@ -20,6 +20,49 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+Facade consistency (tick AD part 2; design `2026-10-14_design-facade-consistency`).
+
+- **BREAKING (returned reason): a plaintext remote URL on a credentialed socket is
+  `{:error, {:insecure_url, :coinbase}}`**, not `{:error, :insecure_websocket_url}` (D8).
+- **BREAKING (returned reason): `{:invalid_range, range}` carries the range the caller
+  passed** (D9). `get_historical_prices/4` used to return `{:invalid_range, start: s,
+  end: e}` with the window after defaults; `get_trade_history/2` now returns
+  `{:invalid_range, [start: s, end: e]}` (same value as before, written as the list it is).
+  `Fake` shares the validation.
+- **BREAKING (notice kind): an `error` frame that is neither authentication nor "too many"
+  is a `:refusal` notice, not `:degraded`** (D4), with `details: %{reason:
+  :subscription_rejected, symbols: [...]}`; the venue's text stays in `message`. The frame
+  names no product, so `symbols` is everything the socket was asked to carry. The `Socket`
+  now remembers what it was asked to carry (tracked from `subscribe/4` / `unsubscribe/3`).
+- **`wanted/1` on the facade, `Feed` and `Fake`** (D10): the symbols asked for, sorted,
+  delivering or not. A plain public function; the Core callback is optional.
+- **Vendored websockex no longer re-joins the whole buffer on every TCP chunk of a large
+  frame.** It was quadratic in the chunk count. Chunks of an incomplete frame are now held
+  until its header's length says the last byte has arrived, then joined once. Frame
+  semantics unchanged; documented in the file as its fourth local change. Test: a ~400 KB
+  frame delivered in 400 chunks, followed by a small frame, through a real socket.
+
+### Fixed
+
+Hot-path retention and timer hygiene (tick AD).
+
+- **`Socket` no longer keeps a whole frame alive through a 120-character subject.** The
+  strings `Jason` decodes are sub-binaries of the frame, and `reported_faults` (up to 256 per
+  connection) and the notices sent to subscribers held slices of them: a `level2` frame of
+  hundreds of kilobytes stayed in memory per remembered fault. The fault subject, the
+  unsubscribed-channel name and the venue's error text are copied before they are kept.
+- **`Feed` prunes a retired shard's gap bookkeeping.** `gap_resubscribed_at` and
+  `gap_resubscribe_due` were never pruned, and a trailing gap re-issue timer armed for a shard
+  that was since retired still ran its course. Both go with the shard, and the timer is
+  cancelled.
+- **`Feed` cancels the alias-map fetch's timeout timer when the fetch answers or dies.** The
+  timer was dropped, so every fetch left one pending for the rest of its window.
+- **`Feed`'s per-frame delivery does less work for the common frame.** A product with no
+  alias is resolved by one set lookup rather than four list passes, and an unaliased payload is
+  delivered as received instead of being rebuilt per frame. No observable change.
+
 ## [0.3.126] - 2026-10-14
 
 ### Fixed

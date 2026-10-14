@@ -697,6 +697,20 @@ defmodule DpExchange.Coinbase do
   end
 
   @doc """
+  The symbols the consumer asked to stream, sorted: what was subscribed, whether or not any
+  has delivered yet. `coverage/1` is the other half, what is observed arriving; a symbol in
+  `wanted/1` and not in `coverage/1` is asked for and not arriving.
+
+  An empty list when no feed is running or it cannot answer.
+  """
+  @spec wanted(keyword()) :: [String.t()]
+  @impl true
+  def wanted(opts \\ []) do
+    feed = feed(opts)
+    if alive?(feed), do: feed_read(fn -> Feed.wanted(feed) end, []), else: []
+  end
+
+  @doc """
   `coverage/1`, split by which `DpExchange.Core.Types` struct is actually arriving.
 
   `coverage/1` is honest but coarse: it answers "is anything arriving for this symbol" by

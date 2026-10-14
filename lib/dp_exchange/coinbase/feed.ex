@@ -1783,6 +1783,14 @@ defmodule DpExchange.Coinbase.Feed do
   def coverage(feed \\ __MODULE__), do: GenServer.call(feed, :coverage, @call_timeout)
 
   @doc """
+  The symbols asked for (`subscribe/3` and `update_symbols/2`, less `unsubscribe/2`), sorted,
+  whether or not any has delivered yet: intent, as opposed to `coverage/1`, which is
+  observation.
+  """
+  @spec wanted(GenServer.server()) :: [String.t()]
+  def wanted(feed \\ __MODULE__), do: GenServer.call(feed, :wanted, @call_timeout)
+
+  @doc """
   `coverage/1`, split by which `Core.Types.*` kind actually arrived — see the moduledoc's
   "coverage_by_kind/1" section for why `coverage/1` alone could not tell "ticker dark,
   book healthy" apart from "everything healthy".
@@ -2036,6 +2044,10 @@ defmodule DpExchange.Coinbase.Feed do
     {:reply, Map.new(state.delivering, fn {symbol, _kinds} -> {symbol, :stream} end), state}
   end
 
+  def handle_call(:wanted, _from, state) do
+    {:reply, state.wanted |> MapSet.to_list() |> Enum.sort(), state}
+  end
+
   def handle_call(:coverage_by_kind, _from, state) do
     # Inverts `state.delivering` from symbol-first (`%{symbol => %{kind => timestamp}}`)
     # to kind-first (`%{kind => %{symbol => :stream}}`) — the shape
@@ -2134,8 +2146,10 @@ defmodule DpExchange.Coinbase.Feed do
   # knows how to count attempts, back off, and eventually give up loudly.
   def handle_info(
         {:DOWN, ref, :process, _pid, reason},
-        %{alias_map_fetch: %{ref: ref, attempt: attempt}} = state
+        %{alias_map_fetch: %{ref: ref, attempt: attempt} = fetch} = state
       ) do
+    cancel_fetch_timer(fetch)
+
     handle_alias_map_fetch_failure(
       attempt,
       {:alias_map_fetch_down, reason},
@@ -2280,7 +2294,7 @@ defmodule DpExchange.Coinbase.Feed do
     # reporting it as `:not_covered` would blame the venue for a consumer's own backlog.
     state =
       Enum.reduce(targets, state, fn symbol, acc ->
-        deliver(acc, {:dp_exchange, :coinbase, %{payload | symbol: symbol}})
+        deliver(acc, {:dp_exchange, :coinbase, with_symbol(payload, symbol)})
       end)
 
     delivering =
@@ -2500,8 +2514,12 @@ defmodule DpExchange.Coinbase.Feed do
 
   # The alias-catalogue fetch answered. Matched on the stored `ref` so a late reply from a
   # superseded fetch cannot overwrite a newer result, and ordered above the catch-all below.
-  def handle_info({ref, result}, %{alias_map_fetch: %{ref: ref, attempt: attempt}} = state) do
+  def handle_info(
+        {ref, result},
+        %{alias_map_fetch: %{ref: ref, attempt: attempt} = fetch} = state
+      ) do
     Process.demonitor(ref, [:flush])
+    cancel_fetch_timer(fetch)
     apply_alias_map_result(result, attempt, %{state | alias_map_fetch: nil})
   end
 
@@ -3220,10 +3238,20 @@ defmodule DpExchange.Coinbase.Feed do
 
     Enum.each(closed, &Process.exit(&1, :shutdown))
 
+    # A retired shard's gap bookkeeping goes with it, as `shard_crashes` does. Both maps are
+    # keyed by shard and were never pruned, so a universe that shrank kept an entry per index
+    # it ever had, and a trailing re-issue timer armed for a shard that is gone still ran its
+    # course. The timer is cancelled rather than left to find no shard when it fires.
+    Enum.each(Map.take(state.gap_resubscribe_due, keys), fn {_key, timer} ->
+      Process.cancel_timer(timer)
+    end)
+
     %{
       state
       | shards: shards,
         shard_crashes: Map.drop(state.shard_crashes, keys),
+        gap_resubscribed_at: Map.drop(state.gap_resubscribed_at, keys),
+        gap_resubscribe_due: Map.drop(state.gap_resubscribe_due, keys),
         down_links: Enum.reduce(closed, state.down_links, &MapSet.delete(&2, &1))
     }
   end
@@ -3807,14 +3835,24 @@ defmodule DpExchange.Coinbase.Feed do
     source = state.alias_map_source
     task = Task.async(fn -> safely_fetch_alias_map(source) end)
 
-    Process.send_after(
-      self(),
-      {:alias_map_fetch_timeout, task.ref},
-      state.alias_map_fetch_timeout_ms
-    )
+    # The timer is kept so the fetch's answer (or its death) can cancel it. It was dropped, so
+    # every fetch left a timer pending for the rest of its window, for the ordinary case of a
+    # fetch that finished long before it.
+    timer =
+      Process.send_after(
+        self(),
+        {:alias_map_fetch_timeout, task.ref},
+        state.alias_map_fetch_timeout_ms
+      )
 
-    %{state | alias_map_fetch: %{ref: task.ref, pid: task.pid, attempt: attempt}}
+    %{state | alias_map_fetch: %{ref: task.ref, pid: task.pid, attempt: attempt, timer: timer}}
   end
+
+  # A fetch state a test built by hand may carry no `:timer`; there is then nothing to cancel.
+  defp cancel_fetch_timer(%{timer: timer}) when is_reference(timer),
+    do: Process.cancel_timer(timer)
+
+  defp cancel_fetch_timer(_fetch), do: :ok
 
   # Runs inside the task. Converts a raise or an exit into an ordinary error result BEFORE
   # it can become an abnormal task exit — `Task.async/1` links, and an unconverted
@@ -3972,13 +4010,7 @@ defmodule DpExchange.Coinbase.Feed do
   defp attribute_notice(notice, _state), do: notice
 
   defp resolve_names(delivered, state) do
-    equivalent = state.alias_map |> Map.get(delivered) |> List.wrap()
-
-    targets =
-      [delivered | equivalent]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.uniq()
-      |> Enum.filter(&MapSet.member?(state.wanted, &1))
+    targets = wanted_names(delivered, Map.get(state.alias_map, delivered), state.wanted)
 
     # Nothing in `wanted` resolved. Which of two things that means depends on the map.
     #
@@ -3997,6 +4029,30 @@ defmodule DpExchange.Coinbase.Feed do
       state.alias_map_status == :ok -> []
       true -> [delivered]
     end
+  end
+
+  # The payload as delivered when it already carries `symbol` (every frame without an alias),
+  # else a copy under the caller's name. Rebuilding an identical struct per frame is garbage
+  # on the busiest path in the module.
+  defp with_symbol(%{symbol: symbol} = payload, symbol), do: payload
+  defp with_symbol(payload, symbol), do: %{payload | symbol: symbol}
+
+  # The names in `wanted` among `[delivered | equivalent]`, de-duplicated, in that order.
+  #
+  # This runs once per delivered frame, and `level2` is the highest-volume channel this module
+  # sees. The common frame is for a product with no alias, so it used to build a one-element
+  # list only to reject, de-duplicate and filter it: four list passes and as many allocations
+  # for what is one set lookup. That case is now the lookup alone; only a product the
+  # catalogue names an alias for takes the general path.
+  defp wanted_names(delivered, nil, wanted) when is_binary(delivered) do
+    if MapSet.member?(wanted, delivered), do: [delivered], else: []
+  end
+
+  defp wanted_names(delivered, equivalent, wanted) do
+    [delivered | List.wrap(equivalent)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Enum.filter(&MapSet.member?(wanted, &1))
   end
 
   # Fired once, when the alias-map fetch gives up for good (permanently, or after

@@ -256,8 +256,8 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
             {[order_id: %{}], {:error, {:invalid_order_id, %{}}}},
             {[start: "2026-08-01"], {:error, {:invalid_time, :start, "2026-08-01"}}},
             {[end: %{}], {:error, {:invalid_time, :end, %{}}}},
-            {[start: late, end: early], {:error, {:invalid_range, start: late, end: early}}},
-            {[start: early, end: early], {:error, {:invalid_range, start: early, end: early}}}
+            {[start: late, end: early], {:error, {:invalid_range, [start: late, end: early]}}},
+            {[start: early, end: early], {:error, {:invalid_range, [start: early, end: early]}}}
           ] do
         assert expected == Rest.get_trade_history(@credentials, filter ++ opts())
         assert expected == Fake.get_trade_history(@credentials, filter)

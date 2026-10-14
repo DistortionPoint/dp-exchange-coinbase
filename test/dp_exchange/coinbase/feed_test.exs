@@ -151,6 +151,20 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
     end
 
+    test "wanted/1 is the intent: asked for, delivered or not" do
+      feed = start_feed()
+      assert Feed.wanted(feed) == []
+
+      assert :ok = Feed.update_symbols(feed, ~w(ETH-USD BTC-USD))
+
+      # Nothing has arrived, so nothing is covered; both are still wanted, sorted.
+      assert Feed.coverage(feed) == %{}
+      assert Feed.wanted(feed) == ~w(BTC-USD ETH-USD)
+
+      assert :ok = Feed.unsubscribe(feed, ~w(BTC-USD))
+      assert Feed.wanted(feed) == ~w(ETH-USD)
+    end
+
     test "a feed that has delivered nothing covers nothing" do
       feed = start_feed()
       assert Feed.coverage(feed) == %{}
