@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.128] - 2026-10-14
+
 ### Added
 
 - The conformance suite runs Core's group 41 (family reasons) with `unlisted_symbol:` and
