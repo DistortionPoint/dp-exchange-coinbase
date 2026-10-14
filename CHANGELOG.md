@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.127] - 2026-10-14
+
 ### Changed
 
 Facade consistency (tick AD part 2; design `2026-10-14_design-facade-consistency`).
