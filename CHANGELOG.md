@@ -20,6 +20,48 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Decoder robustness against hostile or malformed venue payloads. Every item is a value that
+parses cleanly and used to be carried through as a plausible one.
+
+- **A fill or a tape print of zero or negative size, or a fill at a price of zero or less,
+  was returned as an execution.** `get_trade_history/2` and `get_trades/2` now refuse it
+  (`{:non_positive_quantity, :quantity, v}`, `{:non_positive_price, :price, v}`), and a
+  streamed `market_trades` print of zero or negative size is reported through `:data_quality`
+  and not delivered.
+- **A trade id that was a map, list, float or number was carried as the id** by REST. A trade
+  id is a non-empty string on both paths now (the stream already refused a number), and a
+  fill's `trade_id` is a string or absent.
+- **A negative volume, size or price on a read was carried as stated.** A negative candle
+  volume, a negative newest-print size on `get_price/2`, a negative streamed `volume_24_h`, and
+  a negative `filled_size`, `base_size`, `limit_price`, `stop_price` or `average_filled_price`
+  on an order read back are `nil` ("not stated"), as an unreadable value already was.
+- **A JSON float with an absurd exponent (`1.0e300`) bypassed the 64-place bound** every
+  decimal string is held to; it is `nil` now.
+- **`get_top_of_book/2` accepted a best price of zero or less and a negative size.** It
+  refuses them as `get_order_book/2` already did (`:unexpected_response_shape`).
+- **A futures position whose `product_id` was a number, a map, `""` or blank** was returned as
+  a position with that "symbol"; it refuses the reply (`{:missing_required_field, :symbol}`).
+- **A portfolio row with `deleted` as a string** (`"false"` is truthy) or a non-string `name` /
+  `type` is `:unexpected_response_shape`.
+- **A preview whose `errs` (or an edit preview whose `errors`) was present and not a list**
+  was returned as a successful preview; it is `:unexpected_response_shape`.
+- **A catalogue row with a blank `product_id` was listed** as the symbol `""`; it is skipped
+  like one with no name. A non-string `base_currency_id` / `quote_currency_id` / `status` is
+  `nil`, not carried into a field typed `String.t() | nil`.
+- **`get_accounts/2` (listing), `list_payment_methods/2`, `list_futures_sweeps/2` and
+  `list_futures_positions/2` handed back a non-object entry** among the venue's own maps; they
+  answer `:unexpected_response_shape`.
+- **A venue's failure reason was copied whole** into `{:order_rejected, _}`,
+  `{:close_rejected, _}`, `{:edit_rejected, _}` and `{:cancel_rejected, _}`. Strings are cut to
+  2,048 characters as `refusal/2`'s text is, and a cancel's non-string `failure_reason` is
+  `:unexpected_response_shape`.
+- **A subscribed channel (`ticker`, `l2_data`, `market_trades`) whose `events` was absent,
+  `null` or not a list, and a frame that was JSON but not an object, were dropped silently.**
+  Each is now one `:data_quality` notice per fault (reason `:unexpected_event` /
+  `:unexpected_frame`). Heartbeats and acknowledgements stay silent.
+
 ## [0.3.125] - 2026-10-14
 
 - **A retried channel subscribe re-subscribed a symbol unsubscribed while it was pending.** It

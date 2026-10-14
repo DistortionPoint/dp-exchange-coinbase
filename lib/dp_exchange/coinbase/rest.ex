@@ -394,7 +394,12 @@ defmodule DpExchange.Coinbase.Rest do
   # catalogue with it. A REST mutation fuzz (2026-09-27) found it. A row that names nothing
   # cannot be traded, subscribed or aliased, so leaving it out drops no instrument anyone
   # could reach, and `Robinhood`'s catalogue made the same call on 2026-09-26.
-  defp named_product?(%{"product_id" => product_id}) when is_binary(product_id), do: true
+  #
+  # A blank name (`""`, `"  "`) names nothing either: it came out of `get_symbols/1` as the
+  # symbol `""`, and out of `list_instruments/1` as an `Instrument` with that symbol.
+  defp named_product?(%{"product_id" => product_id}) when is_binary(product_id),
+    do: String.trim(product_id) != ""
+
   defp named_product?(_unnamed), do: false
 
   defp market_overview_row(product) do
@@ -407,15 +412,15 @@ defmodule DpExchange.Coinbase.Rest do
        volume_24h: decimal(product["volume_24h"]),
        high_24h: decimal(product["high_24h"]),
        low_24h: decimal(product["low_24h"]),
-       status: product["status"]
+       status: text_or_nil(product["status"])
      }}
   end
 
   defp to_instrument(product) do
     Instrument.new(
       symbol: SymbolFormat.to_canonical_symbol(product["product_id"]),
-      base: product["base_currency_id"],
-      quote: product["quote_currency_id"],
+      base: text_or_nil(product["base_currency_id"]),
+      quote: text_or_nil(product["quote_currency_id"]),
       instrument: Instrument.instrument_from(product["product_type"], expiry_kind(product)),
       status: product_status(product)
     )
@@ -505,7 +510,10 @@ defmodule DpExchange.Coinbase.Rest do
     with :ok <- validate_account_options(opts) do
       case Keyword.get(opts, :uuid) do
         nil ->
-          all_accounts(credentials, opts, nil, [], 0)
+          # The rows are returned as the venue's own maps, so each must be one: a number or
+          # a list among them reached a consumer indexing it by key.
+          with {:ok, accounts} <- all_accounts(credentials, opts, nil, [], 0),
+               do: map_rows(accounts)
 
         uuid ->
           case request(:get, "/accounts/#{segment(uuid)}", credentials, opts) do
@@ -668,7 +676,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_payment_methods(credentials, opts) do
     case request(:get, "/payment_methods", credentials, opts) do
-      {:ok, %{body: %{"payment_methods" => methods}}} when is_list(methods) -> {:ok, methods}
+      {:ok, %{body: %{"payment_methods" => methods}}} when is_list(methods) -> map_rows(methods)
       {:ok, _unexpected} -> {:error, :unexpected_response_shape}
       {:error, reason} -> classify(reason)
     end
@@ -969,7 +977,8 @@ defmodule DpExchange.Coinbase.Rest do
   defp to_portfolio(row) when not is_map(row), do: {:error, :unexpected_response_shape}
 
   defp to_portfolio(row) do
-    with {:ok, id} <- required_id(row["uuid"], :id) do
+    with {:ok, id} <- required_id(row["uuid"], :id),
+         :ok <- portfolio_fields(row) do
       {:ok,
        %Types.Portfolio{
          id: id,
@@ -979,6 +988,18 @@ defmodule DpExchange.Coinbase.Rest do
          provider: :coinbase
        }}
     end
+  end
+
+  # `deleted` is a boolean or absent. `"false"` and `"0"` are truthy to a consumer testing
+  # `portfolio.deleted`, so a string there made a live portfolio read as a deleted one (or the
+  # reverse), and a number or a map in `name` / `type` is not what those fields are.
+  defp portfolio_fields(row) do
+    valid? =
+      row["deleted"] in [nil, true, false] and
+        (is_nil(row["name"]) or is_binary(row["name"])) and
+        (is_nil(row["type"]) or is_binary(row["type"]))
+
+    if valid?, do: :ok, else: {:error, :unexpected_response_shape}
   end
 
   # A portfolio the venue says it created but whose uuid cannot be read is a write that may
@@ -1304,7 +1325,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_positions(map(), keyword()) ::
           {:ok, [Types.Position.t()]} | {:error, term()} | {:refused, term()}
   def get_positions(credentials, opts) do
-    with {:ok, rows} <- list_futures_positions(credentials, opts) do
+    with {:ok, rows} <- futures_position_rows(credentials, opts) do
       to_positions(rows)
     end
   end
@@ -1320,6 +1341,12 @@ defmodule DpExchange.Coinbase.Rest do
   @spec list_futures_positions(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_futures_positions(credentials, opts) do
+    # The rows are handed back as the venue's own maps, so each must be one (`get_positions/2`
+    # reads them unchecked and refuses a row that is not an object itself, in `to_position/1`).
+    with {:ok, rows} <- futures_position_rows(credentials, opts), do: map_rows(rows)
+  end
+
+  defp futures_position_rows(credentials, opts) do
     # The CFM endpoints take no portfolio parameter: a portfolio scope is refused, not ignored.
     with :ok <- reject_portfolio_option(opts) do
       case request(:get, "/cfm/positions", credentials, opts) do
@@ -1418,8 +1445,16 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  defp required_position_field(nil, field), do: {:error, {:missing_required_field, field}}
-  defp required_position_field(value, _field), do: {:ok, value}
+  # A product id is a non-blank string. A number, a map or `""` was carried through as the
+  # position's symbol, which names no instrument a consumer can size or close.
+  defp required_position_field(value, field) when is_binary(value) do
+    if String.trim(value) == "",
+      do: {:error, {:missing_required_field, field}},
+      else: {:ok, value}
+  end
+
+  defp required_position_field(_unreadable, field),
+    do: {:error, {:missing_required_field, field}}
 
   defp position_struct(row, symbol, side, quantity) do
     %Types.Position{
@@ -1509,7 +1544,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_futures_sweeps(credentials, opts) do
     case request(:get, "/cfm/sweeps", credentials, opts) do
-      {:ok, %{body: %{"sweeps" => sweeps}}} when is_list(sweeps) -> {:ok, sweeps}
+      {:ok, %{body: %{"sweeps" => sweeps}}} when is_list(sweeps) -> map_rows(sweeps)
       {:ok, _unexpected} -> {:error, :unexpected_response_shape}
       {:error, reason} -> classify(reason)
     end
@@ -1904,16 +1939,20 @@ defmodule DpExchange.Coinbase.Rest do
   defp to_fill(%{"size_in_quote" => true}), do: {:error, {:unsupported_fill_size_unit, :quote}}
 
   defp to_fill(row) do
+    # `size` and `price` are above zero, as a trade's are: a fill of nothing, or at a price of
+    # nothing or less, parsed as numbers and reconciled as an execution. `trade_id` is a string
+    # or absent: a map or a list in its place was carried through as the id.
     with {:ok, timestamp} <- parse_time(row["trade_time"]),
-         {:ok, quantity} <- required_decimal(row["size"], :quantity),
-         {:ok, price} <- required_decimal(row["price"], :price),
+         {:ok, quantity} <- required_quantity(row["size"], :quantity),
+         {:ok, price} <- required_price(row["price"], :price),
          {:ok, order_id} <- required_id(row["order_id"], :order_id),
          {:ok, symbol} <- required_symbol(row["product_id"]),
-         {:ok, side} <- required_side(row["side"]) do
+         {:ok, side} <- required_side(row["side"]),
+         {:ok, trade_id} <- optional_trade_id(row["trade_id"]) do
       {:ok,
        %Types.Fill{
          order_id: order_id,
-         trade_id: row["trade_id"],
+         trade_id: trade_id,
          symbol: symbol,
          side: side,
          quantity: quantity,
@@ -2657,7 +2696,7 @@ defmodule DpExchange.Coinbase.Rest do
          {:ok, price} <- required_price(trade["price"], :price) do
       # The latest trade's own size: one print (dp-exchange-core issue #42). The streamed
       # `Quote` carries a rolling 24-hour total instead, and `volume_window` tells them apart.
-      volume = decimal(trade["size"])
+      volume = trade["size"] |> decimal() |> non_negative()
 
       {:ok,
        %Types.Quote{
@@ -2832,7 +2871,7 @@ defmodule DpExchange.Coinbase.Rest do
     with {:ok, at} <- parse_time(trade["time"]),
          {:ok, id} <- required_trade_id(trade["trade_id"]),
          {:ok, price} <- required_price(trade["price"], :price),
-         {:ok, quantity} <- required_decimal(trade["size"], :quantity) do
+         {:ok, quantity} <- required_quantity(trade["size"], :quantity) do
       {:ok,
        %Types.Trade{
          id: id,
@@ -2992,12 +3031,23 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp best_level([%{"price" => price, "size" => size} | _rest]) do
     case {decimal(price), decimal(size)} do
-      {%Decimal{} = parsed_price, %Decimal{} = parsed_size} -> {:ok, {parsed_price, parsed_size}}
-      _unreadable -> {:error, :unexpected_response_shape}
+      {%Decimal{} = parsed_price, %Decimal{} = parsed_size} ->
+        priced_level(parsed_price, parsed_size)
+
+      _unreadable ->
+        {:error, :unexpected_response_shape}
     end
   end
 
   defp best_level(_unreadable), do: {:error, :unexpected_response_shape}
+
+  # A best price at or below zero, or a negative size, is a level no market has: refused as
+  # `get_order_book/2` refuses the same level, not carried as the best bid or ask.
+  defp priced_level(price, size) do
+    if Decimal.positive?(price) and not Decimal.negative?(size),
+      do: {:ok, {price, size}},
+      else: {:error, :unexpected_response_shape}
+  end
 
   defp pricebook_time(%{"time" => time}) do
     case parse_time(time) do
@@ -3242,7 +3292,7 @@ defmodule DpExchange.Coinbase.Rest do
          high: high,
          low: low,
          close: close,
-         volume: decimal(candle["volume"]),
+         volume: candle["volume"] |> decimal() |> non_negative(),
          provider: :coinbase
        }}
     end
@@ -3292,7 +3342,13 @@ defmodule DpExchange.Coinbase.Rest do
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: value
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
-  defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+
+  # A JSON float (`1.0e300`) is held to the same exponent bound as a string: it parsed as
+  # `Decimal` with exponent 300 and compared, added and rounded as one.
+  defp decimal(value) when is_float(value) do
+    parsed = Decimal.from_float(value)
+    if absurd_exponent?(parsed), do: nil, else: parsed
+  end
 
   # `Decimal.new/1` raises on a string that is not a number. Coinbase sends `""` for a
   # bid or ask it has no value for, which is the same case: absent, not zero — and
@@ -3327,6 +3383,41 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp decimal(_other), do: nil
 
+  # A size, a limit price or a volume below zero is no quantity any market reports. It parses
+  # as a perfectly good number, so `decimal/1` alone let it through as one; it is `nil` here,
+  # which is what this module already answers for a value it cannot read. Zero is kept: a
+  # `"0"` filled size is a real answer ("nothing filled").
+  defp non_negative(%Decimal{} = value),
+    do: if(Decimal.negative?(value), do: nil, else: value)
+
+  defp non_negative(nil), do: nil
+
+  # A venue string that is not a string (a number, a map) is not carried into a field the
+  # contract types as `String.t() | nil`.
+  defp text_or_nil(value) when is_binary(value), do: value
+  defp text_or_nil(_other), do: nil
+
+  # A reason the venue quotes back is bounded, as `refusal/2`'s text is: it was copied whole
+  # into `{:order_rejected, _}`, `{:cancel_rejected, _}` and `{:edit_rejected, _}`.
+  defp bounded_text(text) when is_binary(text), do: String.slice(text, 0, @max_refusal_text)
+  defp bounded_text(other), do: other
+
+  # A row list the venue sends raw is a list of objects or it is not readable: an entry that is
+  # not a map is not carried through to a consumer that will index it.
+  defp map_rows(rows) do
+    if Enum.all?(rows, &is_map/1), do: {:ok, rows}, else: {:error, :unexpected_response_shape}
+  end
+
+  # A quantity (a trade's or a fill's size) is above zero: a print of nothing, or of a
+  # negative amount, is not an execution. Same reading as `required_price/2`.
+  defp required_quantity(value, field) do
+    with {:ok, parsed} <- required_decimal(value, field) do
+      if Decimal.positive?(parsed),
+        do: {:ok, parsed},
+        else: {:error, {:non_positive_quantity, field, value}}
+    end
+  end
+
   # `"1e999999999"` is finite and parses fully, but comparing or adding it builds a
   # `10 ** 999_999_999` integer (~415 MB) in the caller's process. No amount this venue
   # quotes needs more than 64 places either side of the point; wider is refused as unreadable.
@@ -3338,9 +3429,19 @@ defmodule DpExchange.Coinbase.Rest do
   # non-nil, only that the key was given. Refuse the record instead of leaking a `nil`
   # price into a `Quote`/`Trade`/`Candle`, which is the same substitution a raise would
   # have been, wearing a quieter shape.
+  #
+  # A trade id is a non-empty STRING, as the stream's is (`Socket`'s own `required_trade_id/1`
+  # refuses a number): a map, a list or a float used to be carried as the id, and a number
+  # was a different value on this path than on the stream's for the same print.
+  defp required_trade_id(id) when is_binary(id) and id != "", do: {:ok, id}
   defp required_trade_id(nil), do: {:error, {:missing_required_field, :id}}
   defp required_trade_id(""), do: {:error, {:missing_required_field, :id}}
-  defp required_trade_id(id), do: {:ok, id}
+  defp required_trade_id(_unreadable), do: {:error, :unexpected_response_shape}
+
+  # A fill's `trade_id` may be absent (`nil`), and when present is a string.
+  defp optional_trade_id(nil), do: {:ok, nil}
+  defp optional_trade_id(id) when is_binary(id), do: {:ok, id}
+  defp optional_trade_id(_unreadable), do: {:error, :unexpected_response_shape}
 
   # `Fill` names SEVEN fields its `new/1` refuses a `nil` in — `:order_id`, `:symbol`,
   # `:side`, `:quantity`, `:price`, `:timestamp`, `:provider` — and `to_fill/1` guarded
@@ -4250,19 +4351,24 @@ defmodule DpExchange.Coinbase.Rest do
   # this function's two callers is ever handed; `cancel_order/3` reads it inline at its own
   # call site instead. Kept here, it matched nothing either schema sends and would have
   # quietly done so forever without a fixture ever exercising it.
+  #
+  # Every reason is bounded (`bounded_text/1`): a venue string went whole into the
+  # `{:order_rejected, _}` / `{:close_rejected, _}` the caller logs.
   defp failure_reason(%{"error_response" => %{"new_order_failure_reason" => reason}})
        when is_binary(reason),
-       do: reason
+       do: bounded_text(reason)
 
   defp failure_reason(%{"error_response" => %{"message" => message}})
        when is_binary(message),
-       do: message
+       do: bounded_text(message)
 
   defp failure_reason(%{"error_response" => %{"error_details" => details}})
        when is_binary(details),
-       do: details
+       do: bounded_text(details)
 
-  defp failure_reason(%{"error_response" => %{"error" => error}}) when is_binary(error), do: error
+  defp failure_reason(%{"error_response" => %{"error" => error}}) when is_binary(error),
+    do: bounded_text(error)
+
   defp failure_reason(_response), do: :unspecified
 
   # A POST carrying a JSON body. Separate from `request/5` rather than an extra parameter on
@@ -4379,16 +4485,25 @@ defmodule DpExchange.Coinbase.Rest do
   defp cancel_result(%{"results" => results}, order_id) when is_list(results) do
     # A row that is not an object cannot be about this order; it used to raise here.
     case Enum.find(results, &(is_map(&1) and &1["order_id"] == order_id)) do
-      %{"success" => true} -> {:ok, :cancelled}
-      %{"success" => false, "failure_reason" => reason} -> {:refused, {:cancel_rejected, reason}}
+      %{"success" => true} ->
+        {:ok, :cancelled}
+
+      # Bounded, and a string: a venue's `failure_reason` was copied whole into the return
+      # value (a whole error page, or a map), as `refusal/2`'s text never was.
+      %{"success" => false, "failure_reason" => reason} when is_binary(reason) ->
+        {:refused, {:cancel_rejected, bounded_text(reason)}}
+
       # The venue answered about orders, and none of them was the one asked about. That is
       # not a cancelled order and it is not an error from the transport either.
-      nil -> {:error, :order_not_in_response}
+      nil ->
+        {:error, :order_not_in_response}
+
       # A row for this order that is neither a success nor a stated failure: `success: false`
       # with no `failure_reason`, or a non-boolean `success`. This used to raise
       # `CaseClauseError` in the caller's process (found 2026-10-10 by reading the clauses).
       # Neither cancelled nor refused for a stated reason, so nothing is claimed.
-      _malformed -> {:error, :unexpected_response_shape}
+      _malformed ->
+        {:error, :unexpected_response_shape}
     end
   end
 
@@ -4610,6 +4725,7 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp build_order(order, id) do
     leaf = order_leaf(order["order_configuration"])
+    filled = order["filled_size"] |> decimal() |> non_negative()
 
     %Types.Order{
       id: id,
@@ -4621,15 +4737,21 @@ defmodule DpExchange.Coinbase.Rest do
       # partially-filled order's remaining size read as zero on every read after placement.
       # The venue echoes what was actually requested in `order_configuration`, the same
       # place `closing_configuration/1` below already reads it from for a closing order.
-      quantity: decimal(leaf["base_size"]),
+      #
+      # A size or price below zero is `nil`, as an unreadable one is (`non_negative/1`): a
+      # `filled_size` of `"-1"` was a negative filled quantity on a real-looking order.
+      quantity: leaf["base_size"] |> decimal() |> non_negative(),
       # The limit and stop prices the order was placed with, from the same echoed leaf. They
       # were never read, so every order read back had `price: nil` while `place_order/3`'s
       # own return and the fake both carried one. Absent on a market leaf, where `nil` is true.
-      price: decimal(leaf["limit_price"]),
-      stop_price: decimal(leaf["stop_price"]),
-      filled_quantity: decimal(order["filled_size"]),
+      price: leaf["limit_price"] |> decimal() |> non_negative(),
+      stop_price: leaf["stop_price"] |> decimal() |> non_negative(),
+      filled_quantity: filled,
       average_price:
-        average_price(decimal(order["average_filled_price"]), decimal(order["filled_size"])),
+        average_price(
+          order["average_filled_price"] |> decimal() |> non_negative(),
+          filled
+        ),
       fee: decimal(order["total_fees"]),
       # `Order` has no `fee_currency` field
       # (docs/reference/coinbase/openapi/at-spec.yaml:8223-8330) — this used to read one
@@ -4744,6 +4866,12 @@ defmodule DpExchange.Coinbase.Rest do
     {:refused, {:preview_rejected, errs}}
   end
 
+  # `errs` is the venue's list of reasons. Anything else that is present (a string, a map, a
+  # number) is not an empty list: it fell through to the success clause below and a preview
+  # the venue had put an error on read as a green light.
+  defp preview_result(%{"errs" => errs}) when not (is_nil(errs) or is_list(errs)),
+    do: {:error, :unexpected_response_shape}
+
   defp preview_result(%{} = response) do
     {:ok,
      %{
@@ -4794,6 +4922,10 @@ defmodule DpExchange.Coinbase.Rest do
   defp edit_preview_result(%{"errors" => errors}) when is_list(errors) and errors != [] do
     {:refused, {:edit_preview_rejected, errors}}
   end
+
+  # As `preview_result/1`: a present `errors` that is not a list is unreadable, not empty.
+  defp edit_preview_result(%{"errors" => bad}) when not (is_nil(bad) or is_list(bad)),
+    do: {:error, :unexpected_response_shape}
 
   defp edit_preview_result(%{} = response) do
     {:ok,
@@ -5080,8 +5212,11 @@ defmodule DpExchange.Coinbase.Rest do
         &is_binary/1
       )
 
-    Enum.find(reasons, &(not String.starts_with?(&1, "UNKNOWN_"))) ||
-      List.first(reasons) || :unspecified
+    reason =
+      Enum.find(reasons, &(not String.starts_with?(&1, "UNKNOWN_"))) ||
+        List.first(reasons) || :unspecified
+
+    bounded_text(reason)
   end
 
   defp edit_failure(_response), do: :unspecified

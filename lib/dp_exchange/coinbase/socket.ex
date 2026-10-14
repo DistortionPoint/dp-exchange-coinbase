@@ -918,7 +918,27 @@ defmodule DpExchange.Coinbase.Socket do
     state
   end
 
+  # A data channel this package subscribes to whose `events` is absent, `null` or not a list
+  # (the clauses above guard `is_list/1`) fell to the catch-all below and was dropped with no
+  # notice: a venue sending that shape on `ticker` read as a quiet market. Reported once per
+  # fault, as an unreadable `market_trades` event already is.
+  defp dispatch(%{"channel" => channel} = frame, state)
+       when channel in ["ticker", "l2_data", "market_trades"] do
+    extra = %{frame: brief(Map.delete(frame, "events"))}
+    report_quality(state, streamed_label(channel), channel, :unexpected_event, extra)
+  end
+
+  # A frame that decoded as JSON but is not an object (`[]`, `42`, `"x"`, `null`) carries no
+  # channel to dispatch on; it is reported like an unparseable one, not dropped.
+  defp dispatch(other, state) when not is_map(other),
+    do: report_quality(state, :frame, brief(other), :unexpected_frame)
+
   defp dispatch(_other, state), do: state
+
+  # The label a data-quality notice uses for a subscribed channel's wire name.
+  defp streamed_label("ticker"), do: :ticker
+  defp streamed_label("l2_data"), do: :level2
+  defp streamed_label("market_trades"), do: :market_trades
 
   # Coinbase reports both an auth failure and a capacity refusal through the identical
   # `{"type":"error","message":...}` shape, and they mean nothing alike: one says a
@@ -981,7 +1001,7 @@ defmodule DpExchange.Coinbase.Socket do
       # were one print and read a pair's average volume about 1000× too high
       # (dp-exchange-core issue #42), so it is labelled `:rolling_24h`. Per-interval volume
       # comes from the `:trades` stream.
-      volume = decimal(ticker["volume_24_h"])
+      volume = ticker["volume_24_h"] |> decimal() |> non_negative()
 
       {:ok,
        %Types.Quote{
@@ -1067,7 +1087,7 @@ defmodule DpExchange.Coinbase.Socket do
     with {:ok, id} <- required_trade_id(trade["trade_id"]),
          {:ok, at} <- parse_time(trade["time"]),
          {:ok, price} <- required_price(trade["price"], :price),
-         {:ok, quantity} <- required_decimal(trade["size"], :quantity) do
+         {:ok, quantity} <- required_quantity(trade["size"], :quantity) do
       {:ok,
        %Types.Trade{
          id: id,
@@ -1424,6 +1444,23 @@ defmodule DpExchange.Coinbase.Socket do
       parsed -> {:ok, parsed}
     end
   end
+
+  # A trade's size is above zero: a print of nothing, or of a negative amount, parses cleanly
+  # and was delivered as an execution. Refused through the same notice as an unreadable one.
+  defp required_quantity(value, field) do
+    with {:ok, parsed} <- required_decimal(value, field) do
+      if Decimal.positive?(parsed),
+        do: {:ok, parsed},
+        else: {:error, {:non_positive_quantity, field, brief(value)}}
+    end
+  end
+
+  # A volume below zero is no volume. It is `nil`, "not stated", as an unreadable one is,
+  # rather than a negative 24-hour total on a real-looking quote.
+  defp non_negative(%Decimal{} = value),
+    do: if(Decimal.negative?(value), do: nil, else: value)
+
+  defp non_negative(nil), do: nil
 
   # A traded price is above zero (family convention MD6): a zero or negative one parses
   # cleanly and would otherwise be delivered as a price no market printed.
