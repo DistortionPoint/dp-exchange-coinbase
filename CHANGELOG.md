@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.125] - 2026-10-14
+
 - **A retried channel subscribe re-subscribed a symbol unsubscribed while it was pending.** It
   carried the list from when it failed; it now sends only what its shard still holds, and
   nothing at all when that is empty. On `level2` the resurrected symbol held one of the 30
