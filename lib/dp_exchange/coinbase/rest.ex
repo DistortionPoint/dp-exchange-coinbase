@@ -2443,7 +2443,7 @@ defmodule DpExchange.Coinbase.Rest do
     if Keyword.get(opts, :include_partial) == true, do: limit, else: min(limit + 1, @max_candles)
   end
 
-  # The candles endpoint has a `limit` ("350 by default, max 350", at-spec.yaml:455-462), so
+  # The candles endpoint has a `limit` ("350 by default, max 350", at-spec.yaml:476-482), so
   # the option is sent, never ignored. Zero, a negative, a float, a string and anything above
   # the venue's maximum are refused rather than clamped.
   defp candle_limit(opts) do

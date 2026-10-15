@@ -88,7 +88,7 @@ of two ways, and which one it is depends on what the endpoint gives it:
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.70`.
+`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.95`.
 
 ```elixir
 # before
@@ -504,7 +504,8 @@ each print as a `DpExchange.Core.Types.Trade`. It is **not** in the default, whi
 - `market_trades` shares `ticker`'s 100-pairs-per-socket sharding. That figure is **not
   measured** for this channel, and the venue publishes no ceiling for it. The frame shape and
   the side direction were observed live on 2026-10-02 (BTC-USD, about 10 seconds).
-- The fake takes the same option per call: `Fake.subscribe(symbols, channels: [:quotes,
+- The fake takes the same option per call (its default is `[:quotes]`, where the real feed's
+  is `[:quotes, :order_book]`): `Fake.subscribe(symbols, channels: [:quotes,
   :trades])` pushes one `Trade` per symbol and reports `:trades` in `coverage_by_kind/1`. As
   on the real feed, a kind not named is not pushed: `channels: [:trades]` pushes no `Quote`
   and reports no `:quotes` coverage. An unknown kind or an empty list is refused as

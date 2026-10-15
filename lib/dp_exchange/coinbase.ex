@@ -351,7 +351,7 @@ defmodule DpExchange.Coinbase do
       # "required" or "not", and neither is true for the package as a whole. The one
       # exception is `get_top_of_book/2`, which genuinely has no public form — see its
       # own doc and `docs/reference/coinbase/endpoint-inventory.md` — but one endpoint's
-      # exception does not make `:required` the honest word for the other forty-eight.
+      # exception does not make `:required` the honest word for the other forty-nine.
       credential_benefit: :higher_ceiling,
       public_ceiling: %{limit: 3, per_ms: 1_000},
       authenticated_ceiling: %{limit: 10, per_ms: 1_000},

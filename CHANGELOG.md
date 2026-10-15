@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **`dp_exchange_core` floor raised to `~> 0.3.95` (tick AE).** The old floor predated `wanted/1`
+  (0.3.93), the conformance group 41 options this package's contract test passes (0.3.94,
+  ignored by an older Core: a silent pass) and the groups that no longer pass vacuously
+  (0.3.95).
+
+### Fixed
+
+- Documentation accuracy only, no behaviour change (tick AE). The README counted 88 callbacks
+  with 49 `:experimental`; the contract has 89 (`wanted/1` joined it) and 50 are
+  `:experimental`, 39 `:unsupported`. `usage-rules.md` now says the Fake's `subscribe/2`
+  defaults to `channels: [:quotes]` where the real feed defaults to `[:quotes, :order_book]`.
+  A stale spec line reference in `Rest` (the candles `limit`, `at-spec.yaml:476-482`) and the
+  "other forty-eight" count in `capabilities/0`'s comment (forty-nine) were corrected.
+
 ## [0.3.128] - 2026-10-14
 
 ### Added
