@@ -20,6 +20,27 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Decoders refuse a reply that names the same thing twice, and an impossible bar (tick AF).**
+  `get_historical_prices/4` refuses two bars with one `opened_at` and a bar whose high is
+  below its low or whose open/close lies outside that range; `get_trades/2` refuses a repeated
+  `trade_id`; `get_order_book/2` refuses two rows at one price on a side; `get_orders/2` a
+  repeated order id; `get_trade_history/2` a fill row repeated byte for byte;
+  `get_balances/2` the same account row twice; the catalogue reads
+  (`get_symbols/1`, `get_market_overview/1`, `list_instruments/1`, `get_alias_map/1`) refuse
+  two rows that disagree about one product and keep a row repeated verbatim once. All answer
+  `{:error, :unexpected_response_shape}`; each used to return a plausible, wrong list.
+- **A balance below zero, and a non-positive overview price, are not stated.**
+  `available_balance`/`hold` below zero are `nil` (so is the total), and `get_market_overview/1`
+  answers `nil` for a `price`, `high_24h` or `low_24h` at or below zero and for a negative
+  `volume_24h`.
+- **`Fake.get_order_book/2` caps a side at 50 levels.** A valid `depth: 2_000_000_000` built
+  two billion levels and never returned. **`Fake.get_symbols/1`, `get_market_overview/1` and
+  `list_instruments/1` now refuse a malformed `:credentials`**, as the real catalogue reads
+  do (they ignored it).
+- **A stale silence-check timer is cancelled.** `Socket` kept no ref for its 15 s silence
+  check, so a dropped connection's pending tick fired into the next connection. The ref is
+  kept (`:silence_timer`) and cancelled on disconnect, on a new connect and when re-armed.
+
 ## [0.3.129] - 2026-10-15
 
 - **`dp_exchange_core` floor raised to `~> 0.3.95` (tick AE).** The old floor predated `wanted/1`

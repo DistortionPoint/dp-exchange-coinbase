@@ -70,6 +70,9 @@ defmodule DpExchange.Coinbase.Fake do
 
   @symbols ~w(BTC-USD BTC-USDC ETH-USD ETH-EUR)
 
+  # The most levels a side of the fake's book carries, whatever `:depth` asks for.
+  @max_book_depth 50
+
   # Process-dictionary key for the symbols subscribed WITH `:trades` — see `subscribe/2`.
   @trades_key {__MODULE__, :trades}
   @order_book_key {__MODULE__, :order_book}
@@ -291,13 +294,18 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.get_symbols/1`.
   """
   @impl true
-  def get_symbols(_opts \\ []) do
-    with_injection(fn -> {:ok, @symbols} end)
+  def get_symbols(opts \\ []) do
+    # As `Rest.fetch_products/1`: a credential, when given, is signed with, so a malformed
+    # one is refused rather than read as none.
+    with_injection(fn ->
+      with :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)),
+           do: {:ok, @symbols}
+    end)
   end
 
   @doc """
-  An in-memory book around the symbol's price: `opts[:depth]` levels (default 3) a side,
-  bids descending and asks ascending, with no sequence.
+  An in-memory book around the symbol's price: `opts[:depth]` levels (default 3, at most 50)
+  a side, bids descending and asks ascending, with no sequence.
 
   See `c:DpExchange.Core.Venue.get_order_book/2`.
   """
@@ -312,7 +320,11 @@ defmodule DpExchange.Coinbase.Fake do
          :ok <- Rest.validate_book_options(opts) do
       case Map.fetch(@price, native(symbol)) do
         {:ok, price} ->
-          depth = Keyword.get(opts, :depth) || 3
+          # `Rest` accepts any depth up to the spec's `int32`, and the venue answers with the
+          # levels it has: a book is never as deep as the number asked for. This built one
+          # level per step of `:depth`, so `depth: 2_000_000_000` (valid) never returned.
+          # Capped at what a real book plausibly holds; fewer than asked is an ordinary reply.
+          depth = min(Keyword.get(opts, :depth) || 3, @max_book_depth)
           {:ok, fake_book(symbol, Decimal.new(price), depth)}
 
         :error ->
@@ -434,22 +446,24 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.get_market_overview/1`.
   """
   @impl true
-  def get_market_overview(_opts) do
+  def get_market_overview(opts) do
     with_injection(fn ->
-      {:ok,
-       Map.new(@symbols, fn symbol ->
-         price = Decimal.new(@price[symbol])
+      with :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
+        {:ok,
+         Map.new(@symbols, fn symbol ->
+           price = Decimal.new(@price[symbol])
 
-         {symbol,
-          %{
-            price: price,
-            price_change_24h_pct: Decimal.new("1.25"),
-            volume_24h: Decimal.new("1200.5"),
-            high_24h: Decimal.add(price, Decimal.new("500")),
-            low_24h: Decimal.sub(price, Decimal.new("500")),
-            status: "online"
-          }}
-       end)}
+           {symbol,
+            %{
+              price: price,
+              price_change_24h_pct: Decimal.new("1.25"),
+              volume_24h: Decimal.new("1200.5"),
+              high_24h: Decimal.add(price, Decimal.new("500")),
+              low_24h: Decimal.sub(price, Decimal.new("500")),
+              status: "online"
+            }}
+         end)}
+      end
     end)
   end
 
@@ -473,21 +487,24 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.list_instruments/1`.
   """
   @impl true
-  def list_instruments(_opts) do
+  def list_instruments(opts) do
     with_injection(fn ->
-      {:ok,
-       Enum.map(@symbols, fn symbol ->
-         [base, quote_asset] = String.split(symbol, "-")
-
-         Instrument.new(
-           symbol: symbol,
-           base: base,
-           quote: quote_asset,
-           instrument: :spot,
-           status: :tradable
-         )
-       end)}
+      with :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
+        {:ok, Enum.map(@symbols, &fake_instrument/1)}
+      end
     end)
+  end
+
+  defp fake_instrument(symbol) do
+    [base, quote_asset] = String.split(symbol, "-")
+
+    Instrument.new(
+      symbol: symbol,
+      base: base,
+      quote: quote_asset,
+      instrument: :spot,
+      status: :tradable
+    )
   end
 
   @doc """

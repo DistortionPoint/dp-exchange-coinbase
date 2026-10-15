@@ -343,7 +343,22 @@ defmodule DpExchange.Coinbase.Rest do
   defp fetch_products(opts) do
     credentials = opts_credentials(opts)
     path = if credentials, do: "/products", else: "/market/products"
-    all_products(credentials, path, opts, nil, [], 0)
+
+    with {:ok, products} <- all_products(credentials, path, opts, nil, [], 0),
+         do: distinct_products(products)
+  end
+
+  # One product named twice. The same row repeated (a page boundary that overlaps) is one
+  # fact and is kept once; two rows that DISAGREE about one product are not, and which to
+  # believe is not ours to guess, so the catalogue is refused. `get_symbols/1` listed the
+  # name twice, `get_market_overview/1` silently kept whichever came last, and
+  # `list_instruments/1` returned two instruments for one symbol.
+  defp distinct_products(products) do
+    by_symbol = Enum.group_by(products, &SymbolFormat.to_canonical_symbol(&1["product_id"]))
+
+    if Enum.all?(by_symbol, fn {_symbol, rows} -> length(Enum.uniq(rows)) == 1 end),
+      do: {:ok, Enum.uniq(products)},
+      else: {:error, :unexpected_response_shape}
   end
 
   @max_product_pages 50
@@ -407,13 +422,22 @@ defmodule DpExchange.Coinbase.Rest do
 
     {symbol,
      %{
-       price: decimal(product["price"]),
+       price: positive_or_nil(product["price"]),
        price_change_24h_pct: decimal(product["price_percentage_change_24h"]),
-       volume_24h: decimal(product["volume_24h"]),
-       high_24h: decimal(product["high_24h"]),
-       low_24h: decimal(product["low_24h"]),
+       volume_24h: product["volume_24h"] |> decimal() |> non_negative(),
+       high_24h: positive_or_nil(product["high_24h"]),
+       low_24h: positive_or_nil(product["low_24h"]),
        status: text_or_nil(product["status"])
      }}
+  end
+
+  # A price at or below zero is no price any market traded at (MD6): unreadable, so `nil`
+  # ("the venue did not say"), as the same field absent or garbled already is.
+  defp positive_or_nil(value) do
+    case decimal(value) do
+      %Decimal{} = parsed -> if Decimal.positive?(parsed), do: parsed
+      nil -> nil
+    end
   end
 
   defp to_instrument(product) do
@@ -1758,7 +1782,18 @@ defmodule DpExchange.Coinbase.Rest do
       {:ok, balances} -> {:ok, Enum.reverse(balances)}
       error -> error
     end
+    |> distinct_balances(accounts)
   end
+
+  # The same account row twice is one balance counted twice, which a consumer summing a
+  # currency across accounts doubles. Refused, never collapsed.
+  defp distinct_balances({:ok, _balances} = result, accounts) do
+    if length(accounts) == length(Enum.uniq(accounts)),
+      do: result,
+      else: {:error, :unexpected_response_shape}
+  end
+
+  defp distinct_balances(error, _accounts), do: error
 
   defp required_currency(code) when is_binary(code) and code != "", do: {:ok, code}
   defp required_currency(_absent), do: {:error, :unexpected_response_shape}
@@ -1770,7 +1805,9 @@ defmodule DpExchange.Coinbase.Rest do
   defp total_balance(_available, nil), do: nil
   defp total_balance(available, hold), do: Decimal.add(available, hold)
 
-  defp amount(%{"value" => value}), do: decimal(value)
+  # A spot balance or hold below zero is no amount this venue holds: not stated (`nil`), which
+  # also leaves the total unstated, rather than carried as a negative and summed.
+  defp amount(%{"value" => value}), do: value |> decimal() |> non_negative()
   defp amount(_absent), do: nil
 
   @doc """
@@ -1821,7 +1858,8 @@ defmodule DpExchange.Coinbase.Rest do
 
     with :ok <- validate_fill_filters(opts),
          {:ok, rows} <- all_fills(credentials, opts, nil, [], 0),
-         :ok <- typed_fills(rows) do
+         :ok <- typed_fills(rows),
+         :ok <- distinct_fills(rows) do
       rows
       # A row that is not an object is kept so `to_fill/1` can refuse it. Filtering it out
       # here would drop it silently, and a fill history with a gap is a truncated one.
@@ -1858,6 +1896,19 @@ defmodule DpExchange.Coinbase.Rest do
     if Enum.all?(rows, &(not is_map(&1) or is_binary(&1["trade_type"]))),
       do: :ok,
       else: {:error, {:missing_required_field, :trade_type}}
+  end
+
+  # The same fill row twice is one execution counted twice: a pagination walk that re-sends
+  # a row across a page boundary doubles a position and a cost basis, both plausible. Only
+  # byte-identical rows count: a trade and its reversal share a `trade_id`, and rows that
+  # differ are left to be read as the separate fills they claim to be. Refused, never
+  # silently collapsed: which copy is the fill is the venue's to say.
+  defp distinct_fills(rows) do
+    maps = Enum.filter(rows, &is_map/1)
+
+    if length(maps) == length(Enum.uniq(maps)),
+      do: :ok,
+      else: {:error, :unexpected_response_shape}
   end
 
   defp all_fills(_credentials, _opts, _cursor, _acc, page) when page >= @max_fill_pages,
@@ -2849,12 +2900,26 @@ defmodule DpExchange.Coinbase.Rest do
     |> case do
       # Oldest first, by the venue's own time — see `Core.Venue`'s callback doc.
       {:ok, decoded} ->
-        sorted = decoded |> Enum.reverse() |> Enum.sort_by(& &1.timestamp, DateTime)
-        {:ok, trades_before(sorted, finish)}
+        ordered = Enum.reverse(decoded)
+
+        # One print named twice is not two prints: a consumer summing the tape counts it
+        # twice, and one deduplicating on `id` keeps an arbitrary copy. Refused, not merged.
+        if unique_by?(ordered, & &1.id) do
+          sorted = Enum.sort_by(ordered, & &1.timestamp, DateTime)
+          {:ok, trades_before(sorted, finish)}
+        else
+          {:error, :unexpected_response_shape}
+        end
 
       error ->
         error
     end
+  end
+
+  # Whether no two entries of `items` share a key.
+  defp unique_by?(items, key_fun) do
+    keys = Enum.map(items, key_fun)
+    length(keys) == length(Enum.uniq(keys))
   end
 
   # `trade_id` is guarded like the price and the size, because `Core.Types.Trade` enforces it
@@ -3208,9 +3273,18 @@ defmodule DpExchange.Coinbase.Rest do
         {:halt, {:error, :unexpected_response_shape}}
     end)
     |> case do
-      {:ok, levels} -> {:ok, Enum.reverse(levels)}
+      {:ok, levels} -> distinct_levels(Enum.reverse(levels))
       error -> error
     end
+  end
+
+  # Two rows at one price are not one level: summing them, taking the first or taking the
+  # last each states a size the venue did not, and `1.0` and `1.00` are the same price.
+  # Refused, as an unreadable level is.
+  defp distinct_levels(levels) do
+    if unique_by?(levels, fn {price, _size} -> Decimal.normalize(price) end),
+      do: {:ok, levels},
+      else: {:error, :unexpected_response_shape}
   end
 
   # MD5/MD6: a price of zero or less, or a negative size, is not a level any market has and
@@ -3268,12 +3342,21 @@ defmodule DpExchange.Coinbase.Rest do
       end
     end)
     |> case do
-      {:ok, bars} -> {:ok, bars |> Enum.reverse() |> Enum.sort_by(& &1.opened_at, DateTime)}
+      {:ok, bars} -> series(Enum.reverse(bars))
       error -> error
     end
   end
 
   defp to_candles(_body, _symbol, _timeframe), do: {:error, :unexpected_response_shape}
+
+  # Two bars opened at the same instant are a series that contradicts itself: which one is
+  # the bar is not something to guess, and returning both gives a consumer two closes for
+  # one bucket. Refused. Otherwise oldest first, whatever order the venue sent them in.
+  defp series(bars) do
+    if unique_by?(bars, & &1.opened_at),
+      do: {:ok, Enum.sort_by(bars, & &1.opened_at, DateTime)},
+      else: {:error, :unexpected_response_shape}
+  end
 
   defp to_candle(candle, _symbol, _timeframe) when not is_map(candle),
     do: {:error, :unexpected_response_shape}
@@ -3283,7 +3366,8 @@ defmodule DpExchange.Coinbase.Rest do
          {:ok, open} <- required_price(candle["open"], :open),
          {:ok, high} <- required_price(candle["high"], :high),
          {:ok, low} <- required_price(candle["low"], :low),
-         {:ok, close} <- required_price(candle["close"], :close) do
+         {:ok, close} <- required_price(candle["close"], :close),
+         :ok <- consistent_bar(open, high, low, close) do
       {:ok,
        %Types.Candle{
          symbol: symbol,
@@ -3298,6 +3382,17 @@ defmodule DpExchange.Coinbase.Rest do
          provider: :coinbase
        }}
     end
+  end
+
+  # A bar whose high is below its low, or whose open or close lies outside that range, cannot
+  # have traded: every number in it parses and is positive, and the bar is still impossible.
+  # Refused rather than carried, as a quote read from it would be a plausible wrong one.
+  defp consistent_bar(open, high, low, close) do
+    inside? = fn price -> Decimal.lte?(low, price) and Decimal.lte?(price, high) end
+
+    if Decimal.lte?(low, high) and inside?.(open) and inside?.(close),
+      do: :ok,
+      else: {:error, :unexpected_response_shape}
   end
 
   # An undated bar cannot be placed in a series, and the local clock would place it wrongly
@@ -4572,10 +4667,22 @@ defmodule DpExchange.Coinbase.Rest do
       # `to_order/1`; skipping it instead would hand back the truncated order list this
       # function's doc already names as the wrong shape.
       if Enum.all?(orders, &is_map/1),
-        do: orders |> Enum.reduce_while({:ok, []}, &accumulate_order/2) |> reversed(),
+        do: decode_orders(orders),
         else: {:error, :unexpected_response_shape}
     end
   end
+
+  defp decode_orders(rows) do
+    rows |> Enum.reduce_while({:ok, []}, &accumulate_order/2) |> reversed() |> distinct_orders()
+  end
+
+  # One order listed twice (a page boundary that overlaps) is double-counted exposure when a
+  # consumer sums open orders; which copy is current is the venue's to say, so it is refused.
+  defp distinct_orders({:ok, orders} = result) do
+    if unique_by?(orders, & &1.id), do: result, else: {:error, :unexpected_response_shape}
+  end
+
+  defp distinct_orders(other), do: other
 
   defp accumulate_order(row, {:ok, acc}) do
     case to_order(row) do

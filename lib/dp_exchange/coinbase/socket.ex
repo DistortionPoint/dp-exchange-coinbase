@@ -426,6 +426,8 @@ defmodule DpExchange.Coinbase.Socket do
       # check. See the moduledoc's "A connection that has gone silent is closed".
       last_frame_at: nil,
       silence_check: nil,
+      # The timer ref of that check's one pending tick, cancelled when the connection ends.
+      silence_timer: nil,
       # When this connection's `handle_connect/2` ran (`nil` while disconnected), and how
       # many consecutive sessions dropped before `@stable_session_ms`. See
       # `handle_disconnect/2`.
@@ -611,8 +613,6 @@ defmodule DpExchange.Coinbase.Socket do
     # from `handle_info/2`, on this connection and on every reconnect. See the moduledoc's
     # "A quiet connection is kept open by the venue's heartbeats".
     send(self(), :subscribe_heartbeats)
-    check = make_ref()
-    schedule_silence_check(check)
 
     {:ok,
      %{
@@ -620,9 +620,9 @@ defmodule DpExchange.Coinbase.Socket do
        | connected_once?: true,
          last_seq: nil,
          stale_run: nil,
-         last_frame_at: now_ms(),
-         silence_check: check
+         last_frame_at: now_ms()
      }
+     |> arm_silence_check(make_ref())
      |> Map.put(:connected_at, now_ms())
      |> Map.put(:reported_faults, MapSet.new())
      |> Map.put(:out_of_order_at, nil)
@@ -650,10 +650,9 @@ defmodule DpExchange.Coinbase.Socket do
         )
       )
 
-      {:close, %{state | silence_check: nil}}
+      {:close, state |> disarm_silence_check() |> Map.put(:silence_check, nil)}
     else
-      schedule_silence_check(check)
-      {:ok, state}
+      {:ok, arm_silence_check(state, check)}
     end
   end
 
@@ -673,8 +672,25 @@ defmodule DpExchange.Coinbase.Socket do
 
   def handle_info(_message, state), do: {:ok, state}
 
-  defp schedule_silence_check(check),
-    do: Process.send_after(self(), {:silence_check, check}, @silence_check_every_ms)
+  # The one pending check timer is kept in the state (`:silence_timer`) so that a new
+  # connection, or the connection's end, cancels it instead of leaving up to
+  # `@silence_check_every_ms` of a dead connection's timer to fire into the next one. A state
+  # built by hand without the key simply has nothing to cancel.
+  defp arm_silence_check(state, check) do
+    state = disarm_silence_check(state)
+    timer = Process.send_after(self(), {:silence_check, check}, @silence_check_every_ms)
+
+    state |> Map.put(:silence_check, check) |> Map.put(:silence_timer, timer)
+  end
+
+  defp disarm_silence_check(state) do
+    case Map.get(state, :silence_timer) do
+      timer when is_reference(timer) -> Process.cancel_timer(timer)
+      _none -> :ok
+    end
+
+    Map.put(state, :silence_timer, nil)
+  end
 
   defp now_ms, do: System.monotonic_time(:millisecond)
 
@@ -719,6 +735,10 @@ defmodule DpExchange.Coinbase.Socket do
         stable_session?(state) -> 0
         true -> Map.get(state, :short_sessions, 0) + 1
       end
+
+    # The dropped connection's silence check goes with it: its timer is cancelled here rather
+    # than left to fire (and be ignored) into the next connection.
+    state = disarm_silence_check(state)
 
     attempt = attempt_number + short_sessions
     # Jittered per socket — see `jittered_delay_ms/1`. The telemetry event below reports the

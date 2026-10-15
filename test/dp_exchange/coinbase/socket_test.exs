@@ -204,8 +204,38 @@ defmodule DpExchange.Coinbase.SocketTest do
           last_frame_at: System.monotonic_time(:millisecond)
       }
 
-      assert {:ok, ^live} = Socket.handle_info({:silence_check, check}, live)
+      assert {:ok, rearmed} = Socket.handle_info({:silence_check, check}, live)
       refute_received {:dp_exchange, :coinbase, %Notice{kind: :degraded}}
+
+      # Re-armed for the same connection, and the pending timer is kept so it can be
+      # cancelled when the connection ends rather than left to fire into the next one.
+      assert rearmed.silence_check == check
+      assert is_reference(rearmed.silence_timer)
+      assert Map.delete(rearmed, :silence_timer) == live
+      assert is_integer(Process.cancel_timer(rearmed.silence_timer))
+    end
+
+    test "a reconnect cancels the dropped connection's pending silence timer" do
+      timer = Process.send_after(self(), :never_delivered, 600_000)
+      armed = state() |> Map.put(:silence_check, make_ref()) |> Map.put(:silence_timer, timer)
+
+      assert {:reconnect, after_drop} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, armed)
+
+      assert after_drop.silence_timer == nil
+      assert Process.cancel_timer(timer) == false
+    end
+
+    test "a new connection cancels the previous connection's pending silence timer" do
+      first = Process.send_after(self(), :never_delivered, 600_000)
+      armed = state() |> Map.put(:silence_check, make_ref()) |> Map.put(:silence_timer, first)
+
+      assert {:ok, connected} = Socket.handle_connect(%{}, armed)
+
+      assert Process.cancel_timer(first) == false
+      assert is_reference(connected.silence_timer)
+      assert connected.silence_timer != first
+      assert is_integer(Process.cancel_timer(connected.silence_timer))
     end
 
     test "a check left over from an earlier connection does nothing" do
@@ -1520,7 +1550,10 @@ defmodule DpExchange.Coinbase.SocketTest do
       # Nothing to wipe means nothing changes: nothing beyond `:delivering` (kept
       # deliberately, per the moduledoc) is even present to compare.
       # (`:connected_at` is reconnect-backoff bookkeeping, not data.)
-      assert Map.drop(after_disconnect, [:connected_at]) == Map.drop(s, [:connected_at])
+      # (`:silence_timer` is the liveness timer, cancelled on disconnect.)
+      assert Map.drop(after_disconnect, [:connected_at, :silence_timer]) ==
+               Map.drop(s, [:connected_at, :silence_timer])
+
       refute Map.has_key?(after_disconnect, :books)
     end
   end

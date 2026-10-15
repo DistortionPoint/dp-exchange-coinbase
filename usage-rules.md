@@ -1297,6 +1297,28 @@ A `Balance`'s own `balance` field may still be `nil`, and that is a different st
 venue named the asset and did not state a quantity for it. Read that as unknown, never as
 zero.
 
+`{:error, :unexpected_response_shape}` is also what a reply that **names the same thing
+twice** answers, because a duplicate is not something to merge or pick between:
+
+- `get_historical_prices/4` — two bars with one `opened_at`, or a bar whose high is below its
+  low or whose open or close lies outside that range.
+- `get_trades/2` — one `trade_id` twice.
+- `get_order_book/2` — two rows at one price on one side (`100.0` and `100.00` are one price).
+- `get_orders/2` — one order id twice. `get_trade_history/2` — a fill row repeated byte for
+  byte (a fill and its reversal share a `trade_id` and are two rows).
+- `get_balances/2` — the same account row twice.
+- `get_symbols/1`, `get_market_overview/1`, `list_instruments/1`, `get_alias_map/1` — two
+  catalogue rows that disagree about one product. The same row repeated is kept once.
+
+A balance's `available_balance` or `hold` below zero is not stated (`nil`, and so the total is
+`nil`), and a market-overview `price`, `high_24h` or `low_24h` at or below zero, or a negative
+`volume_24h`, is `nil`: the venue named a number no market holds, and `nil` says "not stated".
+
+`DpExchange.Coinbase.Fake.get_order_book/2` returns at most 50 levels a side whatever
+`:depth` asks for, as a real book holds fewer levels than a large depth names; its three
+catalogue reads (`get_symbols/1`, `get_market_overview/1`, `list_instruments/1`) refuse a
+malformed `:credentials` as the real path does.
+
 ## Every negative here is audited
 
 `docs/reference/coinbase/negative-claims.md` lists each one with the source and date
