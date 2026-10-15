@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.130] - 2026-10-15
+
 - **Decoders refuse a reply that names the same thing twice, and an impossible bar (tick AF).**
   `get_historical_prices/4` refuses two bars with one `opened_at` and a bar whose high is
   below its low or whose open/close lies outside that range; `get_trades/2` refuses a repeated
