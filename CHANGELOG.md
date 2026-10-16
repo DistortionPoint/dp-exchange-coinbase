@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Retries on keyed or repeat-safe writes are requested explicitly (tick AH).** Core 0.3.98
+  sends a non-GET once by default. `Rest` (orders, close position, previews, convert quote,
+  rename, margin setting) and `Prime` (keyed staking writes, previews, validator query) now
+  pass `retry_attempts: 3` via `put_new`: behaviour is unchanged on any Core and a caller
+  can still lower it. Writes with no venue key (`once/1` paths) still send once. Docs that
+  said Core retries writes by default were corrected.
+
+- **Prime staking writes follow DV6 (tick AH).** A Prime write's first-attempt 4xx was a
+  refusal only for 400/401/403/404; a 409 or 422 fell through to
+  `{:error, {:write_unconfirmed, key, _}}`, inviting a retry of a request the venue had
+  plainly declined, and a first-attempt 429 was unconfirmed too instead of a plain
+  `{:error, _}`. Every first-attempt 4xx except 429 is now `{:refused, _}`; a first-attempt
+  429 is a plain error; either answered to an internal retry stays unconfirmed.
+
 ## [0.3.132] - 2026-10-16
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

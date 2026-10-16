@@ -10,8 +10,9 @@ This file is only what is **specific to Coinbase**.
 
 ## A money-moving call is either keyed or sent once — never retried blind
 
-`Core.HttpClient` retries a timeout or a 5xx three times by default, and that is safe only
-when the venue can tell the second attempt from the first. This package makes that true one
+Retrying a timeout or a 5xx is safe only when the venue can tell the second attempt from the
+first. `Core.HttpClient` sends a non-GET once by default (a GET three times); this package
+requests three attempts explicitly for a keyed or repeat-safe write. It makes that true one
 of two ways, and which one it is depends on what the endpoint gives it:
 
 - **Orders and Prime staking send an idempotency key**, generated when you do not supply
@@ -47,8 +48,8 @@ of two ways, and which one it is depends on what the endpoint gives it:
   `{:error, :unexpected_response_shape}` (or, for a commit with an unreadable trade,
   `{:error, {:unknown_conversion_status, _}}` / `{:error, {:missing_required_field, :id}}`),
   all of which read as "nothing happened". A venue `4xx` answered to the first attempt
-  (any status except 429, which is a plain `{:error, _}`) answers `{:refused, _}` (Prime
-  writes keep their own refusal set). Validation, credentials, our own rate limiter refusing before a send and
+  (any status except 429, which is a plain `{:error, _}`) answers `{:refused, _}`, Prime
+  staking writes included. Validation, credentials, our own rate limiter refusing before a send and
   a signing failure stay plain `{:error, _}`.
 - **`{:error, {:replace_accepted_unread, order_id, reason}}` from `replace_order/4`
   means the edit WAS applied.** The read-back of the order failed afterwards. Do not edit

@@ -571,7 +571,7 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       wait_until(fn -> :sys.get_state(feed).alias_map_status == :ok end)
 
       assert :ok = Feed.subscribe_notices(feed, to: self())
-      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 200
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 500
     end
 
     test "an already-registered subscriber is not replayed the notice a second time" do
@@ -590,7 +590,7 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       # Registering again must not re-fire it — the replay is keyed to a NEW
       # registration, not to every call this consumer happens to make.
       assert :ok = Feed.subscribe_notices(feed, to: self())
-      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 200
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 500
     end
   end
 
@@ -662,7 +662,7 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       send(feed, :fetch_alias_map)
       # Synchronise on the Feed having handled the second tick before asserting silence.
       _settled = :sys.get_state(feed)
-      refute_receive {:fetch_started, _other}, 200
+      refute_receive {:fetch_started, _other}, 500
 
       send(fetcher, :release)
       assert Process.alive?(feed)

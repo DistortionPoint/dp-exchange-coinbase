@@ -259,12 +259,13 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       # keeping in view: a caller who calls `stake_portfolio/5` a second time gets a fresh
       # key, and the venue cannot tell that from a second stake — because it is one.
       #
-      # It is the wrong retry. `Core.HttpClient` retries a timeout or a 5xx **three times by
-      # default**, re-sending the identical body, and `Prime.request_opts/1` forwards
-      # `:retry_attempts` unchanged. Against a generated key those attempts carry the same
-      # value and the venue returns the original result; against no key at all they are
-      # three separate stakes. The old test reasoned about the caller's retry and the defect
-      # lived in the package's own.
+      # It is the wrong retry. A staking write retries a timeout or a 5xx **three times by
+      # default** (`Prime.retried/1`; Core alone sends a POST once), re-sending the
+      # identical body, and `Prime.request_opts/1` forwards `:retry_attempts` unchanged.
+      # Against a generated key those attempts carry the same value and the venue returns
+      # the original result; against no key at all they are three separate stakes.
+      # The old test reasoned about the caller's retry and the defect lived in the package's
+      # own.
       #
       # `Rest.place_order/3` had already settled the identical question the other way —
       # "re-sending one returns the original order instead of placing a second" — with a key
@@ -311,7 +312,7 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       # `idempotency_key` could not safely be injected into a caller's own map. The schema is
       # no longer unknown — `StakingClaimRewardsRequest` requires exactly the key this module
       # already generates for `stake_wallet/6` and the rest — so `claim_rewards_body/1` always
-      # puts one in, and `Core.HttpClient`'s default retry count is no longer overridden away.
+      # puts one in, and `Prime.retried/1`'s three attempts are no longer overridden away.
       # Note that `opts/2` above pins `retry_attempts: 0` for every other test in this file,
       # which is why the package's real default is exercised explicitly here instead.
       counter = :counters.new(1, [])
@@ -1386,8 +1387,7 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
 
       assert message =~ "403"
 
-      # 503 then 403 (403 is in Prime's refusal set; a 409 is not, and stays an unrefused
-      # `{:error, _}`): the 403 answers an internal RETRY of a keyed write, so the earlier
+      # 503 then 403: the 403 answers an internal RETRY of a keyed write, so the earlier
       # attempt may have been accepted and the 403 may be the venue objecting to the repeat.
       counter = :counters.new(1, [])
 
@@ -1412,6 +1412,53 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       assert :counters.get(counter, 1) == 2
       assert is_binary(reason)
       assert reason =~ "403"
+    end
+
+    test "DV6: a 409 or 422 on the first attempt is a refusal, a 429 is a plain error" do
+      me = self()
+      one = Decimal.new("1")
+
+      for status <- [409, 422] do
+        assert {:refused, message} =
+                 Prime.stake_portfolio(@credentials, "pf-1", "ETH", one,
+                   plug: status_plug(status, me),
+                   retry_attempts: 1,
+                   idempotency_key: @key
+                 )
+
+        assert message =~ Integer.to_string(status)
+      end
+
+      assert {:error, {:exchange_error, :coinbase, "Rate limited by the venue" <> _rest}} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", one,
+                 plug: status_plug(429, me),
+                 retry_attempts: 1,
+                 idempotency_key: @key
+               )
+    end
+
+    test "a 429 answered to a retry is unconfirmed, not plain" do
+      counter = :counters.new(1, [])
+
+      flaky = fn conn ->
+        {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+        :counters.add(counter, 1, 1)
+        status = if :counters.get(counter, 1) == 1, do: 503, else: 429
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(status, Jason.encode!(%{"message" => "x"}))
+      end
+
+      assert {:error, {:write_unconfirmed, @key, _reason}} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", Decimal.new("1"),
+                 plug: flaky,
+                 retry_attempts: 2,
+                 retry_delay: 1,
+                 idempotency_key: @key
+               )
+
+      assert :counters.get(counter, 1) == 2
     end
 
     test "our own limiter refusing the first attempt is decided before sending: plain" do

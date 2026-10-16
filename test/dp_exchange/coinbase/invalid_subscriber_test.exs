@@ -106,7 +106,7 @@ defmodule DpExchange.Coinbase.InvalidSubscriberTest do
       end
 
       assert Fake.coverage() == %{}
-      refute_receive {:dp_exchange, :coinbase, _payload}, 50
+      refute_receive {:dp_exchange, :coinbase, _payload}, 500
     end
 
     test "Fake refuses symbols before the subscriber, as the feed does" do
@@ -117,7 +117,7 @@ defmodule DpExchange.Coinbase.InvalidSubscriberTest do
 
     test "Fake.subscribe_notices/1 accepts a valid pid and, like the feed, sends nothing" do
       assert :ok = Fake.subscribe_notices(to: self())
-      refute_receive {:dp_exchange, :coinbase, %DpExchange.Core.Notice{}}, 50
+      refute_receive {:dp_exchange, :coinbase, %DpExchange.Core.Notice{}}, 500
     end
   end
 end

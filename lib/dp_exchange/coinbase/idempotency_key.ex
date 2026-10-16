@@ -11,7 +11,7 @@ defmodule DpExchange.Coinbase.IdempotencyKey do
   ## Why it is generated here rather than left to the caller
 
   A key the caller may omit is a key that is usually absent, and a write with no key is a
-  write `HttpClient` will happily send three times. `DpExchange.Coinbase.Rest.place_order/3`
+  write that is retried without protection once retries are requested. `DpExchange.Coinbase.Rest.place_order/3`
   already generated one; `DpExchange.Coinbase.Prime`'s staking calls sent the field **only
   when the caller passed one** and retried three times when they had not.
 

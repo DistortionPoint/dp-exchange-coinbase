@@ -207,7 +207,7 @@ defmodule DpExchange.Coinbase.FeedBranchesTest do
 
       # Not retried (a retry would send another unsubscribe), and `B-USD` withheld while
       # `A-USD` may still be live at the venue.
-      refute_receive {:sent, _type}, 300
+      refute_receive {:sent, _type}, 500
     end
 
     test "because the socket died mid-send is retried, not stranded" do

@@ -52,7 +52,7 @@ defmodule DpExchange.Coinbase.NaNGuardTest do
       test "#{value} as a ticker price does not reach a subscriber as a Quote" do
         assert {:ok, _state} = frame(ticker(unquote(value)))
 
-        refute_receive {:dp_exchange, :coinbase, %Types.Quote{}}, 50
+        refute_receive {:dp_exchange, :coinbase, %Types.Quote{}}, 500
       end
     end
 
@@ -60,7 +60,7 @@ defmodule DpExchange.Coinbase.NaNGuardTest do
       test "#{value} (a finite number no market quotes) is dropped, not compared" do
         assert {:ok, _state} = frame(ticker(unquote(value)))
 
-        refute_receive {:dp_exchange, :coinbase, %Types.Quote{}}, 50
+        refute_receive {:dp_exchange, :coinbase, %Types.Quote{}}, 500
       end
     end
 
@@ -85,7 +85,7 @@ defmodule DpExchange.Coinbase.NaNGuardTest do
 
       assert {:ok, _state} = frame(payload)
 
-      refute_receive {:dp_exchange, :coinbase, %Types.OrderBook{}}, 50
+      refute_receive {:dp_exchange, :coinbase, %Types.OrderBook{}}, 500
     end
 
     test "a real price still arrives, so the guard has not eaten the happy path" do

@@ -351,8 +351,8 @@ defmodule DpExchange.Coinbase.Prime do
   `opts[:body]` held — and that injecting an `idempotency_key` into a caller's own map would
   be a guess at a schema this package did not own. The schema is no longer unknown: it
   requires exactly the key this module already generates for `stake_wallet/6` and the rest.
-  With that key present, `Core.HttpClient`'s default of three attempts is safe the same way
-  it is for a stake or an unstake — the venue returns the original response for a retried
+  With that key present, the three attempts this module requests explicitly (Core's own
+  non-GET default is one) are safe the same way they are for a stake or an unstake — the venue returns the original response for a retried
   key rather than claiming a second time — so the `retry_attempts: 1` override is gone.
   """
   @spec claim_rewards(credentials(), String.t(), String.t(), keyword()) ::
@@ -684,10 +684,21 @@ defmodule DpExchange.Coinbase.Prime do
       headers = signer(:post, path, encoded, credentials)
 
       :post
-      |> HttpClient.request(@base_url <> @api_path <> path, headers, encoded, request_opts(opts))
+      |> HttpClient.request(
+        @base_url <> @api_path <> path,
+        headers,
+        encoded,
+        opts |> retried() |> request_opts()
+      )
       |> unwrap()
     end
   end
+
+  # Core retries a non-GET once by default. Both POST paths here are safe to repeat, so three
+  # attempts are requested explicitly (a caller can still lower it): `post_write/4` carries an
+  # `idempotency_key` the venue answers a repeat of with the original response, and `post/4`
+  # only reads or previews (a validator query, an unstake preview). Every send re-signs.
+  defp retried(opts), do: Keyword.update(opts, :retry_attempts, 3, &(&1 || 3))
 
   # **A staking write, past the point where it may have reached the venue, never answers a
   # bare error** (family convention W1). The body always carries the `idempotency_key` that
@@ -711,7 +722,12 @@ defmodule DpExchange.Coinbase.Prime do
       headers = calls |> counting(signer(:post, path, encoded, credentials))
 
       :post
-      |> HttpClient.request(@base_url <> @api_path <> path, headers, encoded, request_opts(opts))
+      |> HttpClient.request(
+        @base_url <> @api_path <> path,
+        headers,
+        encoded,
+        opts |> retried() |> request_opts()
+      )
       |> unwrap_write(key, {calls, opts})
     end
   end
@@ -733,16 +749,36 @@ defmodule DpExchange.Coinbase.Prime do
   end
 
   defp unwrap_write(failure, key, counted) do
-    case unwrap(failure) do
+    case write_unwrap(failure) do
       {:refused, message} = refused ->
         if attempts_made(counted) > 1, do: write_unconfirmed(key, message), else: refused
 
       {:error, reason} ->
-        if pre_send_failure?(reason) and sent_attempts(counted) == 0,
-          do: {:error, reason},
-          else: write_unconfirmed(key, reason)
+        cond do
+          pre_send_failure?(reason) and sent_attempts(counted) == 0 -> {:error, reason}
+          # DV6: a 429 to the FIRST attempt is the venue throttling before it acted.
+          too_many_requests?(reason) and attempts_made(counted) <= 1 -> {:error, reason}
+          true -> write_unconfirmed(key, reason)
+        end
     end
   end
+
+  # DV6 for writes: EVERY 4xx the venue answers to a first attempt (409 and 422 included, not
+  # only the 400/401/403/404 a read treats as permanent) is a refusal of that request. A 429
+  # never arrives as a "Client error": `Core.HttpClient` answers it as its own tagged message.
+  defp write_unwrap({:error, {:exchange_error, _provider, message}} = failure)
+       when is_binary(message) do
+    if Regex.match?(~r/\AClient error \(4\d\d\)/, message),
+      do: {:refused, message},
+      else: unwrap(failure)
+  end
+
+  defp write_unwrap(failure), do: unwrap(failure)
+
+  defp too_many_requests?({:exchange_error, _venue, "Rate limited by the venue" <> _rest}),
+    do: true
+
+  defp too_many_requests?(_reason), do: false
 
   defp write_unconfirmed(key, reason),
     do: {:error, {:write_unconfirmed, key, bounded_reason(reason)}}

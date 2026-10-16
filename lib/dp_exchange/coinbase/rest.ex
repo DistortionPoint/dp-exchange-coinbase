@@ -4479,7 +4479,8 @@ defmodule DpExchange.Coinbase.Rest do
     do: json_request(:post, path, body, credentials, opts, wrap)
 
   # One attempt, for a write the venue cannot tell from its own repeat. `Core.HttpClient`
-  # retries a 5xx or a transport error three times by default, and neither says whether the
+  # retried a 5xx or a transport error three times by default (a non-GET is now sent once
+  # unless a caller opts in, but this forces it either way), and neither says whether the
   # venue acted before it answered. A timed-out `move_funds` retried moves the funds again,
   # and so does a retried sweep. A retried `convert/trade` commit or `orders/edit` that
   # already took effect comes back refused, telling the caller a success failed, and a
@@ -4502,6 +4503,12 @@ defmodule DpExchange.Coinbase.Rest do
   # to reject as an opaque 401. A malformed `api_secret` reaching `place_order/3` used to
   # do exactly that.
   defp json_request(method, path, body, credentials, opts, wrap) do
+    # Core retries a non-GET once by default; the paths that reach here without `once/1` are
+    # safe to repeat, so three attempts are requested explicitly (a caller can still lower
+    # it): an order or close carries `client_order_id`, which the venue treats as an
+    # idempotency key; a preview, a convert quote and the same-value PUT/setting writes
+    # change nothing a repeat could double. Every send re-signs.
+    opts = Keyword.update(opts, :retry_attempts, 3, &(&1 || 3))
     signer = wrap.(signer(method, @api_path <> path, credentials))
     send_json_request(method, path, signer, body, opts)
   end

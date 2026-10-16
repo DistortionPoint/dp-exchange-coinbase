@@ -265,7 +265,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       send(feed, :resubscribe)
       Feed.coverage(feed)
 
-      refute_receive {:frame, :ticker, _frame}, 200
+      refute_receive {:frame, :ticker, _frame}, 500
 
       send(feed, {:dp_exchange, :coinbase, :reconnected, socket})
 
@@ -297,7 +297,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert_receive {:frame, :ticker, %{"type" => "subscribe"} = frame}, 5_000
       assert frame["channel"] == "ticker"
       assert Enum.sort(frame["product_ids"]) == ["BTC-USD", "ETH-USD"]
-      refute_receive {:frame, :book, _frame}, 100
+      refute_receive {:frame, :book, _frame}, 500
     end
 
     test "a sequence gap on a level2 shard re-issues THAT shard for a fresh snapshot (MD9)" do
@@ -321,12 +321,12 @@ defmodule DpExchange.Coinbase.FeedTest do
                      5_000
 
       assert Enum.sort(frame["product_ids"]) == ["BTC-USD", "ETH-USD"]
-      refute_receive {:frame, :ticker, _frame}, 100
+      refute_receive {:frame, :ticker, _frame}, 500
 
       # A second gap inside the minimum interval does not answer with another snapshot burst.
       send(feed, {:dp_exchange, :coinbase, :sequence_gap, book_socket})
       _settled = :sys.get_state(feed)
-      refute_receive {:frame, :book, _frame}, 300
+      refute_receive {:frame, :book, _frame}, 500
 
       # ...but it is deferred, not lost: ONE trailing re-issue is scheduled however many gaps
       # arrive meanwhile, and when it fires the shard is re-issued once more.
@@ -359,7 +359,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       send(feed, {:dp_exchange, :coinbase, :sequence_gap, stranger})
 
       _settled = :sys.get_state(feed)
-      refute_receive {:frame, _tag, _frame}, 300
+      refute_receive {:frame, _tag, _frame}, 500
       assert Process.alive?(feed)
     end
 
@@ -384,7 +384,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       send(feed, {:dp_exchange, :coinbase, :reconnected, stranger})
 
       _settled = :sys.get_state(feed)
-      refute_receive {:frame, :stranger, _frame}, 100
+      refute_receive {:frame, :stranger, _frame}, 500
       assert Process.alive?(feed)
     end
 
@@ -685,7 +685,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       # already cannot keep up with, into the same fan-out that is overloaded.
       for _each <- 1..5, do: send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
       _settled = Feed.coverage(feed)
-      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :degraded}}, 100
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :degraded}}, 500
     end
 
     test "a symbol whose frames are dropped for a slow consumer is still covered" do
@@ -1274,7 +1274,7 @@ defmodule DpExchange.Coinbase.FeedTest do
       # No shard-open-failed notice — proof this never even reached `get_socket/1` for a
       # second attempt (this `Feed` was started with no injected socket and no real
       # transport configured, so a genuine second open would have failed loudly).
-      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change}}, 200
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change}}, 500
 
       # The entry already present — the same socket pid — is untouched.
       assert :sys.get_state(feed).shards ==

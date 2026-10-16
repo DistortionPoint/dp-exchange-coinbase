@@ -1008,7 +1008,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
       :sys.get_state(feed)
 
       assert_receive {:frame, "subscribe", ["NEW-USD"]}, 5_000
-      refute_receive {:frame, "unsubscribe", _ids}, 100
+      refute_receive {:frame, "unsubscribe", _ids}, 500
       assert Process.alive?(feed)
     end
 
@@ -1020,7 +1020,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
       :sys.get_state(feed)
 
       assert_receive {:frame, "unsubscribe", ["OLD-USD"]}, 5_000
-      refute_receive {:frame, "subscribe", _ids}, 100
+      refute_receive {:frame, "subscribe", _ids}, 500
       assert Process.alive?(feed)
     end
 
@@ -1560,7 +1560,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
       # The socket that was already open is still open, and still THIS socket — nothing
       # else was even injected for it to be replaced with (`injected_socket` is left
       # `nil`, so a replacement would have had to open a real connection and fail loudly).
-      refute_receive {:DOWN, ^ref, :process, ^old_socket, _reason}, 200
+      refute_receive {:DOWN, ^ref, :process, ^old_socket, _reason}, 500
       assert Process.alive?(old_socket)
 
       # The same symbols, compared as a set: placement is sticky now (2026-10-10), so the 25
@@ -1727,7 +1727,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       assert_receive {:frame, "subscribe", ids}, 5_000
       assert ids == ["A-USD"]
-      refute_receive {:frame, _type, _ids}, 100
+      refute_receive {:frame, _type, _ids}, 500
     end
 
     test "a shard that has gone since the snapshot is skipped" do
@@ -1737,7 +1737,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
       send(feed, {:resubscribe_shard, {"ticker", 0}, socket, "ticker", [], ["A-USD"], nil})
 
       :sys.get_state(feed)
-      refute_receive {:frame, _type, _ids}, 100
+      refute_receive {:frame, _type, _ids}, 500
     end
   end
 
@@ -1765,7 +1765,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
       assert_receive {:frame, "unsubscribe", ["C-USD"]}, 5_000
       assert_receive {:frame, "subscribe", ids}, 5_000
       assert ids == ["A-USD"]
-      refute_receive {:frame, _type, _ids}, 100
+      refute_receive {:frame, _type, _ids}, 500
     end
 
     test "a symbol wanted again since is not unsubscribed when the stale message fires" do
@@ -1787,7 +1787,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       assert_receive {:frame, "unsubscribe", ["C-USD"]}, 5_000
       :sys.get_state(feed)
-      refute_receive {:frame, _type, _ids}, 100
+      refute_receive {:frame, _type, _ids}, 500
     end
 
     test "the retry of a failed unsubscribe is cut to the shard's current symbols too" do
@@ -1809,7 +1809,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
       assert_receive {:frame, "subscribe", ids}, 5_000
       assert ids == ["A-USD"]
-      refute_receive {:frame, _type, _ids}, 100
+      refute_receive {:frame, _type, _ids}, 500
     end
   end
 
