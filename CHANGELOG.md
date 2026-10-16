@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.133] - 2026-10-16
+
 - **Retries on keyed or repeat-safe writes are requested explicitly (tick AH).** Core 0.3.98
   sends a non-GET once by default. `Rest` (orders, close position, previews, convert quote,
   rename, margin setting) and `Prime` (keyed staking writes, previews, validator query) now
