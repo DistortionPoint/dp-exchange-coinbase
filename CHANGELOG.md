@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.134] - 2026-10-16
+
 - **Conformance group 42 supplied (tick AH).** The contract test now passes
   `ambiguous_place_order:`, running the real `Rest.place_order/3` against a 503 plug, so the
   suite holds `{:order_unconfirmed, id, reason}` after a fault past the send. The
