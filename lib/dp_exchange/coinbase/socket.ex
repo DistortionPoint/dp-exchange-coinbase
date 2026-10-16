@@ -624,6 +624,9 @@ defmodule DpExchange.Coinbase.Socket do
      }
      |> arm_silence_check(make_ref())
      |> Map.put(:connected_at, now_ms())
+     # Observation is scoped to the session, as `last_seq` is: a symbol that delivered on a
+     # connection that has since dropped is not one this connection delivers.
+     |> Map.put(:delivering, MapSet.new())
      |> Map.put(:reported_faults, MapSet.new())
      |> Map.put(:out_of_order_at, nil)
      |> Map.put(:out_of_order_suppressed, 0)}
@@ -667,10 +670,26 @@ defmodule DpExchange.Coinbase.Socket do
         :remove -> MapSet.difference(current, wanted)
       end
 
-    {:ok, Map.put(state, :subscribed, updated)}
+    state = Map.put(state, :subscribed, updated)
+
+    # An unsubscribed symbol leaves `delivering` too. That set is what a `:sequence_gap`
+    # notice names ("every symbol this connection delivers"), and a shard whose membership
+    # churns over weeks kept every symbol it had ever carried in it: the notice named books
+    # the consumer no longer holds, and the set grew with the churn rather than with the
+    # shard. `symbols` arrive in the caller's canonical form, as `delivering` is keyed.
+    {:ok, forget_delivering(state, action, wanted)}
   end
 
   def handle_info(_message, state), do: {:ok, state}
+
+  defp forget_delivering(state, :remove, removed) do
+    case Map.get(state, :delivering) do
+      %MapSet{} = held -> Map.put(state, :delivering, MapSet.difference(held, removed))
+      _none -> state
+    end
+  end
+
+  defp forget_delivering(state, :add, _added), do: state
 
   # The one pending check timer is kept in the state (`:silence_timer`) so that a new
   # connection, or the connection's end, cancels it instead of leaving up to

@@ -547,6 +547,84 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert :sys.get_state(feed).monitors == first
       assert map_size(first) == 1
     end
+
+    # The feed's symbol set is shared by every caller, so the last data subscriber going
+    # away used to leave every shard open for nobody.
+    defp kill_and_settle(feed, pid) do
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
+      wait_until(fn -> not Map.has_key?(:sys.get_state(feed).monitors, pid) end)
+    end
+
+    test "the last data subscriber dying releases the wanted symbols" do
+      feed = start_feed()
+      subscriber = spawn(fn -> Process.sleep(:infinity) end)
+
+      :ok = Feed.subscribe(feed, ["BTC-USD", "ETH-USD"], to: subscriber)
+      assert Feed.wanted(feed) == ["BTC-USD", "ETH-USD"]
+
+      kill_and_settle(feed, subscriber)
+
+      assert Feed.wanted(feed) == []
+      assert :sys.get_state(feed).delivering == %{}
+    end
+
+    test "one of two data subscribers dying keeps the wanted symbols" do
+      feed = start_feed()
+      first = spawn(fn -> Process.sleep(:infinity) end)
+      second = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(second, :kill) end)
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: first)
+      :ok = Feed.subscribe(feed, ["ETH-USD"], to: second)
+
+      kill_and_settle(feed, first)
+
+      assert Feed.wanted(feed) == ["BTC-USD", "ETH-USD"]
+    end
+
+    test "a registered-name subscriber keeps the symbols when a pid subscriber dies" do
+      feed = start_feed()
+      name = :"named_keeper_#{System.unique_integer([:positive])}"
+      holder = spawn(fn -> Process.sleep(:infinity) end)
+      Process.register(holder, name)
+      on_exit(fn -> Process.exit(holder, :kill) end)
+      subscriber = spawn(fn -> Process.sleep(:infinity) end)
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: name)
+      :ok = Feed.subscribe(feed, ["ETH-USD"], to: subscriber)
+
+      kill_and_settle(feed, subscriber)
+
+      assert Feed.wanted(feed) == ["BTC-USD", "ETH-USD"]
+    end
+
+    test "a notice-only subscriber dying releases nothing" do
+      feed = start_feed()
+      subscriber = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(subscriber, :kill) end)
+      watcher = spawn(fn -> Process.sleep(:infinity) end)
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: subscriber)
+      :ok = Feed.subscribe_notices(feed, to: watcher)
+
+      kill_and_settle(feed, watcher)
+
+      assert Feed.wanted(feed) == ["BTC-USD"]
+    end
+
+    test "a pid that is both data and notice subscriber releases when it dies" do
+      feed = start_feed()
+      subscriber = spawn(fn -> Process.sleep(:infinity) end)
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: subscriber)
+      :ok = Feed.subscribe_notices(feed, to: subscriber)
+
+      kill_and_settle(feed, subscriber)
+
+      assert Feed.wanted(feed) == []
+    end
   end
 
   describe "back-pressure — a slow subscriber does not get an unbounded mailbox" do

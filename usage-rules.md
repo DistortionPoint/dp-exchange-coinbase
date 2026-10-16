@@ -1364,6 +1364,17 @@ answers `{:error, {:invalid_subscriber, to}}` and nothing is recorded; `subscrib
 the symbols first. `DpExchange.Coinbase.Fake` refuses identically. The `feed:` option, by
 contrast, may be any `GenServer.server()`, including `{:global, _}` and `{:via, _, _}`.
 
+**The last data subscriber's death releases every symbol.** The feed monitors a pid
+subscriber and stops delivering to it when it exits. The symbol set is shared by every caller,
+so it is released only when the dying pid was the LAST data subscriber: the whole set then
+goes through the path `unsubscribe/2` takes, and shards narrow and close as usual. Nothing
+stays subscribed for a consumer that no longer exists. While any other data subscriber
+remains, the set is kept. A registered-name subscriber is never monitored (the name outlives
+its holder), so it keeps the set alive. A subscriber that only called `subscribe_notices/1`
+releases nothing when it dies. This feed has no boot-configured symbols or subscriber to
+keep. A restarted consumer calls `subscribe/2` again (idempotent). A `:sequence_gap` notice
+names only symbols still carried by that connection's current session.
+
 ## `:websocket_url` in application config replaces the default socket endpoint
 
 `config :dp_exchange_coinbase, websocket_url: "wss://your-proxy.example/..."` sends every socket

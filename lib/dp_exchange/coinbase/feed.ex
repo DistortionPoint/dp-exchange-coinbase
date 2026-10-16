@@ -2171,7 +2171,19 @@ defmodule DpExchange.Coinbase.Feed do
   # `Core.Fanout.watch/2` — because a name outlives the process holding it, and pruning on
   # its holder's death would silently unsubscribe a consumer its supervisor is about to
   # restart under the same name.
+  #
+  # **The last data subscriber's death releases the symbols.** `wanted` is shared by every
+  # caller, so a death used to drop the pid and leave every shard open, subscribed and
+  # delivering to nobody for the life of the feed: sockets open for a consumer that no
+  # longer exists. When the pid that died was the last member of `subscribers`, the whole
+  # `wanted` set is released through `unsubscribe_symbols/2`, the path `unsubscribe/2`
+  # takes, so shards narrow and retire normally. A registered-name subscriber is never
+  # monitored and stays in the set, so it keeps the symbols alive; a notice-only
+  # subscriber's death releases nothing. This feed has no boot-configured symbols or
+  # subscriber to keep.
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    was_data_subscriber? = MapSet.member?(state.subscribers, pid)
+
     state = %{
       state
       | subscribers: MapSet.delete(state.subscribers, pid),
@@ -2179,7 +2191,7 @@ defmodule DpExchange.Coinbase.Feed do
         monitors: Fanout.forget(pid, state.monitors)
     }
 
-    {:noreply, state}
+    {:noreply, release_if_abandoned(state, was_data_subscriber?)}
   end
 
   @impl true
@@ -2692,6 +2704,19 @@ defmodule DpExchange.Coinbase.Feed do
     {result, state} = reshard(state)
     {:reply, result, state}
   end
+
+  defp release_if_abandoned(state, true) do
+    if MapSet.size(state.subscribers) == 0 and MapSet.size(state.wanted) > 0 do
+      {:reply, _result, released} =
+        unsubscribe_symbols(MapSet.to_list(state.wanted), state)
+
+      released
+    else
+      state
+    end
+  end
+
+  defp release_if_abandoned(state, false), do: state
 
   defp replace_symbols(symbols, state) do
     wanted = MapSet.new(symbols)

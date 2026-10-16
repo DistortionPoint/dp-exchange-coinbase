@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **The last data subscriber's death releases the feed's symbols (tick AG).** `Feed` dropped
+  a dead pid subscriber but kept the shared `wanted` set, so shards stayed open, subscribed
+  and delivering to nobody. When the dying pid was the last member of `subscribers`, the
+  whole set is now released through the `unsubscribe/2` path (shards narrow and retire
+  normally). A registered-name subscriber (never monitored) keeps the set; a notice-only
+  subscriber's death releases nothing. Same rule as Gemini and Robinhood. Tests in
+  `feed_test.exs`.
+- **A socket's `delivering` set no longer outlives the subscription or the session (tick AG).**
+  `Socket` kept every symbol it had ever delivered, so on a shard whose membership churned
+  the set grew with the churn, and a `:sequence_gap` notice named books the consumer had
+  unsubscribed ("re-read these" for symbols it no longer holds). `Socket.unsubscribe/3` now
+  removes the symbols from the set, and a (re)connect resets it, since delivery is scoped to
+  the session as `last_seq` is. Tests in `socket_test.exs`.
+
 ## [0.3.130] - 2026-10-15
 
 - **Decoders refuse a reply that names the same thing twice, and an impossible bar (tick AF).**

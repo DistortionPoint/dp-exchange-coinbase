@@ -336,6 +336,29 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert_received {:dp_exchange, :coinbase, :sequence_gap, ^me}
     end
 
+    test "a gap notice does not name a symbol that was unsubscribed from this socket" do
+      delivered = feed([numbered(10)], state())
+      assert MapSet.member?(delivered.delivering, "BTC-USD")
+
+      release = {:track_subscription, :remove, ["BTC-USD"]}
+      {:ok, released} = Socket.handle_info(release, delivered)
+      refute MapSet.member?(released.delivering, "BTC-USD")
+
+      feed([numbered(14)], released)
+
+      assert_received {:dp_exchange, :coinbase, %Notice{details: %{reason: :sequence_gap} = d}}
+      assert d.symbols == []
+    end
+
+    test "a symbol delivered on a dropped connection is not one the next connection delivers" do
+      delivered = feed([numbered(10)], state())
+      assert MapSet.member?(delivered.delivering, "BTC-USD")
+
+      {:ok, reconnected} = Socket.handle_connect(%{}, delivered)
+
+      assert MapSet.size(reconnected.delivering) == 0
+    end
+
     test "consecutive numbers report no gap to the feed" do
       feed([numbered(10), numbered(11)], state())
 
