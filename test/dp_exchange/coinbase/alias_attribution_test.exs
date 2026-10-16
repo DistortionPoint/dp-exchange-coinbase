@@ -485,7 +485,10 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       assert log =~
                ~r/alias catalogue fetch failed permanently \(.*\) — not retrying; delivering under the venue's own product id/
 
-      refute log =~ ~r/alias catalogue fetch failed \(.*\), attempt/
+      # Anchored to this test's own `:boom` too: a concurrent feed whose alias fetch was
+      # killed logs "alias catalogue fetch failed ({:alias_map_fetch_down, :killed}),
+      # attempt 1/3", which the bare pattern matched.
+      refute log =~ ~r/alias catalogue fetch failed \(:boom\), attempt/
 
       # Exactly one call, ever — the notice above only fires after the decision is made,
       # so nothing further could have been scheduled by the time it arrives.

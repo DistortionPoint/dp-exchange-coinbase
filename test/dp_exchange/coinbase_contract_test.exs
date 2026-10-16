@@ -5,6 +5,20 @@ defmodule DpExchange.CoinbaseContractTest do
   drifting apart.
   """
 
+  # Group 42 drives the real `Rest.place_order/3`, which asks the rate limiter before sending;
+  # no limiter runs under the contract, so a process-scoped permissive one stands in.
+  defmodule ContractLimiter do
+    @moduledoc false
+    @behaviour DpExchange.Core.RateLimitBehaviour
+
+    @impl true
+    def acquire(_provider, _weight, _opts), do: :ok
+    @impl true
+    def check(_provider, _weight, _opts), do: :ok
+    @impl true
+    def record(_provider, _weight, _opts), do: :ok
+  end
+
   use DpExchange.Core.AdapterContract,
     venue: DpExchange.Coinbase,
     fake: DpExchange.Coinbase.Fake,
@@ -28,5 +42,29 @@ defmodule DpExchange.CoinbaseContractTest do
     # This venue's edit needs both size and price (`Rest.editable_present/1`), so the suite's
     # generic price-only edit is refused for a reason that has nothing to do with the id
     # assertion 31 is checking.
-    order_args: %{order_changes: %{quantity: Decimal.new("0.002"), price: Decimal.new("1")}}
+    order_args: %{order_changes: %{quantity: Decimal.new("0.002"), price: Decimal.new("1")}},
+    # Conformance group 42: the REAL `Rest.place_order/3` (not the Fake) with the venue
+    # answering 503 to every attempt, i.e. a fault after the send, retried fast. The contract's
+    # base request is passed through unmapped. A request without `:order_type` is refused
+    # before anything is sent.
+    ambiguous_place_order: fn request ->
+      DpExchange.Core.Config.put_override(
+        :rate_limit_module,
+        DpExchange.CoinbaseContractTest.ContractLimiter
+      )
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(503, ~s({"message":"unavailable"}))
+      end
+
+      DpExchange.Coinbase.Rest.place_order(
+        %{api_key: "test-key", api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="},
+        request,
+        plug: plug,
+        retry_attempts: 2,
+        retry_delay: 1
+      )
+    end
 end

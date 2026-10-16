@@ -20,6 +20,11 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Conformance group 42 supplied (tick AH).** The contract test now passes
+  `ambiguous_place_order:`, running the real `Rest.place_order/3` against a 503 plug, so the
+  suite holds `{:order_unconfirmed, id, reason}` after a fault past the send. The
+  `dp_exchange_core` floor is `~> 0.3.98`.
+
 ## [0.3.133] - 2026-10-16
 
 - **Retries on keyed or repeat-safe writes are requested explicitly (tick AH).** Core 0.3.98
