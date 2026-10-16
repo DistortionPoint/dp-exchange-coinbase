@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.131] - 2026-10-16
+
 - **The last data subscriber's death releases the feed's symbols (tick AG).** `Feed` dropped
   a dead pid subscriber but kept the shared `wanted` set, so shards stayed open, subscribed
   and delivering to nobody. When the dying pid was the last member of `subscribers`, the
