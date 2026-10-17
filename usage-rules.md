@@ -1292,6 +1292,16 @@ None of these raises in your process, and the fake runs the same check in the sa
   `list_portfolios/1` takes `:portfolio_type`; `get_current_margin_window/2` takes
   `:margin_profile_type`. A word outside the spec's enum, or a non-string, is
   `{:error, {:invalid_option, key, value}}`.
+- **Unknown options are refused.** `get_orders/2`, `get_trade_history/2`, `get_trades/2`,
+  `get_historical_prices/4` (options and range) and `get_order_book/2` answer
+  `{:error, {:unknown_option, key}}` for a key they do not honour (a misspelt `limt:` used to
+  be dropped and the read widened), and `{:error, {:invalid_options, v}}` for options
+  that are not a keyword list. The same holds for `get_balances/2`, `get_accounts/2`,
+  `get_fees/2`, `get_trade_volume/2`, the portfolio and futures (CFM) calls, `transfer_internal/4`,
+  the Prime staking calls and `subscribe/2` / `subscribe_notices/1`. Transport keys (`:plug`, `:retry_attempts`, `:credentials`
+  and so on) always pass. A `:limit` above the spec's type (`int32` for orders, `int64` for
+  fills) is `{:error, {:invalid_option, :limit, v}}`; a fill `commission` that is stated and
+  unreadable is `{:error, {:invalid_decimal, :fee, v}}`.
 - **Fill filters.** `get_trade_history/2` needs `:order_id` to be a non-empty string or list
   of them (`{:invalid_order_id, v}`) and `:start` / `:end` to be `DateTime`s
   (`{:invalid_time, :start | :end, v}`), with `:start` before `:end`

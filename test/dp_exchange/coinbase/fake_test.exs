@@ -722,7 +722,9 @@ defmodule DpExchange.Coinbase.FakeTest do
     # The real facade upper-cases symbols on the way in. The fake has to give the same
     # answer, or a consumer's tier-1 tests certify silence where the venue delivers.
     test "is delivered under the canonical symbol, as the real package does" do
-      opts = [to: self(), account_id: "acct", account_number: "acct", account_hash: "acct"]
+      # Only keys this venue reads: `account_id` and the like belong to other venues and are
+      # refused as unknown options here.
+      opts = [to: self()]
 
       assert :ok = DpExchange.Coinbase.Fake.subscribe(["btc-usd"], opts)
       assert_receive {:dp_exchange, _venue, %{symbol: "BTC-USD"}}, 5_000

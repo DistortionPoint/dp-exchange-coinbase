@@ -79,6 +79,7 @@ defmodule DpExchange.Coinbase.Rest do
 
   # The spec's `int32` ceiling for a `limit` parameter.
   @max_int32 2_147_483_647
+  @max_int64 9_223_372_036_854_775_807
 
   @doc "Every timeframe Coinbase serves, shortest first."
   @spec granularities() :: [String.t()]
@@ -559,10 +560,11 @@ defmodule DpExchange.Coinbase.Rest do
   (`{:invalid_option, :portfolio, v}` when malformed); the single-account read has no such
   parameter, so `:uuid` together with `:portfolio` is `{:unsupported_option, :portfolio}`.
   """
-  @spec validate_account_options(keyword()) :: :ok | {:error, term()}
+  @spec validate_account_options(term()) :: :ok | {:error, term()}
   def validate_account_options(opts) do
-    with :ok <- validate_account_uuid(Keyword.get(opts, :uuid)),
-         :ok <- validate_balance_options(opts) do
+    with :ok <- check_options(opts, [:uuid, :limit, :portfolio]),
+         :ok <- validate_account_uuid(Keyword.get(opts, :uuid)),
+         :ok <- balance_checks(opts) do
       if Keyword.get(opts, :uuid) != nil and Keyword.get(opts, :portfolio) != nil,
         do: {:error, {:unsupported_option, :portfolio}},
         else: :ok
@@ -577,9 +579,12 @@ defmodule DpExchange.Coinbase.Rest do
   page-size bound does not allow was sent for the venue to clamp or refuse, which is
   unmeasured; a non-number raised `Protocol.UndefinedError` in the caller's process.
   """
-  @spec validate_balance_options(keyword()) ::
-          :ok | {:error, {:invalid_limit, term()} | {:invalid_option, :portfolio, term()}}
+  @spec validate_balance_options(term()) :: :ok | {:error, term()}
   def validate_balance_options(opts) do
+    with :ok <- check_options(opts, [:limit, :portfolio]), do: balance_checks(opts)
+  end
+
+  defp balance_checks(opts) do
     with :ok <- validate_balance_limit(Keyword.get(opts, :limit)) do
       validate_portfolio_option(opts)
     end
@@ -1070,9 +1075,10 @@ defmodule DpExchange.Coinbase.Rest do
   or a non-empty string (`{:invalid_option, :currency, v}`). Exposed so
   `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
   """
-  @spec validate_portfolio_breakdown(term(), keyword()) :: :ok | {:error, term()}
+  @spec validate_portfolio_breakdown(term(), term()) :: :ok | {:error, term()}
   def validate_portfolio_breakdown(portfolio_uuid, opts) do
     with :ok <- validate_id(portfolio_uuid, :portfolio_uuid),
+         :ok <- check_options(opts, [:currency]),
          do: validate_breakdown_currency(Keyword.get(opts, :currency))
   end
 
@@ -1288,8 +1294,9 @@ defmodule DpExchange.Coinbase.Rest do
   # already answers an unknown side the same way.
   defp to_conversion(trade, from, to) do
     with {:ok, id} <- required_id(trade["id"], :id),
-         {:ok, status} <- required_conversion_status(trade["status"]) do
-      {:ok, build_conversion(trade, from, to, id, status)}
+         {:ok, status} <- required_conversion_status(trade["status"]),
+         {:ok, fee} <- total_fee(trade["total_fee"]) do
+      {:ok, build_conversion(trade, {from, to}, {id, status}, fee)}
     end
   end
 
@@ -1300,7 +1307,7 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  defp build_conversion(trade, from, to, id, status) do
+  defp build_conversion(trade, {from, to}, {id, status}, fee) do
     %Types.Conversion{
       id: id,
       status: status,
@@ -1314,7 +1321,7 @@ defmodule DpExchange.Coinbase.Rest do
       # than a total. `total_fee` is the venue's own rollup — a single `Fee` whose
       # `amount.value` is the total across every fee line (at-spec.yaml:9973, :10830-10840) —
       # and is what this field is documented to report.
-      fee: amount_value(get_in(trade, ["total_fee", "amount"])),
+      fee: fee,
       # Advanced Trade states no expiry on a convert quote. `nil` here is "not stated", and
       # a caller must not read it as open-ended — see `Types.Conversion`.
       expires_at: nil,
@@ -1412,7 +1419,7 @@ defmodule DpExchange.Coinbase.Rest do
   (`{:unsupported_option, :portfolio}`). Exposed so `DpExchange.Coinbase.Fake` refuses
   exactly as the real path does.
   """
-  @spec validate_futures_position(term(), keyword()) :: :ok | {:error, term()}
+  @spec validate_futures_position(term(), term()) :: :ok | {:error, term()}
   def validate_futures_position(product_id, opts) do
     with :ok <- validate_id(product_id, :product_id), do: reject_portfolio_option(opts)
   end
@@ -1547,6 +1554,22 @@ defmodule DpExchange.Coinbase.Rest do
       Decimal.compare(quantity, Decimal.new(0)) == :eq
   end
 
+  # `get_in(trade, ["total_fee", "amount"])` raised `FunctionClauseError` in `Access.get/3` out
+  # of `quote_conversion/5` and `get_conversion/3` for a `total_fee` that is a string or a
+  # number: one malformed field, and the caller's process died. Absent or `null` is "not
+  # stated", `nil`. One the venue SENT and this cannot read is not "no fee": refused, as an
+  # unreadable fill commission is.
+  defp total_fee(nil), do: {:ok, nil}
+
+  defp total_fee(%{"amount" => amount}) do
+    case amount_value(amount) do
+      %Decimal{} = fee -> {:ok, fee}
+      nil -> {:error, :unexpected_response_shape}
+    end
+  end
+
+  defp total_fee(_unreadable), do: {:error, :unexpected_response_shape}
+
   defp amount_value(nil), do: nil
   defp amount_value(%{"value" => value}), do: decimal(value)
   defp amount_value(value), do: decimal(value)
@@ -1568,10 +1591,12 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_futures_balance_summary(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_futures_balance_summary(credentials, opts) do
-    case request(:get, "/cfm/balance_summary", credentials, opts) do
-      {:ok, %{body: %{"balance_summary" => summary}}} when is_map(summary) -> {:ok, summary}
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+    with :ok <- reject_portfolio_option(opts) do
+      case request(:get, "/cfm/balance_summary", credentials, opts) do
+        {:ok, %{body: %{"balance_summary" => summary}}} when is_map(summary) -> {:ok, summary}
+        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
     end
   end
 
@@ -1588,10 +1613,12 @@ defmodule DpExchange.Coinbase.Rest do
   @spec list_futures_sweeps(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_futures_sweeps(credentials, opts) do
-    case request(:get, "/cfm/sweeps", credentials, opts) do
-      {:ok, %{body: %{"sweeps" => sweeps}}} when is_list(sweeps) -> map_rows(sweeps)
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+    with :ok <- reject_portfolio_option(opts) do
+      case request(:get, "/cfm/sweeps", credentials, opts) do
+        {:ok, %{body: %{"sweeps" => sweeps}}} when is_list(sweeps) -> map_rows(sweeps)
+        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
     end
   end
 
@@ -1648,9 +1675,12 @@ defmodule DpExchange.Coinbase.Rest do
   else, a float included, is `{:error, {:invalid_amount, v}}`. Exposed so
   `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
   """
-  @spec validate_sweep_amount(keyword()) ::
-          {:ok, String.t() | nil} | {:error, {:invalid_amount, term()}}
-  def validate_sweep_amount(opts), do: sweep_amount(Keyword.get(opts, :usd_amount))
+  @spec validate_sweep_amount(term()) :: {:ok, String.t() | nil} | {:error, term()}
+  def validate_sweep_amount(opts) do
+    # A misspelt `usd_amout:` was dropped, and an absent amount sweeps EVERY available dollar.
+    with :ok <- check_options(opts, [:usd_amount]),
+         do: sweep_amount(Keyword.get(opts, :usd_amount))
+  end
 
   defp sweep_amount(nil), do: {:ok, nil}
 
@@ -1672,10 +1702,12 @@ defmodule DpExchange.Coinbase.Rest do
   @spec cancel_futures_sweep(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def cancel_futures_sweep(credentials, opts) do
-    case request(:delete, "/cfm/sweeps", credentials, once(opts)) do
-      {:ok, %{body: %{} = result}} -> sweep_outcome(result, :sweep_not_cancelled)
-      {:ok, _unexpected} -> write_unconfirmed(nil, :unexpected_response_shape)
-      {:error, reason} -> write_failure(reason, nil)
+    with :ok <- reject_portfolio_option(opts) do
+      case request(:delete, "/cfm/sweeps", credentials, once(opts)) do
+        {:ok, %{body: %{} = result}} -> sweep_outcome(result, :sweep_not_cancelled)
+        {:ok, _unexpected} -> write_unconfirmed(nil, :unexpected_response_shape)
+        {:error, reason} -> write_failure(reason, nil)
+      end
     end
   end
 
@@ -1690,10 +1722,12 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_intraday_margin_setting(map(), keyword()) ::
           {:ok, String.t()} | {:error, term()} | {:refused, term()}
   def get_intraday_margin_setting(credentials, opts) do
-    case request(:get, "/cfm/intraday/margin_setting", credentials, opts) do
-      {:ok, %{body: %{"setting" => setting}}} when is_binary(setting) -> {:ok, setting}
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+    with :ok <- reject_portfolio_option(opts) do
+      case request(:get, "/cfm/intraday/margin_setting", credentials, opts) do
+        {:ok, %{body: %{"setting" => setting}}} when is_binary(setting) -> {:ok, setting}
+        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
     end
   end
 
@@ -1716,7 +1750,8 @@ defmodule DpExchange.Coinbase.Rest do
   @spec set_intraday_margin_setting(map(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def set_intraday_margin_setting(credentials, setting, opts) do
-    with :ok <- validate_margin_setting(setting) do
+    with :ok <- validate_margin_setting(setting),
+         :ok <- reject_portfolio_option(opts) do
       # Setting the same value twice is harmless, so the default retries stay and the signer
       # is counted (see `rename_portfolio/4`).
       calls = :atomics.new(1, signed: false)
@@ -1774,10 +1809,11 @@ defmodule DpExchange.Coinbase.Rest do
   or one of the spec's strings. Error: `{:invalid_option, :margin_profile_type, v}`. Exposed so
   `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
   """
-  @spec validate_margin_window_options(keyword()) ::
-          :ok | {:error, {:invalid_option, atom(), term()}}
-  def validate_margin_window_options(opts),
-    do: enum_option(opts, :margin_profile_type, @margin_profile_types)
+  @spec validate_margin_window_options(term()) :: :ok | {:error, term()}
+  def validate_margin_window_options(opts) do
+    with :ok <- check_options(opts, [:margin_profile_type]),
+         do: enum_option(opts, :margin_profile_type, @margin_profile_types)
+  end
 
   # Refuses an account row this package cannot attribute, rather than emitting an unusable
   # `Balance` and reporting it as success.
@@ -1903,12 +1939,12 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_trade_history(map(), keyword()) ::
           {:ok, [Types.Fill.t()]} | {:error, term()} | {:refused, term()}
   def get_trade_history(credentials, opts) do
-    wanted = Config.opt(opts, :trade_types, ["FILL"])
-
     with :ok <- validate_fill_filters(opts),
          {:ok, rows} <- all_fills(credentials, opts, nil, [], 0),
          :ok <- typed_fills(rows),
          :ok <- distinct_fills(rows) do
+      wanted = Config.opt(opts, :trade_types, ["FILL"])
+
       rows
       # A row that is not an object is kept so `to_fill/1` can refuse it. Filtering it out
       # here would drop it silently, and a fill history with a gap is a truncated one.
@@ -1988,29 +2024,34 @@ defmodule DpExchange.Coinbase.Rest do
 
   # What one page of fills says about the next: stop, refuse, or walk on.
   defp next_fill_page(credentials, opts, {cursor, page}, collected, fills, body) do
-    next = body["cursor"]
-
-    cond do
-      # `GetFillsResponse.proof_token_required` says the data is withheld pending an EU
-      # SCA proof token (at-spec.yaml:7523-7540). A page with no fills AND that flag is
-      # "cannot see", not "none" — returning `[]` would report an empty history.
-      fills == [] and body["proof_token_required"] == true ->
-        {:refused, :proof_token_required}
-
-      # An empty cursor is the venue saying "no more". Re-sending it would ask for the
-      # same page forever, which the page bound would eventually stop — but stopping
-      # here is the correct reading, not a fallback.
-      # The cursor just sent, offered again, is the same page again (see `next_cursor/2`).
-      is_binary(next) and next == cursor and fills != [] ->
-        {:error, :pagination_cursor_repeated}
-
-      is_binary(next) and next != "" and fills != [] ->
-        all_fills(credentials, opts, next, collected, page + 1)
-
-      true ->
-        {:ok, collected |> Enum.reverse() |> Enum.concat()}
+    # `GetFillsResponse.proof_token_required` says the data is withheld pending an EU
+    # SCA proof token (at-spec.yaml:7523-7540). A page with no fills AND that flag is
+    # "cannot see", not "none" — returning `[]` would report an empty history.
+    if fills == [] and body["proof_token_required"] == true do
+      {:refused, :proof_token_required}
+    else
+      case fill_step(body["cursor"], cursor, fills) do
+        {:next, next} -> all_fills(credentials, opts, next, collected, page + 1)
+        :done -> {:ok, collected |> Enum.reverse() |> Enum.concat()}
+        {:error, _reason} = error -> error
+      end
     end
   end
+
+  # An absent or empty cursor is the venue saying "no more". A page with no fills ends the
+  # walk whatever it carries. The cursor just sent, offered again, is the same page again (see
+  # `next_cursor/2`). A cursor that is present and not a string (a number, a map) is a page
+  # this cannot follow: it used to read as "no more", which returned the first pages as the
+  # whole history.
+  defp fill_step(nil, _sent, _fills), do: :done
+  defp fill_step("", _sent, _fills), do: :done
+  defp fill_step(_next, _sent, []), do: :done
+
+  defp fill_step(sent, sent, _fills) when is_binary(sent),
+    do: {:error, :pagination_cursor_repeated}
+
+  defp fill_step(next, _sent, _fills) when is_binary(next), do: {:next, next}
+  defp fill_step(_unreadable, _sent, _fills), do: {:error, :unexpected_response_shape}
 
   defp timestamp_param(nil), do: nil
   defp timestamp_param(%DateTime{} = at), do: DateTime.to_iso8601(at)
@@ -2048,7 +2089,8 @@ defmodule DpExchange.Coinbase.Rest do
          {:ok, order_id} <- required_id(row["order_id"], :order_id),
          {:ok, symbol} <- required_symbol(row["product_id"]),
          {:ok, side} <- required_side(row["side"]),
-         {:ok, trade_id} <- optional_trade_id(row["trade_id"]) do
+         {:ok, trade_id} <- optional_trade_id(row["trade_id"]),
+         {:ok, fee} <- optional_fee(row["commission"]) do
       {:ok,
        %Types.Fill{
          order_id: order_id,
@@ -2057,7 +2099,7 @@ defmodule DpExchange.Coinbase.Rest do
          side: side,
          quantity: quantity,
          price: price,
-         fee: decimal(row["commission"]),
+         fee: fee,
          # The venue names no fee currency on a fill. `nil`, not the quote currency guessed
          # from the pair — a fee can be charged in a third asset and often is.
          fee_currency: nil,
@@ -2208,13 +2250,16 @@ defmodule DpExchange.Coinbase.Rest do
   `OrderExecutionStatus`), `:symbol` (a non-empty string or a non-empty list of them) and
   `:limit` (a positive integer), then `:portfolio` (`validate_portfolio_option/1`). Errors:
   `{:invalid_status, v}`, `{:invalid_symbol, v}`, `{:invalid_limit, v}`,
-  `{:invalid_option, :portfolio, v}`.
+  `{:invalid_option, :portfolio, v}`, `{:invalid_option, :limit, v}` (above the spec's
+  `int32`) and `{:unknown_option, key}` for a key this read does not honour
+  (`check_options/2`).
   """
   @spec validate_order_filters(keyword()) :: :ok | {:error, term()}
   def validate_order_filters(opts) do
-    with :ok <- valid_statuses(Keyword.get(opts, :status)),
+    with :ok <- check_options(opts, [:status, :symbol, :limit, :portfolio]),
+         :ok <- valid_statuses(Keyword.get(opts, :status)),
          :ok <- valid_order_symbols(Keyword.get(opts, :symbol)),
-         :ok <- valid_page_size(Keyword.get(opts, :limit)) do
+         :ok <- valid_page_size(Keyword.get(opts, :limit), @max_int32) do
       validate_portfolio_option(opts)
     end
   end
@@ -2250,14 +2295,57 @@ defmodule DpExchange.Coinbase.Rest do
   Refuses `opts[:portfolio]` on a read that cannot honour it:
   `{:error, {:unsupported_option, :portfolio}}`. The futures (CFM) endpoints take no
   portfolio parameter; ignoring the option would answer for a different scope than asked.
+  Any other key is `{:error, {:unknown_option, key}}` and non-keyword options
+  `{:error, {:invalid_options, v}}` (`check_options/2`).
   """
-  @spec reject_portfolio_option(keyword()) :: :ok | {:error, {:unsupported_option, :portfolio}}
+  @spec reject_portfolio_option(term()) :: :ok | {:error, term()}
   def reject_portfolio_option(opts) do
-    case Keyword.get(opts, :portfolio) do
-      nil -> :ok
-      _scope -> {:error, {:unsupported_option, :portfolio}}
+    with :ok <- check_options(opts, [:portfolio]) do
+      case Keyword.get(opts, :portfolio) do
+        nil -> :ok
+        _scope -> {:error, {:unsupported_option, :portfolio}}
+      end
     end
   end
+
+  # The keys `request/5` forwards to `Core.HttpClient` and the credential `opts_credentials/1`
+  # reads. They are accepted on every read; any other key a read does not name is not.
+  @transport_options [
+    :timeout,
+    :retry_attempts,
+    :retry_delay,
+    :plug,
+    :weight,
+    :rate_limit_blocking,
+    :limiter,
+    :credentials
+  ]
+
+  @doc """
+  Refuses an option key a read does not honour: `{:error, {:unknown_option, key}}`.
+
+  A misspelled `limt: 5` or `symbl: "BTC-USD"` used to be dropped without a word, and the
+  call answered for a different question than the one asked (an unfiltered, unbounded
+  history under a filter's name). `allowed` is the read's own keys; the transport keys
+  (`:plug`, `:retry_attempts`, `:timeout`, `:credentials` and so on) are always accepted.
+  Options that are not a keyword list at all are `{:error, {:invalid_options, v}}`.
+  """
+  @spec check_options(term(), [atom()]) ::
+          :ok | {:error, {:unknown_option, term()} | {:invalid_options, term()}}
+  def check_options(opts, allowed), do: check_keys(opts, allowed ++ @transport_options)
+
+  defp check_keys(opts, allowed) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Enum.find(Keyword.keys(opts), &(&1 not in allowed)) do
+        nil -> :ok
+        key -> {:error, {:unknown_option, key}}
+      end
+    else
+      {:error, {:invalid_options, opts}}
+    end
+  end
+
+  defp check_keys(opts, _allowed), do: {:error, {:invalid_options, opts}}
 
   @doc """
   The local checks `get_trade_history/2` runs on its options before any request:
@@ -2267,17 +2355,22 @@ defmodule DpExchange.Coinbase.Rest do
   `{:invalid_trade_types, v}`, `{:invalid_symbol, v}`, `{:invalid_limit, v}`,
   `{:invalid_order_id, v}`, `{:invalid_time, :start | :end, v}`,
   `{:invalid_range, [start: s, end: e]}` (the window the caller passed),
-  `{:invalid_option, :portfolio, v}`. A string or map in `:start` / `:end` went to the
+  `{:invalid_option, :portfolio, v}`, `{:invalid_option, :limit, v}` (above the spec's
+  `int64`) and `{:unknown_option, key}` for a key this read does not honour
+  (`check_options/2`). A string or map in `:start` / `:end` went to the
   venue as given (or raised in the query encoder), and what it makes of an inverted window is
   unmeasured.
   """
+  @fill_options [:trade_types, :symbol, :order_id, :start, :end, :limit, :portfolio]
+
   @spec validate_fill_filters(keyword()) :: :ok | {:error, term()}
   def validate_fill_filters(opts) do
-    with :ok <- valid_trade_types(Config.opt(opts, :trade_types, ["FILL"])),
+    with :ok <- check_options(opts, @fill_options),
+         :ok <- valid_trade_types(Config.opt(opts, :trade_types, ["FILL"])),
          :ok <- valid_order_symbols(Keyword.get(opts, :symbol)),
          :ok <- valid_fill_order_ids(Keyword.get(opts, :order_id)),
          :ok <- valid_fill_window(Keyword.get(opts, :start), Keyword.get(opts, :end)),
-         :ok <- valid_page_size(Keyword.get(opts, :limit)) do
+         :ok <- valid_page_size(Keyword.get(opts, :limit), @max_int64) do
       validate_portfolio_option(opts)
     end
   end
@@ -2421,19 +2514,19 @@ defmodule DpExchange.Coinbase.Rest do
   or `{:error, :missing_portfolio}`. The same uuid on both sides moves nothing and is
   refused as `{:error, {:invalid_transfer, :same_account}}` (family convention W4).
   """
-  @spec transfer_portfolios(keyword()) ::
-          {:ok, String.t(), String.t()}
-          | {:error, :missing_portfolio | {:invalid_transfer, :same_account}}
+  @spec transfer_portfolios(term()) :: {:ok, String.t(), String.t()} | {:error, term()}
   def transfer_portfolios(opts) do
-    case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
-      {same, same} when is_binary(same) and same != "" ->
-        {:error, {:invalid_transfer, :same_account}}
+    with :ok <- check_options(opts, [:from, :to]) do
+      case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
+        {same, same} when is_binary(same) and same != "" ->
+          {:error, {:invalid_transfer, :same_account}}
 
-      {from, to} when is_binary(from) and is_binary(to) and from != "" and to != "" ->
-        {:ok, from, to}
+        {from, to} when is_binary(from) and is_binary(to) and from != "" and to != "" ->
+          {:ok, from, to}
 
-      _missing ->
-        {:error, :missing_portfolio}
+        _missing ->
+          {:error, :missing_portfolio}
+      end
     end
   end
 
@@ -2442,8 +2535,10 @@ defmodule DpExchange.Coinbase.Rest do
   `{:error, :name_required}`. An empty name is not a name: the venue has no notion of a
   nameless portfolio and what it does with `""` is unmeasured.
   """
-  @spec required_name(keyword()) :: {:ok, String.t()} | {:error, :name_required}
-  def required_name(opts), do: portfolio_name(Keyword.get(opts, :name))
+  @spec required_name(term()) :: {:ok, String.t()} | {:error, term()}
+  def required_name(opts) do
+    with :ok <- check_options(opts, [:name]), do: portfolio_name(Keyword.get(opts, :name))
+  end
 
   @doc """
   The local checks `rename_portfolio/4` runs before any request: the portfolio uuid is a
@@ -2477,9 +2572,10 @@ defmodule DpExchange.Coinbase.Rest do
   (docs/reference/coinbase/openapi/at-spec.yaml:2093-2131). Error:
   `{:invalid_option, key, value}`.
   """
-  @spec validate_summary_filters(keyword()) :: :ok | {:error, {:invalid_option, atom(), term()}}
+  @spec validate_summary_filters(term()) :: :ok | {:error, term()}
   def validate_summary_filters(opts) do
-    with :ok <- enum_option(opts, :product_type, @product_types),
+    with :ok <- check_options(opts, [:product_type, :contract_expiry_type, :product_venue]),
+         :ok <- enum_option(opts, :product_type, @product_types),
          :ok <- enum_option(opts, :contract_expiry_type, @contract_expiry_types) do
       enum_option(opts, :product_venue, @product_venues)
     end
@@ -2490,9 +2586,11 @@ defmodule DpExchange.Coinbase.Rest do
   spec's enum (`UNDEFINED DEFAULT CONSUMER INTX`, at-spec.yaml:1311-1318). Error:
   `{:invalid_option, :portfolio_type, value}`.
   """
-  @spec validate_portfolio_filter(keyword()) ::
-          :ok | {:error, {:invalid_option, atom(), term()}}
-  def validate_portfolio_filter(opts), do: enum_option(opts, :portfolio_type, @portfolio_types)
+  @spec validate_portfolio_filter(term()) :: :ok | {:error, term()}
+  def validate_portfolio_filter(opts) do
+    with :ok <- check_options(opts, [:portfolio_type]),
+         do: enum_option(opts, :portfolio_type, @portfolio_types)
+  end
 
   # An enum parameter is sent exactly as the venue spells it, so only that spelling passes.
   # A word outside the list is refused because the venue's handling of an unknown enum value
@@ -2524,7 +2622,9 @@ defmodule DpExchange.Coinbase.Rest do
   defp candle_params(timeframe, range, enum, opts) do
     width = timeframe_seconds(timeframe)
 
-    with {:ok, limit} <- candle_limit(opts),
+    with :ok <- check_options(opts, [:limit, :include_partial]),
+         :ok <- check_range_keys(range),
+         {:ok, limit} <- candle_limit(opts),
          :ok <- include_partial_option(opts),
          {:ok, start, finish} <- candle_window(range, width),
          {:ok, params} <- candle_span(start, finish, width, enum, range) do
@@ -2553,6 +2653,16 @@ defmodule DpExchange.Coinbase.Rest do
       other -> {:error, {:invalid_option, :limit, other}}
     end
   end
+
+  # A misspelt bound (`strat:`) left the window at its 300-bar default while looking like a
+  # bounded read. A range that is not a keyword list is `candle_window/2`'s `:invalid_range`.
+  defp check_range_keys(range) when is_list(range) do
+    if Keyword.keyword?(range),
+      do: check_keys(range, [:start, :end]),
+      else: :ok
+  end
+
+  defp check_range_keys(_range), do: :ok
 
   defp include_partial_option(opts) do
     case Keyword.get(opts, :include_partial) do
@@ -2866,7 +2976,8 @@ defmodule DpExchange.Coinbase.Rest do
   @spec trades_options(keyword()) ::
           {:ok, pos_integer(), DateTime.t() | nil, DateTime.t() | nil} | {:error, term()}
   def trades_options(opts) do
-    with {:ok, limit} <- trades_limit(Keyword.get(opts, :limit)),
+    with :ok <- check_options(opts, [:limit, :since, :end, :include_broken]),
+         {:ok, limit} <- trades_limit(Keyword.get(opts, :limit)),
          {:ok, since} <- trades_bound(opts, :since),
          {:ok, finish} <- trades_bound(opts, :end) do
       {:ok, limit, since, finish}
@@ -3248,13 +3359,14 @@ defmodule DpExchange.Coinbase.Rest do
 
   # `:depth` is the family's name for levels per side (MD5) and is sent as the venue's
   # `limit`. The old `:limit` spelling is refused by name, never read as `:depth`.
+  #
+  # `:limit` passes `check_options/2` only to be refused by name, with the more useful answer.
   defp book_options(opts) do
-    depth = Keyword.get(opts, :depth)
-    increment = Keyword.get(opts, :aggregation_price_increment)
-
-    with :ok <- book_limit_refused(opts),
+    with :ok <- check_options(opts, [:depth, :aggregation_price_increment, :limit]),
+         :ok <- book_limit_refused(opts),
+         depth = Keyword.get(opts, :depth),
          :ok <- book_depth(depth),
-         {:ok, increment} <- book_increment(increment) do
+         {:ok, increment} <- book_increment(Keyword.get(opts, :aggregation_price_increment)) do
       {:ok, depth, increment}
     end
   end
@@ -3583,6 +3695,18 @@ defmodule DpExchange.Coinbase.Rest do
   defp required_trade_id(nil), do: {:error, {:missing_required_field, :id}}
   defp required_trade_id(""), do: {:error, {:missing_required_field, :id}}
   defp required_trade_id(_unreadable), do: {:error, :unexpected_response_shape}
+
+  # A commission the venue did not state (absent, `null` or `""`) is `nil`: "did not say". One
+  # it stated and this cannot read (`"abc"`, `"NaN"`, `"Infinity"`, a map) used to become the
+  # same `nil` through bare `decimal/1`, which reads as a fee-free fill. Refused instead.
+  defp optional_fee(value) when value in [nil, ""], do: {:ok, nil}
+
+  defp optional_fee(value) do
+    case decimal(value) do
+      nil -> {:error, {:invalid_decimal, :fee, value}}
+      fee -> {:ok, fee}
+    end
+  end
 
   # A fill's `trade_id` may be absent (`nil`), and when present is a string.
   defp optional_trade_id(nil), do: {:ok, nil}
@@ -4841,9 +4965,16 @@ defmodule DpExchange.Coinbase.Rest do
 
   # The venue's page size. Sent as given before, so `limit: 0`, `-5` or `"x"` reached the
   # venue, whose reading of them is unmeasured.
-  defp valid_page_size(nil), do: :ok
-  defp valid_page_size(limit) when is_integer(limit) and limit > 0, do: :ok
-  defp valid_page_size(limit), do: {:error, {:invalid_limit, limit}}
+  # The spec types `limit` as int32 for the order list and int64 for fills (at-spec.yaml:900-908,
+  # :1041-1047). Above the type is `{:invalid_option, :limit, v}`, as `get_trades/2` answers it,
+  # rather than a value the venue's decoder cannot hold sent for it to reject (or wrap).
+  defp valid_page_size(nil, _max), do: :ok
+
+  defp valid_page_size(limit, max) when is_integer(limit) and limit > max,
+    do: {:error, {:invalid_option, :limit, limit}}
+
+  defp valid_page_size(limit, _max) when is_integer(limit) and limit > 0, do: :ok
+  defp valid_page_size(limit, _max), do: {:error, {:invalid_limit, limit}}
 
   defp venue_symbol(nil), do: nil
   defp venue_symbol(symbols) when is_list(symbols), do: Enum.map(symbols, &venue_symbol/1)

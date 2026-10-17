@@ -20,6 +20,54 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **An option a read does not honour is refused by name: `{:error, {:unknown_option, key}}`.**
+  `get_orders/2`, `get_trade_history/2`, `get_trades/2`, `get_historical_prices/4` (its
+  options and its range), `get_order_book/2`, `get_balances/2`, `get_accounts/2`,
+  `get_fees/2`, `get_trade_volume/2`, `list_portfolios/2`, `get_portfolio_breakdown/3`,
+  `create_portfolio/2`, `transfer_internal/4`, every futures (CFM) read and sweep call
+  (`schedule_futures_sweep/2` included: a misspelt `usd_amout:` read as absent sweeps every
+  available dollar), `get_current_margin_window/2`, the Prime staking calls (`stake/3`,
+  `unstake/3`, `claim_rewards`, `query_transaction_validators`) and `subscribe/2` /
+  `subscribe_notices/1` (a misspelt `too:` subscribed the caller) dropped a misspelt key
+  without a word, and
+  answered for a different question than the one asked: `limt: 5` returned an unbounded
+  history, `symbl: "BTC-USD"` an unfiltered one, `strat:` a default 300-bar window. The
+  transport keys (`:plug`, `:retry_attempts`, `:retry_delay`, `:timeout`, `:weight`,
+  `:rate_limit_blocking`, `:limiter`, `:credentials`) are always accepted. Options that are
+  not a keyword list are `{:error, {:invalid_options, v}}` (they raised
+  `ArgumentError`). `Fake` refuses identically (it calls the same `Rest` validators).
+  A caller that passed an extra key to these reads must stop passing it. Pinned by
+  `option_and_decoder_review_test.exs`.
+
+### Fixed
+
+- **`get_orders/2` and `get_trade_history/2` sent a `:limit` above the spec's type.** The
+  order list's `limit` is `int32` and the fills' `int64` (at-spec.yaml); a larger integer is
+  now `{:error, {:invalid_option, :limit, v}}`, as `get_trades/2` answers it, and nothing is
+  sent.
+- **A fill commission the venue stated and this could not read became a fee-free fill.**
+  `"abc"`, `"NaN"`, `"Infinity"` or an object in `commission` went through bare `decimal/1`
+  to `fee: nil`. It is now `{:error, {:invalid_decimal, :fee, v}}`; an absent, `null` or `""`
+  commission is still `nil`, "not stated".
+- **A fills `cursor` that was present and not a string ended the walk as complete.** A
+  number or object there returned the pages so far as the whole history. It is now
+  `{:error, :unexpected_response_shape}`.
+- **A Prime `opts[:extra]` / `opts[:body]` with a key that is not an atom or string** (a
+  tuple, a map) raised `Protocol.UndefinedError` in `to_string/1` in the caller's process;
+  it is now `{:invalid_extra, v}` / `{:invalid_body, v}`.
+- **The futures (CFM) reads without options (`get_futures_balance_summary/2`,
+  `list_futures_sweeps/2`, `cancel_futures_sweep/2`, `get_intraday_margin_setting/2`,
+  `set_intraday_margin_setting/3`) ignored `portfolio:`**; they now refuse it as
+  `{:unsupported_option, :portfolio}`, as `get_positions/2` already did.
+- **`quote_conversion/5` and `get_conversion/3` raised `FunctionClauseError` in the caller's
+  process for a `total_fee` that was a string or a number** (`get_in/2` through
+  `Access.get/3`). An absent or `null` `total_fee` is `fee: nil` ("not stated"); one the
+  venue sent that is not an object with a readable `amount` (a string, a number, an object
+  with no `amount` or an unreadable one) is `{:error, :unexpected_response_shape}`, since
+  "no fee" and "a fee this could not read" are different answers.
+
 ## [0.3.136] - 2026-10-17
 
 ### Fixed

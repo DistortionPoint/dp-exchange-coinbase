@@ -760,7 +760,12 @@ defmodule DpExchange.Coinbase do
   # The feed process. Named so a consumer running two of this venue — different
   # credentials, different scopes — keeps them apart; defaulting to the module name
   # covers the single-venue case without ceremony.
-  defp feed(opts), do: Config.opt(opts, :feed, Feed)
+  #
+  # Options that are not a list fall to the default here so the call that can refuse
+  # (`subscribe/2`, `update_symbols/2`, `subscribe_notices/1`) reaches `Feed`'s own
+  # `{:invalid_options, v}`; `Config.opt/3` raised `FunctionClauseError` on them.
+  defp feed(opts) when is_list(opts), do: Config.opt(opts, :feed, Feed)
+  defp feed(_not_a_list), do: Feed
 
   # A pid, a registered name, `{:global, _}` or `{:via, _, _}`. `Process.alive?/1` takes only
   # a pid and raises on a remote one, so a pid on another node is the one case left to
@@ -1068,6 +1073,12 @@ defmodule DpExchange.Coinbase do
   # The idempotency key is fixed HERE, before the call, so that a `2xx` whose body names no
   # transaction can still answer `{:write_unconfirmed, key, _}` with the key that was sent.
   defp prime_write(operation, asset, amount, opts) do
+    with :ok <- Prime.validate_stake_options(opts) do
+      do_prime_write(operation, asset, amount, opts)
+    end
+  end
+
+  defp do_prime_write(operation, asset, amount, opts) do
     credentials = Keyword.get(opts, :credentials, %{})
     key = Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate()
     opts = Keyword.put(opts, :idempotency_key, key)

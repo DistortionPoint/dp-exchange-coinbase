@@ -70,7 +70,7 @@ defmodule DpExchange.Coinbase.Prime do
   is worse than a map a caller has to read.
   """
 
-  alias DpExchange.Coinbase.IdempotencyKey
+  alias DpExchange.Coinbase.{IdempotencyKey, Rest}
   alias DpExchange.Core.{Config, HttpClient, Types}
 
   @base_url "https://api.prime.coinbase.com"
@@ -109,6 +109,7 @@ defmodule DpExchange.Coinbase.Prime do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def stake_portfolio(credentials, portfolio_id, asset, amount, opts) do
     with :ok <- valid_portfolio(portfolio_id),
+         :ok <- validate_stake_options(opts),
          :ok <- valid_asset(asset),
          :ok <- valid_amount(amount),
          :ok <- valid_key(opts),
@@ -134,6 +135,7 @@ defmodule DpExchange.Coinbase.Prime do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def unstake_portfolio(credentials, portfolio_id, asset, amount, opts) do
     with :ok <- valid_portfolio(portfolio_id),
+         :ok <- validate_stake_options(opts),
          :ok <- valid_asset(asset),
          :ok <- valid_amount(amount),
          :ok <- valid_key(opts),
@@ -188,6 +190,7 @@ defmodule DpExchange.Coinbase.Prime do
   @spec validate_validators_query(term(), keyword()) :: :ok | {:error, term()}
   def validate_validators_query(portfolio_id, opts) do
     with :ok <- valid_portfolio(portfolio_id),
+         :ok <- Rest.check_options(opts, [:transaction_ids, :extra]),
          :ok <- valid_extra(opts) do
       case Config.opt(opts, :transaction_ids, nil) do
         ids when is_list(ids) and ids != [] -> valid_transaction_ids(ids)
@@ -238,6 +241,7 @@ defmodule DpExchange.Coinbase.Prime do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def stake_wallet(credentials, portfolio_id, wallet_id, asset, amount, opts) do
     with :ok <- valid_scope(portfolio_id, wallet_id),
+         :ok <- validate_stake_options(opts),
          :ok <- valid_asset(asset),
          :ok <- valid_amount(amount),
          :ok <- valid_key(opts),
@@ -271,6 +275,7 @@ defmodule DpExchange.Coinbase.Prime do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def unstake_wallet(credentials, portfolio_id, wallet_id, asset, amount, opts) do
     with :ok <- valid_scope(portfolio_id, wallet_id),
+         :ok <- validate_stake_options(opts),
          :ok <- valid_asset(asset),
          :ok <- valid_amount(amount),
          :ok <- valid_key(opts),
@@ -400,6 +405,7 @@ defmodule DpExchange.Coinbase.Prime do
   @spec validate_claim(term(), term(), keyword()) :: :ok | {:error, term()}
   def validate_claim(portfolio_id, wallet_id, opts) do
     with :ok <- valid_scope(portfolio_id, wallet_id),
+         :ok <- Rest.check_options(opts, [:amount, :body, :idempotency_key]),
          :ok <- valid_claim_amount(Config.opt(opts, :amount, nil)),
          :ok <- valid_key(opts) do
       valid_claim_body(Config.opt(opts, :body, %{}))
@@ -447,6 +453,19 @@ defmodule DpExchange.Coinbase.Prime do
   def validate_scope(portfolio_id, nil), do: valid_portfolio(portfolio_id)
   def validate_scope(portfolio_id, wallet_id), do: valid_scope(portfolio_id, wallet_id)
 
+  @stake_options [:idempotency_key, :extra, :metadata, :portfolio_id, :wallet_id]
+
+  @doc """
+  Refuses an option a staking write does not honour (`{:error, {:unknown_option, key}}`) and
+  options that are not a keyword list (`{:error, {:invalid_options, v}}`). The transport keys
+  always pass; see `DpExchange.Coinbase.Rest.check_options/2`. A misspelt `metdata:` was
+  dropped and the stake sent without it. Exposed so `DpExchange.Coinbase.Fake` and the
+  facade refuse exactly as the real path does.
+  """
+  @spec validate_stake_options(term()) ::
+          :ok | {:error, {:unknown_option, term()} | {:invalid_options, term()}}
+  def validate_stake_options(opts), do: Rest.check_options(opts, @stake_options)
+
   @doc """
   The field checks a staking write (`stake/3` / `unstake/3`) runs after the scope, in the
   order the real path runs them: `asset` a non-blank string (`{:invalid_asset, v}`), `amount`
@@ -457,7 +476,8 @@ defmodule DpExchange.Coinbase.Prime do
   """
   @spec validate_write(term(), term(), keyword()) :: :ok | {:error, term()}
   def validate_write(asset, amount, opts) do
-    with :ok <- valid_asset(asset),
+    with :ok <- validate_stake_options(opts),
+         :ok <- valid_asset(asset),
          :ok <- valid_amount(amount),
          :ok <- valid_key(opts) do
       valid_extra(opts)
@@ -544,10 +564,16 @@ defmodule DpExchange.Coinbase.Prime do
   # had been validated and before anything was sent.
   defp valid_extra(opts) do
     case Config.opt(opts, :extra, %{}) do
-      extra when is_map(extra) -> :ok
-      other -> {:error, {:invalid_extra, other}}
+      extra when is_map(extra) -> if nameable_keys?(extra), do: :ok, else: invalid_extra(extra)
+      other -> invalid_extra(other)
     end
   end
+
+  defp invalid_extra(value), do: {:error, {:invalid_extra, value}}
+
+  # `extra_fields/1` and `claim_rewards_body/1` spell every key with `to_string/1`, which
+  # raised `Protocol.UndefinedError` in the caller's process for a tuple or map key.
+  defp nameable_keys?(map), do: Enum.all?(Map.keys(map), &(is_atom(&1) or is_binary(&1)))
 
   defp valid_asset(asset) when is_binary(asset) and asset != "", do: :ok
   defp valid_asset(asset), do: {:error, {:invalid_asset, asset}}
@@ -681,7 +707,11 @@ defmodule DpExchange.Coinbase.Prime do
   # non-map raised inside the caller's process. An atom `:idempotency_key` is the same field
   # spelled differently, so it is checked as the string key it becomes.
   defp valid_claim_body(body) when is_map(body) do
-    with :ok <- valid_claim_key(body), do: valid_claim_inputs(body)
+    if nameable_keys?(body) do
+      with :ok <- valid_claim_key(body), do: valid_claim_inputs(body)
+    else
+      {:error, {:invalid_body, body}}
+    end
   end
 
   defp valid_claim_body(body), do: {:error, {:invalid_body, body}}

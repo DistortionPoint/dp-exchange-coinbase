@@ -730,12 +730,13 @@ defmodule DpExchange.Coinbase.Fake do
   def subscribe(symbols, opts \\ []) do
     symbols = canonical_case(symbols)
 
-    channels = Config.opt(opts, :channels, [:quotes])
-
-    # Refused as `Feed.subscribe/3` refuses, in the same order: symbols, then subscriber. An
-    # unknown `:channels` kind raises when a real Feed starts; this has no start step, so it
-    # is refused here, before anything is pushed.
+    # Refused as `Feed.subscribe/3` refuses, in the same order: symbols, options, then
+    # subscriber. `:channels` is this fake's own documented seam (the real feed takes it at
+    # start, not here). An unknown `:channels` kind raises when a real Feed starts; this has
+    # no start step, so it is refused here, before anything is pushed.
     with :ok <- Feed.check_symbols(symbols),
+         :ok <- Rest.check_options(opts, Feed.subscribe_options()),
+         channels = Config.opt(opts, :channels, [:quotes]),
          {:ok, target} <- Feed.valid_subscriber(Config.opt(opts, :to, self())),
          :ok <- Feed.check_channels(channels) do
       do_subscribe(symbols, target, channels)
@@ -914,7 +915,9 @@ defmodule DpExchange.Coinbase.Fake do
   def subscribe_notices(opts \\ []) do
     # Registers and sends nothing: the real feed announces no `:link_up` on registration
     # (only on an actual link change), so a consumer's test must not see one either.
-    with {:ok, _target} <- Feed.valid_subscriber(Config.opt(opts, :to, self())), do: :ok
+    with :ok <- Feed.validate_subscribe_options(opts),
+         {:ok, _target} <- Feed.valid_subscriber(Config.opt(opts, :to, self())),
+         do: :ok
   end
 
   # As the real `Core.Fanout` delivers: a pid that is gone, or an atom naming no registered
@@ -1165,7 +1168,8 @@ defmodule DpExchange.Coinbase.Fake do
   # one that reported itself settled would teach a consumer to spend an asset still unbonding.
   defp fake_staking(type, asset, amount, opts) do
     with_injection(fn ->
-      with {:ok, portfolio} <- fake_portfolio(opts),
+      with :ok <- Prime.validate_stake_options(opts),
+           {:ok, portfolio} <- fake_portfolio(opts),
            :ok <- Prime.validate_scope(portfolio, Keyword.get(opts, :wallet_id)),
            :ok <- Prime.validate_write(asset, amount, opts),
            :ok <- fake_prime_credentials(opts) do
@@ -1632,8 +1636,8 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @spec get_futures_balance_summary(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def get_futures_balance_summary(credentials, _opts) do
-    with_credentials(credentials, fn ->
+  def get_futures_balance_summary(credentials, opts) do
+    with_checks(credentials, Rest.reject_portfolio_option(opts), fn ->
       {:ok,
        %{
          "futures_buying_power" => usd("9000"),
@@ -1662,8 +1666,10 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @spec list_futures_sweeps(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def list_futures_sweeps(credentials, _opts) do
-    with_credentials(credentials, fn -> {:ok, Process.get(@sweeps_key, [])} end)
+  def list_futures_sweeps(credentials, opts) do
+    with_checks(credentials, Rest.reject_portfolio_option(opts), fn ->
+      {:ok, Process.get(@sweeps_key, [])}
+    end)
   end
 
   @doc """
@@ -1706,8 +1712,8 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @spec cancel_futures_sweep(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def cancel_futures_sweep(credentials, _opts) do
-    with_credentials(credentials, fn ->
+  def cancel_futures_sweep(credentials, opts) do
+    with_checks(credentials, Rest.reject_portfolio_option(opts), fn ->
       case Process.get(@sweeps_key, []) do
         [] ->
           {:refused, :sweep_not_cancelled}
@@ -1727,8 +1733,8 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @spec get_intraday_margin_setting(map(), keyword()) ::
           {:ok, String.t()} | {:error, term()} | {:refused, term()}
-  def get_intraday_margin_setting(credentials, _opts) do
-    with_credentials(credentials, fn ->
+  def get_intraday_margin_setting(credentials, opts) do
+    with_checks(credentials, Rest.reject_portfolio_option(opts), fn ->
       {:ok, Process.get(@margin_setting_key, @default_margin_setting)}
     end)
   end
@@ -1741,8 +1747,12 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @spec set_intraday_margin_setting(map(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def set_intraday_margin_setting(credentials, setting, _opts) do
-    with_checks(credentials, Rest.validate_margin_setting(setting), fn ->
+  def set_intraday_margin_setting(credentials, setting, opts) do
+    checked =
+      with :ok <- Rest.validate_margin_setting(setting),
+           do: Rest.reject_portfolio_option(opts)
+
+    with_checks(credentials, checked, fn ->
       Process.put(@margin_setting_key, setting)
       {:ok, %{}}
     end)
