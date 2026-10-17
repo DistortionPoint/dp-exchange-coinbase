@@ -839,6 +839,20 @@ is a real implementation of the facade that answers from memory, models Coinbase
 refusals — unlisted symbols, `12h`, the 350 boundary — and passes the same conformance
 suite as the real adapter.
 
+**The fake exports every function the facade does, at the same arities.** A call that works
+against `DpExchange.Coinbase` never raises `UndefinedFunctionError` against the fake;
+`DpExchange.Coinbase.__info__(:functions) -- DpExchange.Coinbase.Fake.__info__(:functions)`
+is `[]` and a test holds it there. That includes the futures reads and sweeps
+(`list_futures_positions/1`, `get_futures_position/3`, `get_futures_balance_summary/2`,
+`list_futures_sweeps/2`, `schedule_futures_sweep/2`, `cancel_futures_sweep/2`, the intraday
+margin setting and window), the Prime staking reads and writes
+(`query_transaction_validators/3`, `staking_status/4`, `unstake_status/4`, `claim_rewards/4`,
+`preview_unstake_wallet/6`), `get_portfolio_breakdown/3`, `delete_portfolio/3`,
+`get_server_time/1` and `venue_does_not_serve/0`. Each runs the real function's own argument
+checks (the shared `Rest.validate_*` / `Prime.validate_*` helpers), in the real order, before
+the credential check (Prime's triple for the Prime calls), and answers with the vendor spec's
+shape. The fake's sweep queue and margin setting are remembered per process, like its orders.
+
 **The fake remembers the orders it placed, per process.** `place_order/3` issues a new id
 each time; `get_order/3` and `get_orders/2` return that order with its own symbol, side,
 size and price, `cancel_order/3` marks it cancelled so the next read says `:cancelled`, and

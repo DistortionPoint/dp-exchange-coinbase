@@ -20,6 +20,31 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- `DpExchange.Coinbase.Fake` now exports every function the facade does, at the same
+  arities. It lacked the futures reads and sweeps (`list_futures_positions/1`,
+  `get_futures_position/3`, `get_futures_balance_summary/2`, `list_futures_sweeps/2`,
+  `schedule_futures_sweep/2`, `cancel_futures_sweep/2`, `get_intraday_margin_setting/2`,
+  `set_intraday_margin_setting/3`, `get_current_margin_window/2`), the Prime staking calls
+  (`query_transaction_validators/3,4`, `staking_status/3,4`, `unstake_status/3,4`,
+  `claim_rewards/3,4`, `preview_unstake_wallet/5,6`), `get_portfolio_breakdown/3`,
+  `delete_portfolio/3`, `get_server_time/0,1`, `venue_does_not_serve/0`, and the zero-option
+  forms `get_market_overview/0` and `list_instruments/0`; a consumer's test calling any of
+  them got `UndefinedFunctionError` where production answered. Each runs the injected outcome,
+  the real function's own argument checks, the credential check (Prime's triple for Prime)
+  and answers in the vendor spec's shape. A new test asserts
+  `Coinbase.__info__(:functions) -- Fake.__info__(:functions) == []`.
+
+### Changed
+
+- New public validators shared by the real code and the Fake so they cannot drift:
+  `Rest.validate_futures_position/2`, `Rest.validate_sweep_amount/1`,
+  `Rest.validate_margin_setting/1`, `Rest.validate_margin_window_options/1`,
+  `Rest.validate_portfolio_breakdown/2`, `Prime.validate_validators_query/2`,
+  `Prime.validate_wallet_scope/2`, `Prime.validate_preview_unstake/3`,
+  `Prime.validate_claim/3`. Behaviour of the real calls is unchanged.
+
 ## [0.3.135] - 2026-10-17
 
 ### Dependencies

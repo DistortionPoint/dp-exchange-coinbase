@@ -165,21 +165,33 @@ defmodule DpExchange.Coinbase.Prime do
   @spec query_transaction_validators(credentials(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def query_transaction_validators(credentials, portfolio_id, opts) do
+    with :ok <- validate_validators_query(portfolio_id, opts) do
+      ids = Config.opt(opts, :transaction_ids, nil)
+
+      post(
+        "/portfolios/#{portfolio_id}/staking/transaction-validators/query",
+        Map.merge(extra_fields(opts), %{"transaction_ids" => ids}),
+        credentials: credentials,
+        opts: opts
+      )
+    end
+  end
+
+  @doc """
+  The local checks `query_transaction_validators/3` runs before anything is signed, in its
+  order: the portfolio id (`{:invalid_portfolio_id, v}`), `opts[:extra]` a map
+  (`{:invalid_extra, v}`), `opts[:transaction_ids]` present and non-empty
+  (`{:error, :missing_transaction_ids}`) and each id a non-empty string, at most 100
+  (`{:invalid_transaction_ids, ids}`). Exposed so `DpExchange.Coinbase.Fake` refuses exactly
+  as the real path does.
+  """
+  @spec validate_validators_query(term(), keyword()) :: :ok | {:error, term()}
+  def validate_validators_query(portfolio_id, opts) do
     with :ok <- valid_portfolio(portfolio_id),
          :ok <- valid_extra(opts) do
       case Config.opt(opts, :transaction_ids, nil) do
-        ids when is_list(ids) and ids != [] ->
-          with :ok <- valid_transaction_ids(ids) do
-            post(
-              "/portfolios/#{portfolio_id}/staking/transaction-validators/query",
-              Map.merge(extra_fields(opts), %{"transaction_ids" => ids}),
-              credentials: credentials,
-              opts: opts
-            )
-          end
-
-        _missing_or_empty ->
-          {:error, :missing_transaction_ids}
+        ids when is_list(ids) and ids != [] -> valid_transaction_ids(ids)
+        _missing_or_empty -> {:error, :missing_transaction_ids}
       end
     end
   end
@@ -300,7 +312,7 @@ defmodule DpExchange.Coinbase.Prime do
           keyword()
         ) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
-    with :ok <- valid_scope(portfolio_id, wallet_id), :ok <- valid_amount(amount) do
+    with :ok <- validate_preview_unstake(portfolio_id, wallet_id, amount) do
       post(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake/preview",
         %{"amount" => Decimal.to_string(amount, :normal)},
@@ -308,6 +320,17 @@ defmodule DpExchange.Coinbase.Prime do
         opts: opts
       )
     end
+  end
+
+  @doc """
+  The local checks `preview_unstake_wallet/6` runs before anything is signed: both ids
+  (`{:invalid_portfolio_id, v}` / `{:invalid_wallet_id, v}`), then the amount
+  (`{:invalid_amount, v}`). The asset is not checked, as in the real call. Exposed so
+  `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
+  """
+  @spec validate_preview_unstake(term(), term(), term()) :: :ok | {:error, term()}
+  def validate_preview_unstake(portfolio_id, wallet_id, amount) do
+    with :ok <- valid_scope(portfolio_id, wallet_id), do: valid_amount(amount)
   end
 
   @doc """
@@ -321,7 +344,7 @@ defmodule DpExchange.Coinbase.Prime do
   @spec unstake_status(credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def unstake_status(credentials, portfolio_id, wallet_id, opts) do
-    with :ok <- valid_scope(portfolio_id, wallet_id) do
+    with :ok <- validate_wallet_scope(portfolio_id, wallet_id) do
       get("/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake/status",
         credentials: credentials,
         opts: opts
@@ -358,16 +381,28 @@ defmodule DpExchange.Coinbase.Prime do
   @spec claim_rewards(credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def claim_rewards(credentials, portfolio_id, wallet_id, opts) do
-    with :ok <- valid_scope(portfolio_id, wallet_id),
-         :ok <- valid_claim_amount(Config.opt(opts, :amount, nil)),
-         :ok <- valid_key(opts),
-         :ok <- valid_claim_body(Config.opt(opts, :body, %{})) do
+    with :ok <- validate_claim(portfolio_id, wallet_id, opts) do
       post_write(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/claim_rewards",
         claim_rewards_body(opts),
         credentials,
         opts
       )
+    end
+  end
+
+  @doc """
+  The local checks `claim_rewards/4` runs before anything is signed, in its order: both ids,
+  `opts[:amount]` absent or a valid amount (`{:invalid_amount, v}`), `opts[:idempotency_key]`
+  absent or a UUID, and `opts[:body]` a map (`{:invalid_body, v}`). Exposed so
+  `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
+  """
+  @spec validate_claim(term(), term(), keyword()) :: :ok | {:error, term()}
+  def validate_claim(portfolio_id, wallet_id, opts) do
+    with :ok <- valid_scope(portfolio_id, wallet_id),
+         :ok <- valid_claim_amount(Config.opt(opts, :amount, nil)),
+         :ok <- valid_key(opts) do
+      valid_claim_body(Config.opt(opts, :body, %{}))
     end
   end
 
@@ -382,13 +417,23 @@ defmodule DpExchange.Coinbase.Prime do
   @spec staking_status(credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def staking_status(credentials, portfolio_id, wallet_id, opts) do
-    with :ok <- valid_scope(portfolio_id, wallet_id) do
+    with :ok <- validate_wallet_scope(portfolio_id, wallet_id) do
       get("/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/status",
         credentials: credentials,
         opts: opts
       )
     end
   end
+
+  @doc """
+  The id check the wallet-scoped reads (`staking_status/4`, `unstake_status/4`) and
+  `claim_rewards/4` run first: `portfolio_id` and `wallet_id` both required (a `nil` wallet is
+  `{:error, {:invalid_wallet_id, nil}}`, unlike `validate_scope/2`, where it means portfolio
+  scope). Exposed so `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
+  """
+  @spec validate_wallet_scope(term(), term()) ::
+          :ok | {:error, {:invalid_portfolio_id | :invalid_wallet_id, term()}}
+  def validate_wallet_scope(portfolio_id, wallet_id), do: valid_scope(portfolio_id, wallet_id)
 
   @doc """
   The id check every staking call runs first: `portfolio_id`, and `wallet_id` when the call is

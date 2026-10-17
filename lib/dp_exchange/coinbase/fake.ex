@@ -446,7 +446,7 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.get_market_overview/1`.
   """
   @impl true
-  def get_market_overview(opts) do
+  def get_market_overview(opts \\ []) do
     with_injection(fn ->
       with :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
         {:ok,
@@ -487,7 +487,7 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.list_instruments/1`.
   """
   @impl true
-  def list_instruments(opts) do
+  def list_instruments(opts \\ []) do
     with_injection(fn ->
       with :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
         {:ok, Enum.map(@symbols, &fake_instrument/1)}
@@ -1560,6 +1560,473 @@ defmodule DpExchange.Coinbase.Fake do
          "portfolio_uuid" => @default_portfolio_id,
          "portfolio_type" => "DEFAULT"
        }}
+    end)
+  end
+
+  # --- The facade's non-callback surface: futures, Prime staking, portfolio reads, the clock ----
+  #
+  # Every function below is on `DpExchange.Coinbase` and so must be here: a consumer testing
+  # against this fake must never meet an `UndefinedFunctionError` that the real package would not
+  # raise (`test/dp_exchange/coinbase/tick_ai_fake_parity_test.exs` asserts the two export the
+  # same name/arity set). Each one runs the injected outcome first, then the real function's own
+  # argument checks (`Rest.validate_*` / `Prime.validate_*`, called and not re-stated), then the
+  # credential, then answers with the shape the vendor spec documents
+  # (`docs/reference/coinbase/openapi/`). Amounts are the spec's `{value, currency, cbrn}` object.
+
+  @futures_product "BIT-28JUL23-CDE"
+  @fake_wallet_address "0x8f3e1b7c2d4a69f05e1c3b7a9d2f4e6081a3c5d7"
+  @fake_validator "0xa1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+  @sweeps_key {__MODULE__, :sweeps}
+  @margin_setting_key {__MODULE__, :margin_setting}
+  @default_margin_setting "INTRADAY_MARGIN_SETTING_STANDARD"
+
+  @doc """
+  The venue's own futures position rows, unnormalised: one short with `daily_realized_pnl`
+  and `expiration_time`. Needs a credential in `opts[:credentials]`; `opts[:portfolio]` is
+  refused, as the futures endpoints take none.
+
+  See `DpExchange.Coinbase.list_futures_positions/1`.
+  """
+  @spec list_futures_positions(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_futures_positions(opts) do
+    with_checks(opts_credentials(opts), Rest.reject_portfolio_option(opts), fn ->
+      {:ok, [futures_position_row()]}
+    end)
+  end
+
+  @doc """
+  The one in-memory futures position by product id; any other product is
+  `{:refused, :not_listed}`, as the venue's 404 is. Needs a credential.
+
+  See `DpExchange.Coinbase.get_futures_position/3`.
+  """
+  @spec get_futures_position(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_futures_position(credentials, product_id, opts) do
+    with_checks(credentials, Rest.validate_futures_position(product_id, opts), fn ->
+      if product_id == @futures_product,
+        do: {:ok, futures_position_row()},
+        else: {:refused, :not_listed}
+    end)
+  end
+
+  defp futures_position_row do
+    %{
+      "product_id" => @futures_product,
+      "expiration_time" => "2023-07-28T15:00:00Z",
+      "side" => "SHORT",
+      "number_of_contracts" => "3",
+      "current_price" => "29500",
+      "avg_entry_price" => "30000",
+      "unrealized_pnl" => "1500",
+      "daily_realized_pnl" => "0"
+    }
+  end
+
+  @doc """
+  An in-memory futures balance summary, every amount the spec's `{value, currency, cbrn}`
+  object. Needs a credential.
+
+  See `DpExchange.Coinbase.get_futures_balance_summary/2`.
+  """
+  @spec get_futures_balance_summary(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_futures_balance_summary(credentials, _opts) do
+    with_credentials(credentials, fn ->
+      {:ok,
+       %{
+         "futures_buying_power" => usd("9000"),
+         "total_usd_balance" => usd("10000"),
+         "cbi_usd_balance" => usd("4000"),
+         "cfm_usd_balance" => usd("6000"),
+         "total_open_orders_hold_amount" => usd("0"),
+         "unrealized_pnl" => usd("1500"),
+         "daily_realized_pnl" => usd("0"),
+         "initial_margin" => usd("1000"),
+         "available_margin" => usd("9000"),
+         "liquidation_threshold" => usd("500"),
+         "liquidation_buffer_amount" => usd("8500"),
+         "liquidation_buffer_percentage" => "94.4"
+       }}
+    end)
+  end
+
+  defp usd(value), do: %{"value" => value, "currency" => "USD", "cbrn" => ""}
+
+  @doc """
+  The sweeps this process scheduled and has not cancelled (none to begin with, as the venue
+  reports an empty queue). Needs a credential.
+
+  See `DpExchange.Coinbase.list_futures_sweeps/2`.
+  """
+  @spec list_futures_sweeps(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_futures_sweeps(credentials, _opts) do
+    with_credentials(credentials, fn -> {:ok, Process.get(@sweeps_key, [])} end)
+  end
+
+  @doc """
+  Schedules a `PENDING` sweep, remembered so `list_futures_sweeps/2` reports it. Omitting
+  `opts[:usd_amount]` sweeps everything (`should_sweep_all: true`), as the venue does; a
+  present amount is checked by `Rest.validate_sweep_amount/1`. Needs a credential.
+
+  See `DpExchange.Coinbase.schedule_futures_sweep/2`.
+  """
+  @spec schedule_futures_sweep(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def schedule_futures_sweep(credentials, opts) do
+    with_injection(fn ->
+      with {:ok, amount} <- Rest.validate_sweep_amount(opts),
+           :ok <- Rest.validate_credentials(credentials) do
+        sweeps = Process.get(@sweeps_key, [])
+        Process.put(@sweeps_key, sweeps ++ [sweep_row(length(sweeps) + 1, amount)])
+        {:ok, %{"success" => true}}
+      end
+    end)
+  end
+
+  defp sweep_row(number, amount) do
+    base = %{
+      "id" => "fake-sweep-#{number}",
+      "should_sweep_all" => is_nil(amount),
+      "status" => "PENDING",
+      "scheduled_time" => DateTime.to_iso8601(@at)
+    }
+
+    if amount, do: Map.put(base, "requested_amount", usd(amount)), else: base
+  end
+
+  @doc """
+  Cancels *the* pending sweep, which the venue does without an id: the oldest one this process
+  scheduled. With none pending the answer is `{:refused, :sweep_not_cancelled}`, the venue's
+  `success: false` read as the real path reads it. Needs a credential.
+
+  See `DpExchange.Coinbase.cancel_futures_sweep/2`.
+  """
+  @spec cancel_futures_sweep(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def cancel_futures_sweep(credentials, _opts) do
+    with_credentials(credentials, fn ->
+      case Process.get(@sweeps_key, []) do
+        [] ->
+          {:refused, :sweep_not_cancelled}
+
+        [_cancelled | remaining] ->
+          Process.put(@sweeps_key, remaining)
+          {:ok, %{"success" => true}}
+      end
+    end)
+  end
+
+  @doc """
+  The margin setting last set in this process, else `INTRADAY_MARGIN_SETTING_STANDARD`.
+  Needs a credential.
+
+  See `DpExchange.Coinbase.get_intraday_margin_setting/2`.
+  """
+  @spec get_intraday_margin_setting(map(), keyword()) ::
+          {:ok, String.t()} | {:error, term()} | {:refused, term()}
+  def get_intraday_margin_setting(credentials, _opts) do
+    with_credentials(credentials, fn ->
+      {:ok, Process.get(@margin_setting_key, @default_margin_setting)}
+    end)
+  end
+
+  @doc """
+  Sets the margin setting for this process after `Rest.validate_margin_setting/1`; the venue
+  answers an empty object. Needs a credential.
+
+  See `DpExchange.Coinbase.set_intraday_margin_setting/3`.
+  """
+  @spec set_intraday_margin_setting(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def set_intraday_margin_setting(credentials, setting, _opts) do
+    with_checks(credentials, Rest.validate_margin_setting(setting), fn ->
+      Process.put(@margin_setting_key, setting)
+      {:ok, %{}}
+    end)
+  end
+
+  @doc """
+  An in-memory overnight margin window with both kill switches off. Checks
+  `opts[:margin_profile_type]` as the real call does. Needs a credential.
+
+  See `DpExchange.Coinbase.get_current_margin_window/2`.
+  """
+  @spec get_current_margin_window(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_current_margin_window(credentials, opts) do
+    with_checks(credentials, Rest.validate_margin_window_options(opts), fn ->
+      {:ok,
+       %{
+         "margin_window" => %{
+           "margin_window_type" => "MARGIN_WINDOW_TYPE_OVERNIGHT",
+           "end_time" => @at |> DateTime.add(3600, :second) |> DateTime.to_iso8601()
+         },
+         "is_intraday_margin_killswitch_enabled" => false,
+         "is_intraday_margin_enrollment_killswitch_enabled" => false
+       }}
+    end)
+  end
+
+  @doc """
+  One in-memory portfolio's breakdown for the portfolios `list_portfolios/1` names; any
+  other uuid is `{:refused, :not_found}`. Needs a credential.
+
+  See `DpExchange.Coinbase.get_portfolio_breakdown/3`.
+  """
+  @spec get_portfolio_breakdown(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_portfolio_breakdown(credentials, portfolio_uuid, opts) do
+    with_checks(credentials, Rest.validate_portfolio_breakdown(portfolio_uuid, opts), fn ->
+      case portfolio_row(portfolio_uuid) do
+        nil ->
+          {:refused, :not_found}
+
+        row ->
+          {:ok,
+           %{
+             "portfolio" => row,
+             "portfolio_balances" => %{
+               "total_balance" => usd("10000"),
+               "total_futures_balance" => usd("0"),
+               "total_cash_equivalent_balance" => usd("2500"),
+               "total_crypto_balance" => usd("7500")
+             },
+             "spot_positions" => [],
+             "perp_positions" => [],
+             "futures_positions" => []
+           }}
+      end
+    end)
+  end
+
+  @doc """
+  Deletes a live in-memory portfolio (the default one, or the one `create_account/1` makes) and
+  answers the venue's empty object; any other uuid, a deleted one included, is
+  `{:refused, :not_found}`. Needs a credential. Nothing is remembered: the next
+  `list_portfolios/1` still lists what it always lists.
+
+  See `DpExchange.Coinbase.delete_portfolio/3`.
+  """
+  @spec delete_portfolio(map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def delete_portfolio(credentials, portfolio_uuid, _opts) do
+    with_checks(credentials, Rest.validate_id(portfolio_uuid, :portfolio_uuid), fn ->
+      if portfolio_uuid in [@default_portfolio_id, @new_portfolio_id],
+        do: {:ok, %{}},
+        else: {:refused, :not_found}
+    end)
+  end
+
+  defp portfolio_row(@default_portfolio_id),
+    do: portfolio_map(@default_portfolio_id, "Default", "DEFAULT", false)
+
+  defp portfolio_row(@retired_portfolio_id),
+    do: portfolio_map(@retired_portfolio_id, "Retired", "CONSUMER", true)
+
+  defp portfolio_row(@new_portfolio_id),
+    do: portfolio_map(@new_portfolio_id, "New", "CONSUMER", false)
+
+  defp portfolio_row(_unknown), do: nil
+
+  defp portfolio_map(uuid, name, type, deleted),
+    do: %{"name" => name, "uuid" => uuid, "type" => type, "deleted" => deleted}
+
+  @doc """
+  The venue's clock, fixed (never the local one). Public: needs no credential.
+
+  See `DpExchange.Coinbase.get_server_time/1`.
+  """
+  @spec get_server_time(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_server_time(_opts \\ []) do
+    with_injection(fn ->
+      {:ok,
+       %{
+         "iso" => DateTime.to_iso8601(@at),
+         "epochSeconds" => Integer.to_string(DateTime.to_unix(@at)),
+         "epochMillis" => Integer.to_string(DateTime.to_unix(@at, :millisecond))
+       }}
+    end)
+  end
+
+  @doc """
+  The endpoints the venue itself does not serve, `DpExchange.Coinbase.venue_does_not_serve/0`,
+  unchanged.
+
+  See `DpExchange.Coinbase.venue_does_not_serve/0`.
+  """
+  @spec venue_does_not_serve() :: [{atom(), arity()}]
+  def venue_does_not_serve, do: DpExchange.Coinbase.venue_does_not_serve()
+
+  @doc """
+  One in-memory validator association per requested transaction id. Refuses what
+  `Prime.validate_validators_query/2` refuses, then needs Prime credentials.
+
+  See `DpExchange.Coinbase.query_transaction_validators/3`.
+  """
+  @spec query_transaction_validators(Prime.credentials(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def query_transaction_validators(credentials, portfolio_id, opts \\ []) do
+    checked = Prime.validate_validators_query(portfolio_id, opts)
+
+    with_prime_checks(credentials, checked, fn ->
+      {:ok,
+       %{
+         "transaction_validators" =>
+           Enum.map(Config.opt(opts, :transaction_ids, []), fn id ->
+             %{
+               "transaction_id" => id,
+               "validator_address" => @fake_validator,
+               "validator_status" => "VALIDATOR_STATUS_ACTIVE"
+             }
+           end),
+         "pagination" => %{"next_cursor" => "", "sort_direction" => "DESC", "has_next" => false}
+       }}
+    end)
+  end
+
+  @doc """
+  One in-memory validator with a top-up stake in progress for the wallet named. Refuses
+  what `Prime.validate_wallet_scope/2` refuses, then needs Prime credentials.
+
+  See `DpExchange.Coinbase.staking_status/4`.
+  """
+  @spec staking_status(Prime.credentials(), String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def staking_status(credentials, portfolio_id, wallet_id, _opts \\ []) do
+    with_prime_checks(credentials, Prime.validate_wallet_scope(portfolio_id, wallet_id), fn ->
+      {:ok,
+       wallet_status(portfolio_id, wallet_id, [
+         %{
+           "validator_address" => @fake_validator,
+           "statuses" => [
+             %{
+               "amount" => "16",
+               "stake_type" => "STAKE_TYPE_TOP_UP",
+               "estimated_stake_date" => "2026-09-27T00:00:00Z",
+               "estimated_hours_to_stake" => 672,
+               "requested_at" => "2026-08-28T12:00:00Z"
+             }
+           ]
+         }
+       ])}
+    end)
+  end
+
+  @doc """
+  One in-memory validator with a partial redemption still unbonding: the answer that says a
+  redemption is not finished. Refuses what `Prime.validate_wallet_scope/2` refuses, then needs
+  Prime credentials.
+
+  See `DpExchange.Coinbase.unstake_status/4`.
+  """
+  @spec unstake_status(Prime.credentials(), String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def unstake_status(credentials, portfolio_id, wallet_id, _opts \\ []) do
+    with_prime_checks(credentials, Prime.validate_wallet_scope(portfolio_id, wallet_id), fn ->
+      {:ok,
+       wallet_status(portfolio_id, wallet_id, [
+         %{
+           "validator_address" => @fake_validator,
+           "statuses" => [
+             %{
+               "amount" => "16",
+               "unstake_type" => "UNSTAKE_TYPE_PARTIAL",
+               "finishing_at" => "2026-09-27T00:00:00Z",
+               "remaining_hours" => 672,
+               "requested_at" => "2026-08-28T12:00:00Z",
+               "estimate_type" => "LIVE",
+               "estimate_description" => "Live estimate based on current network conditions"
+             }
+           ]
+         }
+       ])}
+    end)
+  end
+
+  defp wallet_status(portfolio_id, wallet_id, validators) do
+    %{
+      "portfolio_id" => portfolio_id,
+      "wallet_id" => wallet_id,
+      "wallet_address" => @fake_wallet_address,
+      "current_timestamp" => DateTime.to_iso8601(@at),
+      "validators" => validators
+    }
+  end
+
+  @doc """
+  Claims in memory: answers the wallet, a transaction id and an activity id derived from the
+  idempotency key (`opts[:idempotency_key]`, else a generated one). Refuses what
+  `Prime.validate_claim/3` refuses, then needs Prime credentials.
+
+  See `DpExchange.Coinbase.claim_rewards/4`.
+  """
+  @spec claim_rewards(Prime.credentials(), String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def claim_rewards(credentials, portfolio_id, wallet_id, opts \\ []) do
+    with_prime_checks(credentials, Prime.validate_claim(portfolio_id, wallet_id, opts), fn ->
+      key = Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate()
+
+      {:ok,
+       %{
+         "wallet_id" => wallet_id,
+         "transaction_id" => "fake-claim-#{key}",
+         "activity_id" => "fake-activity-#{key}"
+       }}
+    end)
+  end
+
+  @doc """
+  What an unstake of `amount` would do, in memory: one validator carrying the whole amount.
+  Refuses what `Prime.validate_preview_unstake/3` refuses (the asset is not checked, as in the
+  real call), then needs Prime credentials. Nothing is reserved.
+
+  See `DpExchange.Coinbase.preview_unstake_wallet/6`.
+  """
+  @spec preview_unstake_wallet(
+          Prime.credentials(),
+          String.t(),
+          String.t(),
+          String.t(),
+          Decimal.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def preview_unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, _opts \\ []) do
+    checked = Prime.validate_preview_unstake(portfolio_id, wallet_id, amount)
+
+    with_prime_checks(credentials, checked, fn ->
+      estimated = Decimal.to_string(amount, :normal)
+
+      {:ok,
+       %{
+         "estimated_amount" => estimated,
+         "wallet_id" => wallet_id,
+         "wallet_address" => @fake_wallet_address,
+         "current_timestamp" => DateTime.to_iso8601(@at),
+         "validators" => [
+           %{
+             "validator_address" => @fake_validator,
+             "estimated_unstaking_amount" => estimated,
+             "unstake_time_estimate_in_hours" => 672.0,
+             "estimated_unstake_date" => "2026-09-27T00:00:00Z"
+           }
+         ]
+       }}
+    end)
+  end
+
+  # `with_checks/3` for the Prime calls: the credential is Prime's triple (an access key, a
+  # passphrase and a signing key), not the CDP key pair, and the answer to a missing one is
+  # `{:error, :missing_prime_credentials}`, as `Prime` gives it after its own argument checks.
+  defp with_prime_checks(credentials, checked, fun) do
+    with_injection(fn ->
+      with :ok <- checked do
+        if prime_credentials?(credentials),
+          do: fun.(),
+          else: {:error, :missing_prime_credentials}
+      end
     end)
   end
 

@@ -1050,8 +1050,7 @@ defmodule DpExchange.Coinbase.Rest do
   def get_portfolio_breakdown(credentials, portfolio_uuid, opts) do
     # `""` would read `/portfolios/`, the LIST, and answer it as a breakdown. A `:currency`
     # that is not a string raised `Protocol.UndefinedError` building the query.
-    with :ok <- validate_id(portfolio_uuid, :portfolio_uuid),
-         :ok <- validate_breakdown_currency(Keyword.get(opts, :currency)) do
+    with :ok <- validate_portfolio_breakdown(portfolio_uuid, opts) do
       params = put_unless_nil(%{}, "currency", Keyword.get(opts, :currency))
 
       case request(:get, "/portfolios/#{segment(portfolio_uuid)}", credentials, opts, params) do
@@ -1063,6 +1062,18 @@ defmodule DpExchange.Coinbase.Rest do
         {:error, reason} -> classify(reason)
       end
     end
+  end
+
+  @doc """
+  The local checks `get_portfolio_breakdown/3` runs before any request: the portfolio uuid is
+  a non-empty string (`{:invalid_id, :portfolio_uuid, v}`), then `opts[:currency]` is absent
+  or a non-empty string (`{:invalid_option, :currency, v}`). Exposed so
+  `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
+  """
+  @spec validate_portfolio_breakdown(term(), keyword()) :: :ok | {:error, term()}
+  def validate_portfolio_breakdown(portfolio_uuid, opts) do
+    with :ok <- validate_id(portfolio_uuid, :portfolio_uuid),
+         do: validate_breakdown_currency(Keyword.get(opts, :currency))
   end
 
   defp validate_breakdown_currency(nil), do: :ok
@@ -1390,10 +1401,20 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_futures_position(map(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_futures_position(credentials, product_id, opts) do
-    with :ok <- validate_id(product_id, :product_id),
-         :ok <- reject_portfolio_option(opts) do
+    with :ok <- validate_futures_position(product_id, opts) do
       get_futures_position_at(credentials, product_id, opts)
     end
+  end
+
+  @doc """
+  The local checks `get_futures_position/3` runs before any request: the product id is a
+  non-empty string (`{:invalid_id, :product_id, v}`), then no `opts[:portfolio]` is given
+  (`{:unsupported_option, :portfolio}`). Exposed so `DpExchange.Coinbase.Fake` refuses
+  exactly as the real path does.
+  """
+  @spec validate_futures_position(term(), keyword()) :: :ok | {:error, term()}
+  def validate_futures_position(product_id, opts) do
+    with :ok <- validate_id(product_id, :product_id), do: reject_portfolio_option(opts)
   end
 
   defp get_futures_position_at(credentials, product_id, opts) do
@@ -1594,7 +1615,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec schedule_futures_sweep(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def schedule_futures_sweep(credentials, opts) do
-    with {:ok, amount} <- sweep_amount(Keyword.get(opts, :usd_amount)) do
+    with {:ok, amount} <- validate_sweep_amount(opts) do
       body = put_unless_nil(%{}, "usd_amount", amount)
 
       case post_once("/cfm/sweeps/schedule", body, credentials, opts) do
@@ -1620,6 +1641,17 @@ defmodule DpExchange.Coinbase.Rest do
   # is held to the rule every other money field here is: finite and positive. `""`, `"abc"`,
   # `0` and a negative went out as given, and what the venue does with them is unmeasured on
   # a call whose documented default for a missing amount is to move the lot.
+  @doc """
+  The local check `schedule_futures_sweep/2` runs on `opts[:usd_amount]` before any request:
+  absent is `{:ok, nil}` (the venue sweeps everything), a present amount must be a finite,
+  positive `Decimal`, integer or numeric string and answers `{:ok, wire_string}`; anything
+  else, a float included, is `{:error, {:invalid_amount, v}}`. Exposed so
+  `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
+  """
+  @spec validate_sweep_amount(keyword()) ::
+          {:ok, String.t() | nil} | {:error, {:invalid_amount, term()}}
+  def validate_sweep_amount(opts), do: sweep_amount(Keyword.get(opts, :usd_amount))
+
   defp sweep_amount(nil), do: {:ok, nil}
 
   defp sweep_amount(amount) do
@@ -1683,23 +1715,30 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec set_intraday_margin_setting(map(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def set_intraday_margin_setting(credentials, setting, opts)
-      when setting in @margin_settings do
-    # Setting the same value twice is harmless, so the default retries stay and the signer is
-    # counted (see `rename_portfolio/4`).
-    calls = :atomics.new(1, signed: false)
-    body = %{"setting" => setting}
-    path = "/cfm/intraday/margin_setting"
+  def set_intraday_margin_setting(credentials, setting, opts) do
+    with :ok <- validate_margin_setting(setting) do
+      # Setting the same value twice is harmless, so the default retries stay and the signer
+      # is counted (see `rename_portfolio/4`).
+      calls = :atomics.new(1, signed: false)
+      body = %{"setting" => setting}
+      path = "/cfm/intraday/margin_setting"
 
-    case post_json(path, body, credentials, opts, &counting(&1, calls)) do
-      {:ok, %{body: %{} = result}} -> {:ok, result}
-      {:ok, _unexpected} -> write_unconfirmed(nil, :unexpected_response_shape)
-      {:error, reason} -> write_failure(reason, nil, {calls, opts})
+      case post_json(path, body, credentials, opts, &counting(&1, calls)) do
+        {:ok, %{body: %{} = result}} -> {:ok, result}
+        {:ok, _unexpected} -> write_unconfirmed(nil, :unexpected_response_shape)
+        {:error, reason} -> write_failure(reason, nil, {calls, opts})
+      end
     end
   end
 
-  def set_intraday_margin_setting(_credentials, setting, _opts),
-    do: {:error, {:invalid_margin_setting, setting}}
+  @doc """
+  The local check `set_intraday_margin_setting/3` runs on `setting` before any request: one of
+  the spec's three strings, else `{:error, {:invalid_margin_setting, v}}`. Exposed so
+  `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
+  """
+  @spec validate_margin_setting(term()) :: :ok | {:error, {:invalid_margin_setting, term()}}
+  def validate_margin_setting(setting) when setting in @margin_settings, do: :ok
+  def validate_margin_setting(setting), do: {:error, {:invalid_margin_setting, setting}}
 
   @doc """
   Which margin window the account is in now — `GET /cfm/intraday/current_margin_window`.
@@ -1719,7 +1758,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_current_margin_window(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_current_margin_window(credentials, opts) do
-    with :ok <- enum_option(opts, :margin_profile_type, @margin_profile_types) do
+    with :ok <- validate_margin_window_options(opts) do
       params = put_unless_nil(%{}, "margin_profile_type", Keyword.get(opts, :margin_profile_type))
 
       case request(:get, "/cfm/intraday/current_margin_window", credentials, opts, params) do
@@ -1729,6 +1768,16 @@ defmodule DpExchange.Coinbase.Rest do
       end
     end
   end
+
+  @doc """
+  The local check `get_current_margin_window/2` runs on `opts[:margin_profile_type]`: absent,
+  or one of the spec's strings. Error: `{:invalid_option, :margin_profile_type, v}`. Exposed so
+  `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
+  """
+  @spec validate_margin_window_options(keyword()) ::
+          :ok | {:error, {:invalid_option, atom(), term()}}
+  def validate_margin_window_options(opts),
+    do: enum_option(opts, :margin_profile_type, @margin_profile_types)
 
   # Refuses an account row this package cannot attribute, rather than emitting an unusable
   # `Balance` and reporting it as success.
