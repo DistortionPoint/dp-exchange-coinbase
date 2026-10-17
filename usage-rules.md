@@ -814,6 +814,24 @@ reopen stagger, the unconditional resubscribe walk, and the derived floor under
 split; see `feed.ex`'s own moduledoc, `"one spacing, several jobs"`, for why none of them
 pulls the value in a different direction from the others.
 
+### Retry, deadline and refresh delays — `subscribe_retry_delay_ms`, `alias_map_retry_delay_ms`, `alias_map_fetch_timeout_ms`, `alias_map_refresh_ms`
+
+Four more feed options exist for diagnostics and tests. Defaults: 8,000 ms before a failed
+subscribe is retried, 2,000 ms before a failed alias-catalogue fetch is retried, a 30,000 ms
+deadline on one alias fetch, and 3,600,000 ms between alias-catalogue refreshes. A consumer
+has no reason to tune them. Each takes a **non-negative integer of milliseconds** (`nil`
+takes the default); anything else (`-1`, `1.5`, `"30"`) is refused at start with an
+`ArgumentError`. They used to be read as given and crash the feed later, inside the first
+fetch, when the value reached `Process.send_after/3`.
+
+### Telemetry `[:dp_exchange, :link, :down]` also covers a crashed shard socket
+
+A socket that reconnects reports its drop itself. A socket that **crashes** runs no
+disconnect callback, so the feed emits the event for it (`provider: :coinbase`, `reason`
+as bounded text), once per lost link. A socket that already reported its own drop and then
+crashed is not reported a second time. A link gauge built on `:link, :up` / `:down` therefore
+no longer stays "up" after a shard crash.
+
 ## Testing against this package
 
 Use `DpExchange.Coinbase.Fake`, selected per process through `DpExchange.Core.Config`. It

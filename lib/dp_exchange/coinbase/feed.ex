@@ -1205,7 +1205,7 @@ defmodule DpExchange.Coinbase.Feed do
   use GenServer
 
   alias DpExchange.Coinbase.{Credentials, Rest, Socket}
-  alias DpExchange.Core.{Capabilities, Config, Fanout, Notice, Types}
+  alias DpExchange.Core.{Capabilities, Config, Fanout, Notice, Telemetry, Types}
 
   require Logger
 
@@ -1689,6 +1689,25 @@ defmodule DpExchange.Coinbase.Feed do
           "shard_spacing_ms must be a non-negative integer, got: #{inspect(value)}"
   end
 
+  # The four retry/timeout/refresh delays are handed to `Process.send_after/3` long after
+  # `init/1` returned: the alias-fetch deadline when a fetch starts, the refresh when one
+  # finishes, the retry delays when a subscribe or fetch fails. A value that is not a
+  # non-negative integer (`-1`, `1.5`, `"30"`) raised `ArgumentError` there, inside a
+  # `handle_info`, crashing the feed on every fetch. It fails the start instead, as
+  # `shard_spacing_ms` does. `nil` and absent take the default.
+  defp delay_opt!(opts, key, default) do
+    case Keyword.get(opts, key) do
+      nil ->
+        default
+
+      value when is_integer(value) and value >= 0 ->
+        value
+
+      value ->
+        raise ArgumentError, "#{key} must be a non-negative integer, got: #{inspect(value)}"
+    end
+  end
+
   @doc """
   Starts the feed, registered under `opts[:name]` (default `DpExchange.Coinbase.Feed`).
 
@@ -1968,17 +1987,17 @@ defmodule DpExchange.Coinbase.Feed do
        # See `@subscribe_retry_delay_ms` — the same "diagnostic knob, real default" shape
        # as `resubscribe_interval_ms` above, for a test's benefit rather than a consumer's.
        subscribe_retry_delay_ms:
-         Keyword.get(opts, :subscribe_retry_delay_ms) || @subscribe_retry_delay_ms,
+         delay_opt!(opts, :subscribe_retry_delay_ms, @subscribe_retry_delay_ms),
        # See `@alias_map_retry_delay_ms` — same shape, same reason: a test proving the
        # alias-map fetch's own retry actually happens must not wait out the real delay.
        alias_map_retry_delay_ms:
-         Keyword.get(opts, :alias_map_retry_delay_ms) || @alias_map_retry_delay_ms,
+         delay_opt!(opts, :alias_map_retry_delay_ms, @alias_map_retry_delay_ms),
        # See `@alias_map_fetch_timeout_ms` — overridable for the same reason, so a test
        # proving the timeout fires need not wait out thirty real seconds.
        alias_map_fetch_timeout_ms:
-         Keyword.get(opts, :alias_map_fetch_timeout_ms) || @alias_map_fetch_timeout_ms,
+         delay_opt!(opts, :alias_map_fetch_timeout_ms, @alias_map_fetch_timeout_ms),
        # See `@alias_map_refresh_ms`.
-       alias_map_refresh_ms: Keyword.get(opts, :alias_map_refresh_ms) || @alias_map_refresh_ms,
+       alias_map_refresh_ms: delay_opt!(opts, :alias_map_refresh_ms, @alias_map_refresh_ms),
        # The venue's own declared alias relationships — see the moduledoc's "the venue
        # rewrites an aliased product id on delivery" section. `%{}` until fetched (or
        # forever, if every retry is exhausted), which is deliberately indistinguishable
@@ -3637,13 +3656,22 @@ defmodule DpExchange.Coinbase.Feed do
   defp isolate_crashed_shard(state, key, channel, index, reason) do
     %{symbols: symbols} = Map.fetch!(state.shards, key)
     kind = channel_kind(channel)
+    %{socket: socket} = Map.fetch!(state.shards, key)
+
+    # A socket that crashes runs no `handle_disconnect/2`, so `Socket` never emitted
+    # `Telemetry.link_down/2` for it and a consumer's link gauge would stay "up". Emitted
+    # here, once per lost link. A socket already in `down_links` reported its own drop (its
+    # `:link_down` precedes the `:EXIT` in this mailbox, signals from one process being
+    # ordered) and its telemetry went with it, so it is not emitted twice.
+    unless MapSet.member?(state.down_links, socket),
+      do: Telemetry.link_down(:coinbase, quoted(reason))
 
     state = %{
       state
       | shards: Map.delete(state.shards, key),
         pending_unsubscribes: Map.delete(state.pending_unsubscribes, key),
         delivering: drop_kind(state.delivering, symbols, kind),
-        down_links: MapSet.delete(state.down_links, Map.fetch!(state.shards, key).socket)
+        down_links: MapSet.delete(state.down_links, socket)
     }
 
     notify_shard_crashed(state, channel, index, symbols, reason)

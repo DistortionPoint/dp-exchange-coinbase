@@ -20,6 +20,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Dependencies
+
+- Requires `dp_exchange_core ~> 0.3.99`: its tightened conformance groups 12 and 38 run
+  against this package's fake and pass.
+
+### Fixed
+
+- **A crashed shard socket now emits telemetry `[:dp_exchange, :link, :down]` (tick AI).**
+  `Feed.isolate_crashed_shard/5` sent the `:link_down` notice but no telemetry event, because a
+  crashing socket runs no `handle_disconnect/2`, so a consumer's link gauge stayed "up". The
+  feed emits it once with bounded reason text, and skips a socket already in `down_links` (its
+  own drop was already reported). Tests in `feed_crash_telemetry_test.exs`.
+- **The feed's four retry/deadline/refresh delays are validated at start (tick AI).**
+  `subscribe_retry_delay_ms`, `alias_map_retry_delay_ms`, `alias_map_fetch_timeout_ms` and
+  `alias_map_refresh_ms` were read unchecked and handed to `Process.send_after/3` later, so a
+  negative, fractional or string value crashed the `Feed` inside `handle_info` on every alias
+  fetch (a restart loop). Each must now be a non-negative integer (`nil` = default) or `init/1`
+  raises `ArgumentError`, as `shard_spacing_ms` does. The four options are now documented in
+  `usage-rules.md`. Tests in `feed_delay_opts_test.exs`.
+
 ## [0.3.134] - 2026-10-16
 
 - **Conformance group 42 supplied (tick AH).** The contract test now passes
