@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.136] - 2026-10-17
+
 ### Fixed
 
 - `DpExchange.Coinbase.Fake` now exports every function the facade does, at the same
