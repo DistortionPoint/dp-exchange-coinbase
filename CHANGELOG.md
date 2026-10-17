@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.137] - 2026-10-17
+
 ### Changed — BREAKING
 
 - **Every facade function that takes options now refuses a key it does not read, through
