@@ -22,6 +22,39 @@ acceptable changelog line.
 
 ### Changed — BREAKING
 
+- **Every facade function that takes options now refuses a key it does not read, through
+  `DpExchange.Core.Options` — requires `dp_exchange_core ~> 0.3.101`.** The earlier local
+  helpers (`Rest.check_options/2`, and the lists kept in `Prime` and `Feed`) are gone;
+  `DpExchange.Coinbase.OptionKeys` is the one table of each function's own keys, and
+  `DpExchange.Coinbase` and `DpExchange.Coinbase.Fake` both call it. The calls added by this
+  change: `get_price/2`, `get_top_of_book/2`, `get_symbols/1`, `get_market_overview/1`,
+  `list_instruments/1`, `get_server_time/1`, `test_connection/2`, `get_roles/1`,
+  `market_status/1`, `place_order/3`, `preview_order/3`, `replace_order/4`,
+  `preview_replace/4`, `cancel_order/3`, `get_order/3`, `close_position/3` (its keys are
+  `:client_order_id` and `:size`), `list_payment_methods/2`, `get_payment_method/3`,
+  `rename_account/3`, `delete_portfolio/3`, `quote_conversion/4`, `commit_conversion/2`,
+  `get_conversion/2`, `staking_status/4`, `unstake_status/4`, `preview_unstake_wallet/6`,
+  `unsubscribe/2`, `update_symbols/2` and `coverage/1`, `wanted/1`, `coverage_by_kind/1`
+  (these three have no error channel, so they raise `ArgumentError` on an unknown key or on
+  options that are not a keyword list). A key such as `limt:` answers
+  `{:error, {:unknown_option, :limt}}` before anything is sent. The shared transport keys
+  are now `DpExchange.Core.Options.transport_options/0` (adding `:environment`, `:base_url`,
+  `:req_adapter`, `:adapter`, `:max_retry_after_s`, `:max_body_bytes`, `:log_requests`). A
+  call that answers `{:error, :not_supported}` still does, whatever the options. A caller
+  that passed a stray key must stop passing it.
+- **Streaming calls read only what routes them.** `subscribe/2` and `subscribe_notices/1`
+  accept `:to` and `:feed`; `unsubscribe/2`, `update_symbols/2`, `coverage/1`, `wanted/1` and
+  `coverage_by_kind/1` accept `:feed`. A start option such as `:url` or `:max_queue_len`
+  passed to them was silently ignored and is now `{:unknown_option, key}` (or
+  `ArgumentError` for the three plain reads). `Feed.subscribe_options/0` is removed.
+- **Positional arguments are refused before options** in `get_trades/2`,
+  `get_historical_prices/4` (a malformed symbol was answered after a missing `:limit` or a
+  bad option) and `stake/3` / `unstake/3` (`asset` and `amount` before the options).
+- **Options that are not a keyword list no longer raise** in `get_positions/1`,
+  `list_futures_positions/1`, `list_portfolios/1`, `create_account/1`, `rename_account/3`,
+  `get_roles/1`, `quote_conversion/4`, `commit_conversion/2`, `get_conversion/2` and
+  `transfer_internal/4` (`Keyword.get/3` and `Keyword.merge/2` raised before the option
+  check could run); they answer `{:error, {:invalid_options, v}}`.
 - **An option a read does not honour is refused by name: `{:error, {:unknown_option, key}}`.**
   `get_orders/2`, `get_trade_history/2`, `get_trades/2`, `get_historical_prices/4` (its
   options and its range), `get_order_book/2`, `get_balances/2`, `get_accounts/2`,

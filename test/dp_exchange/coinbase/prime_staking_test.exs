@@ -665,6 +665,15 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       assert {:error, {:invalid_amount, ^wide}} = Fake.stake("ETH", wide, base)
       assert {:error, {:invalid_amount, ^wide}} = Fake.unstake("ETH", wide, base)
 
+      # The positional arguments are refused before the options (family check order).
+      assert {:error, {:invalid_asset, nil}} = Fake.stake(nil, one, [metdata: 1] ++ base)
+      assert {:error, {:invalid_amount, 1.5}} = Fake.unstake("ETH", 1.5, [metdata: 1] ++ base)
+
+      assert {:error, {:invalid_asset, nil}} =
+               DpExchange.Coinbase.stake(nil, one, [metdata: 1] ++ base)
+
+      assert {:error, {:unknown_option, :metdata}} = Fake.stake("ETH", one, [metdata: 1] ++ base)
+
       # The asset is checked in the wallet scope too.
       assert {:error, {:invalid_asset, :eth}} =
                Fake.stake(:eth, one, [wallet_id: "w-1"] ++ base)

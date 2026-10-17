@@ -65,7 +65,7 @@ defmodule DpExchange.Coinbase.Fake do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Coinbase.{Feed, IdempotencyKey, Prime, Rest, SymbolFormat}
+  alias DpExchange.Coinbase.{Feed, IdempotencyKey, OptionKeys, Prime, Rest, SymbolFormat}
   alias DpExchange.Core.{Capabilities, Config, FakeInjection, Fanout, Instrument, Types, Venue}
 
   @symbols ~w(BTC-USD BTC-USDC ETH-USD ETH-EUR)
@@ -164,6 +164,7 @@ defmodule DpExchange.Coinbase.Fake do
       # As `Rest.get_price/2`: the symbol, then a credential only if one was given — it is
       # signed with when present, so a malformed one is refused rather than read as none.
       with :ok <- Rest.validate_symbol(symbol),
+           :ok <- OptionKeys.check(:get_price, opts),
            :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
         fake_quote(symbol)
       end
@@ -216,6 +217,7 @@ defmodule DpExchange.Coinbase.Fake do
       # here too. This checked only `nil`, and a consumer passing `%{}` got a book.
       # `Rest.get_top_of_book/2` checks the symbol before the credential.
       with :ok <- Rest.validate_symbol(symbol),
+           :ok <- OptionKeys.check(:get_top_of_book, opts),
            :ok <- Rest.validate_credentials(Keyword.get(opts, :credentials)) do
         case Map.fetch(@price, native(symbol)) do
           {:ok, price} ->
@@ -251,13 +253,14 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []) do
     with_injection(symbol, fn ->
-      # The real path's order: the timeframe, the options and the window are refused locally,
-      # before any request, so they win over an unlisted symbol (which only the venue can
-      # name). The check is `Rest`'s own — this used to re-state it and answered
-      # `:not_listed` first. `12h`, which the shared vocabulary models and Coinbase does not
-      # serve, fails here.
-      with :ok <- Rest.validate_candle_request(timeframe, range, opts),
-           :ok <- Rest.validate_symbol(symbol) do
+      # The real path's order: the timeframe, the symbol's shape, then the options and the
+      # window, all refused locally before any request, so they win over an unlisted symbol
+      # (which only the venue can name). The check is `Rest`'s own — this used to re-state it
+      # and answered `:not_listed` first. `12h`, which the shared vocabulary models and
+      # Coinbase does not serve, fails here.
+      with :ok <- Rest.validate_timeframe(timeframe),
+           :ok <- Rest.validate_symbol(symbol),
+           :ok <- Rest.validate_candle_request(timeframe, range, opts) do
         if native(symbol) in @symbols do
           # A bar, not a quote. The fake returned `get_price/2`'s `Quote` here, which agreed
           # with the real package's own defect — a suite reproducing the bug it is meant to
@@ -298,7 +301,8 @@ defmodule DpExchange.Coinbase.Fake do
     # As `Rest.fetch_products/1`: a credential, when given, is signed with, so a malformed
     # one is refused rather than read as none.
     with_injection(fn ->
-      with :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)),
+      with :ok <- OptionKeys.check(:get_symbols, opts),
+           :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)),
            do: {:ok, @symbols}
     end)
   end
@@ -364,8 +368,9 @@ defmodule DpExchange.Coinbase.Fake do
       # fake that answered anyway would let a consumer's suite go green on a call the real
       # venue refuses. `Rest.trades_options/1` is that check (the limit, then `:since` and
       # `:end`), called rather than re-stated.
-      with {:ok, limit, since, finish} <- Rest.trades_options(opts) do
-        get_trades_result(symbol, limit, since, finish)
+      with :ok <- Rest.validate_symbol(symbol),
+           {:ok, limit, since, finish} <- Rest.trades_options(opts) do
+        trades_for(symbol, limit, since, finish)
       end
     end)
   end
@@ -373,12 +378,7 @@ defmodule DpExchange.Coinbase.Fake do
   # Oldest first, as `Rest.get_trades/2` returns them (it sorts by the venue's own time), and
   # at most `limit` of them, the newest. This returned the newest first, so a consumer reading
   # `List.last/1` as "the latest print" passed here and failed against the venue.
-  defp get_trades_result(symbol, limit, since, finish) do
-    with :ok <- Rest.validate_symbol(symbol) do
-      trades_for(symbol, limit, since, finish)
-    end
-  end
-
+  #
   # `:since` (inclusive) and `:end` (exclusive) narrow the window as the venue's `start` and
   # `end` do; a `:since` read that fills the page may have a hole, as `Rest.get_trades/2`
   # reports it (MD4).
@@ -448,7 +448,8 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def get_market_overview(opts \\ []) do
     with_injection(fn ->
-      with :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
+      with :ok <- OptionKeys.check(:get_market_overview, opts),
+           :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
         {:ok,
          Map.new(@symbols, fn symbol ->
            price = Decimal.new(@price[symbol])
@@ -489,7 +490,8 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def list_instruments(opts \\ []) do
     with_injection(fn ->
-      with :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
+      with :ok <- OptionKeys.check(:list_instruments, opts),
+           :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
         {:ok, Enum.map(@symbols, &fake_instrument/1)}
       end
     end)
@@ -735,7 +737,7 @@ defmodule DpExchange.Coinbase.Fake do
     # start, not here). An unknown `:channels` kind raises when a real Feed starts; this has
     # no start step, so it is refused here, before anything is pushed.
     with :ok <- Feed.check_symbols(symbols),
-         :ok <- Rest.check_options(opts, Feed.subscribe_options()),
+         :ok <- DpExchange.Core.Options.check(opts, [:channels | OptionKeys.allowed(:subscribe)]),
          channels = Config.opt(opts, :channels, [:quotes]),
          {:ok, target} <- Feed.valid_subscriber(Config.opt(opts, :to, self())),
          :ok <- Feed.check_channels(channels) do
@@ -814,10 +816,11 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.unsubscribe/2`.
   """
   @impl true
-  def unsubscribe(symbols, _opts \\ []) do
+  def unsubscribe(symbols, opts \\ []) do
     symbols = canonical_case(symbols)
 
-    with :ok <- Feed.check_symbols(symbols) do
+    with :ok <- Feed.check_symbols(symbols),
+         :ok <- OptionKeys.check(:unsubscribe, opts) do
       Process.put(__MODULE__, MapSet.difference(subscribed(), MapSet.new(symbols)))
       Process.put(@trades_key, MapSet.difference(subscribed_trades(), MapSet.new(symbols)))
       Process.put(@order_book_key, MapSet.difference(subscribed_books(), MapSet.new(symbols)))
@@ -835,12 +838,13 @@ defmodule DpExchange.Coinbase.Fake do
   def update_symbols(symbols, opts \\ []) do
     symbols = canonical_case(symbols)
 
-    with :ok <- Feed.check_symbols(symbols) do
-      do_update_symbols(symbols, opts)
+    with :ok <- Feed.check_symbols(symbols),
+         :ok <- OptionKeys.check(:update_symbols, opts) do
+      do_update_symbols(symbols)
     end
   end
 
-  defp do_update_symbols(symbols, _opts) do
+  defp do_update_symbols(symbols) do
     wanted = MapSet.new(Enum.filter(symbols, &(&1 in @symbols)))
 
     # A symbol this adds is pushed for, as `subscribe/2` pushes, so `coverage/1` never
@@ -871,7 +875,10 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.coverage/1`.
   """
   @impl true
-  def coverage(_opts \\ []), do: Map.new(all_subscribed(), &{&1, :stream})
+  def coverage(opts \\ []) do
+    OptionKeys.check!(:coverage, opts)
+    Map.new(all_subscribed(), &{&1, :stream})
+  end
 
   @doc """
   The symbols this process subscribed (any kind), sorted. The fake carries four symbols and
@@ -881,7 +888,10 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @spec wanted(keyword()) :: [String.t()]
   @impl true
-  def wanted(_opts \\ []), do: all_subscribed() |> MapSet.to_list() |> Enum.sort()
+  def wanted(opts \\ []) do
+    OptionKeys.check!(:wanted, opts)
+    all_subscribed() |> MapSet.to_list() |> Enum.sort()
+  end
 
   @doc """
   `coverage/1`, split by kind — see `DpExchange.Coinbase.coverage_by_kind/1`.
@@ -897,7 +907,8 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @impl true
   @spec coverage_by_kind(keyword()) :: %{Capabilities.data_kind() => %{String.t() => atom()}}
-  def coverage_by_kind(_opts \\ []) do
+  def coverage_by_kind(opts \\ []) do
+    OptionKeys.check!(:coverage_by_kind, opts)
     # A kind appears only once something of it was pushed, as before for `:trades`.
     # Every kind, `:quotes` included, is omitted while empty — the real feed's rule.
     [quotes: subscribed(), trades: subscribed_trades(), order_book: subscribed_books()]
@@ -966,26 +977,29 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.test_connection/2`.
   """
   @impl true
-  def test_connection(credentials, _opts) do
+  def test_connection(credentials, opts) do
     with_injection(fn ->
-      # With a credential the fake answers what the key can do; without one it answers
-      # reachability only, which is the same split the package makes. A credential that
-      # cannot sign (`%{api_key: "k"}`) is not "none" — the real path reads
-      # `/key_permissions` with it and fails signing, so it refuses here too.
-      if credentials in [nil, %{}] do
-        {:ok, %{"reachable" => true, "time" => %{"iso" => "2026-09-01T20:00:00Z"}}}
-      else
-        with :ok <- Rest.validate_credentials(credentials) do
-          {:ok,
-           %{
-             "reachable" => true,
-             "can_view" => true,
-             "can_trade" => true,
-             "can_transfer" => false
-           }}
-        end
-      end
+      with :ok <- OptionKeys.check(:test_connection, opts), do: connection_status(credentials)
     end)
+  end
+
+  # With a credential the fake answers what the key can do; without one it answers
+  # reachability only, which is the same split the package makes. A credential that
+  # cannot sign (`%{api_key: "k"}`) is not "none" — the real path reads
+  # `/key_permissions` with it and fails signing, so it refuses here too.
+  defp connection_status(credentials) when credentials in [nil, %{}],
+    do: {:ok, %{"reachable" => true, "time" => %{"iso" => "2026-09-01T20:00:00Z"}}}
+
+  defp connection_status(credentials) do
+    with :ok <- Rest.validate_credentials(credentials) do
+      {:ok,
+       %{
+         "reachable" => true,
+         "can_view" => true,
+         "can_trade" => true,
+         "can_transfer" => false
+       }}
+    end
   end
 
   @doc """
@@ -1001,8 +1015,10 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.market_status/1`.
   """
   @impl true
-  def market_status(_opts) do
-    with_injection(fn -> {:ok, :open} end)
+  def market_status(opts) do
+    with_injection(fn ->
+      with :ok <- OptionKeys.check(:market_status, opts), do: {:ok, :open}
+    end)
   end
 
   @doc """
@@ -1058,7 +1074,7 @@ defmodule DpExchange.Coinbase.Fake do
   @impl true
   def get_positions(opts \\ []) do
     # The futures endpoints take no portfolio scope; refused, as the real read refuses it.
-    with :ok <- Rest.reject_portfolio_option(opts) do
+    with :ok <- Rest.reject_portfolio_option(:get_positions, opts) do
       do_get_positions(opts)
     end
   end
@@ -1168,7 +1184,8 @@ defmodule DpExchange.Coinbase.Fake do
   # one that reported itself settled would teach a consumer to spend an asset still unbonding.
   defp fake_staking(type, asset, amount, opts) do
     with_injection(fn ->
-      with :ok <- Prime.validate_stake_options(opts),
+      with :ok <- Prime.validate_positional(asset, amount),
+           :ok <- Prime.validate_stake_options(opts),
            {:ok, portfolio} <- fake_portfolio(opts),
            :ok <- Prime.validate_scope(portfolio, Keyword.get(opts, :wallet_id)),
            :ok <- Prime.validate_write(asset, amount, opts),
@@ -1206,7 +1223,9 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @impl true
   def quote_conversion(from, to, amount, opts \\ []) do
-    checked = Rest.validate_conversion_quote(from, to, amount)
+    checked =
+      with :ok <- Rest.validate_conversion_quote(from, to, amount),
+           do: OptionKeys.check(:quote_conversion, opts)
 
     with_checks(opts_credentials(opts), checked, fn ->
       # `:quoted`, and no expiry — the two things a consumer must handle. A fake that returned
@@ -1531,7 +1550,9 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @impl true
   def rename_account(id, name, opts \\ []) do
-    checked = Rest.validate_portfolio_rename(id, name)
+    checked =
+      with :ok <- Rest.validate_portfolio_rename(id, name),
+           do: OptionKeys.check(:rename_account, opts)
 
     with_checks(opts_credentials(opts), checked, fn ->
       {:ok,
@@ -1553,7 +1574,7 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @impl true
   def get_roles(opts \\ []) do
-    with_credentials(opts_credentials(opts), fn ->
+    with_checks(opts_credentials(opts), OptionKeys.check(:get_roles, opts), fn ->
       # `can_transfer` false beside two trues: a key routinely holds some and not all, and a
       # fake that granted everything would let a consumer ship a withdrawal path it cannot use.
       {:ok,
@@ -1594,7 +1615,9 @@ defmodule DpExchange.Coinbase.Fake do
   @spec list_futures_positions(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_futures_positions(opts) do
-    with_checks(opts_credentials(opts), Rest.reject_portfolio_option(opts), fn ->
+    checked = Rest.reject_portfolio_option(:list_futures_positions, opts)
+
+    with_checks(opts_credentials(opts), checked, fn ->
       {:ok, [futures_position_row()]}
     end)
   end
@@ -1637,7 +1660,9 @@ defmodule DpExchange.Coinbase.Fake do
   @spec get_futures_balance_summary(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_futures_balance_summary(credentials, opts) do
-    with_checks(credentials, Rest.reject_portfolio_option(opts), fn ->
+    checked = Rest.reject_portfolio_option(:get_futures_balance_summary, opts)
+
+    with_checks(credentials, checked, fn ->
       {:ok,
        %{
          "futures_buying_power" => usd("9000"),
@@ -1667,7 +1692,9 @@ defmodule DpExchange.Coinbase.Fake do
   @spec list_futures_sweeps(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_futures_sweeps(credentials, opts) do
-    with_checks(credentials, Rest.reject_portfolio_option(opts), fn ->
+    checked = Rest.reject_portfolio_option(:list_futures_sweeps, opts)
+
+    with_checks(credentials, checked, fn ->
       {:ok, Process.get(@sweeps_key, [])}
     end)
   end
@@ -1713,7 +1740,9 @@ defmodule DpExchange.Coinbase.Fake do
   @spec cancel_futures_sweep(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def cancel_futures_sweep(credentials, opts) do
-    with_checks(credentials, Rest.reject_portfolio_option(opts), fn ->
+    checked = Rest.reject_portfolio_option(:cancel_futures_sweep, opts)
+
+    with_checks(credentials, checked, fn ->
       case Process.get(@sweeps_key, []) do
         [] ->
           {:refused, :sweep_not_cancelled}
@@ -1734,7 +1763,9 @@ defmodule DpExchange.Coinbase.Fake do
   @spec get_intraday_margin_setting(map(), keyword()) ::
           {:ok, String.t()} | {:error, term()} | {:refused, term()}
   def get_intraday_margin_setting(credentials, opts) do
-    with_checks(credentials, Rest.reject_portfolio_option(opts), fn ->
+    checked = Rest.reject_portfolio_option(:get_intraday_margin_setting, opts)
+
+    with_checks(credentials, checked, fn ->
       {:ok, Process.get(@margin_setting_key, @default_margin_setting)}
     end)
   end
@@ -1750,7 +1781,7 @@ defmodule DpExchange.Coinbase.Fake do
   def set_intraday_margin_setting(credentials, setting, opts) do
     checked =
       with :ok <- Rest.validate_margin_setting(setting),
-           do: Rest.reject_portfolio_option(opts)
+           do: Rest.reject_portfolio_option(:set_intraday_margin_setting, opts)
 
     with_checks(credentials, checked, fn ->
       Process.put(@margin_setting_key, setting)
@@ -1822,8 +1853,12 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @spec delete_portfolio(map(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def delete_portfolio(credentials, portfolio_uuid, _opts) do
-    with_checks(credentials, Rest.validate_id(portfolio_uuid, :portfolio_uuid), fn ->
+  def delete_portfolio(credentials, portfolio_uuid, opts) do
+    checked =
+      with :ok <- Rest.validate_id(portfolio_uuid, :portfolio_uuid),
+           do: OptionKeys.check(:delete_portfolio, opts)
+
+    with_checks(credentials, checked, fn ->
       if portfolio_uuid in [@default_portfolio_id, @new_portfolio_id],
         do: {:ok, %{}},
         else: {:refused, :not_found}
@@ -1850,14 +1885,16 @@ defmodule DpExchange.Coinbase.Fake do
   See `DpExchange.Coinbase.get_server_time/1`.
   """
   @spec get_server_time(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
-  def get_server_time(_opts \\ []) do
+  def get_server_time(opts \\ []) do
     with_injection(fn ->
-      {:ok,
-       %{
-         "iso" => DateTime.to_iso8601(@at),
-         "epochSeconds" => Integer.to_string(DateTime.to_unix(@at)),
-         "epochMillis" => Integer.to_string(DateTime.to_unix(@at, :millisecond))
-       }}
+      with :ok <- OptionKeys.check(:get_server_time, opts) do
+        {:ok,
+         %{
+           "iso" => DateTime.to_iso8601(@at),
+           "epochSeconds" => Integer.to_string(DateTime.to_unix(@at)),
+           "epochMillis" => Integer.to_string(DateTime.to_unix(@at, :millisecond))
+         }}
+      end
     end)
   end
 
@@ -1905,8 +1942,10 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @spec staking_status(Prime.credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def staking_status(credentials, portfolio_id, wallet_id, _opts \\ []) do
-    with_prime_checks(credentials, Prime.validate_wallet_scope(portfolio_id, wallet_id), fn ->
+  def staking_status(credentials, portfolio_id, wallet_id, opts \\ []) do
+    checked = Prime.validate_wallet_read(:staking_status, portfolio_id, wallet_id, opts)
+
+    with_prime_checks(credentials, checked, fn ->
       {:ok,
        wallet_status(portfolio_id, wallet_id, [
          %{
@@ -1934,8 +1973,10 @@ defmodule DpExchange.Coinbase.Fake do
   """
   @spec unstake_status(Prime.credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def unstake_status(credentials, portfolio_id, wallet_id, _opts \\ []) do
-    with_prime_checks(credentials, Prime.validate_wallet_scope(portfolio_id, wallet_id), fn ->
+  def unstake_status(credentials, portfolio_id, wallet_id, opts \\ []) do
+    checked = Prime.validate_wallet_read(:unstake_status, portfolio_id, wallet_id, opts)
+
+    with_prime_checks(credentials, checked, fn ->
       {:ok,
        wallet_status(portfolio_id, wallet_id, [
          %{
@@ -1990,7 +2031,7 @@ defmodule DpExchange.Coinbase.Fake do
 
   @doc """
   What an unstake of `amount` would do, in memory: one validator carrying the whole amount.
-  Refuses what `Prime.validate_preview_unstake/3` refuses (the asset is not checked, as in the
+  Refuses what `Prime.validate_preview_unstake/4` refuses (the asset is not checked, as in the
   real call), then needs Prime credentials. Nothing is reserved.
 
   See `DpExchange.Coinbase.preview_unstake_wallet/6`.
@@ -2003,8 +2044,8 @@ defmodule DpExchange.Coinbase.Fake do
           Decimal.t(),
           keyword()
         ) :: {:ok, map()} | {:error, term()} | {:refused, term()}
-  def preview_unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, _opts \\ []) do
-    checked = Prime.validate_preview_unstake(portfolio_id, wallet_id, amount)
+  def preview_unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts \\ []) do
+    checked = Prime.validate_preview_unstake(portfolio_id, wallet_id, amount, opts)
 
     with_prime_checks(credentials, checked, fn ->
       estimated = Decimal.to_string(amount, :normal)
@@ -2048,7 +2089,7 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.place_order/3`.
   """
   @impl true
-  def place_order(credentials, request, _opts \\ []) do
+  def place_order(credentials, request, opts \\ []) do
     with_injection(fn ->
       # The fake accepts what the venue accepts and refuses what it refuses, by running the
       # real package's own checks in its order (`Rest.order_plan/2`: request, keys, symbol,
@@ -2056,6 +2097,7 @@ defmodule DpExchange.Coinbase.Fake do
       # credential. It builds the order from the plan, so the side is the atom the real path
       # returns (not the caller's `"buy"`) and the amounts are the real path's Decimals.
       with {:ok, plan} <- Rest.order_plan(request, :place),
+           :ok <- OptionKeys.check(:place_order, opts),
            :ok <- Rest.validate_credentials(credentials) do
         place_planned(plan)
       end
@@ -2161,8 +2203,11 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.cancel_order/3`.
   """
   @impl true
-  def cancel_order(credentials, order_id, _opts \\ []) do
-    with_checks(credentials, Rest.validate_order_id(order_id), fn ->
+  def cancel_order(credentials, order_id, opts \\ []) do
+    checked =
+      with :ok <- Rest.validate_order_id(order_id), do: OptionKeys.check(:cancel_order, opts)
+
+    with_checks(credentials, checked, fn ->
       # The fake refuses the same way the venue does: an order that is not open cannot be
       # cancelled, and saying :ok would let a consumer's retry logic go untested.
       cancel_found(find_order(order_id), order_id)
@@ -2192,8 +2237,10 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.get_order/3`.
   """
   @impl true
-  def get_order(credentials, order_id, _opts \\ []) do
-    with_checks(credentials, Rest.validate_order_id(order_id), fn ->
+  def get_order(credentials, order_id, opts \\ []) do
+    checked = with :ok <- Rest.validate_order_id(order_id), do: OptionKeys.check(:get_order, opts)
+
+    with_checks(credentials, checked, fn ->
       case find_order(order_id) do
         {:ok, order} -> {:ok, order}
         # The venue's 404, which `Rest` classifies `{:refused, :not_found}` (`:not_listed`
@@ -2271,10 +2318,11 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.preview_order/3`.
   """
   @impl true
-  def preview_order(credentials, request, _opts \\ []) do
+  def preview_order(credentials, request, opts \\ []) do
     with_injection(fn ->
       # The same request checks `place_order/3` runs, then the credential — as the real path.
       with {:ok, plan} <- Rest.order_plan(request, :preview),
+           :ok <- OptionKeys.check(:preview_order, opts),
            :ok <- Rest.validate_credentials(credentials) do
         {:ok,
          %{
@@ -2299,7 +2347,7 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.replace_order/4`.
   """
   @impl true
-  def replace_order(credentials, order_id, changes, _opts \\ []) do
+  def replace_order(credentials, order_id, changes, opts \\ []) do
     with_injection(fn ->
       # The fake enforces the venue's edit surface: price and size only, both required. A fake
       # that accepted a side change, or only one of the two, would let a consumer's test pass
@@ -2307,6 +2355,7 @@ defmodule DpExchange.Coinbase.Fake do
       # size all required (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852), the same
       # requirement `Rest.replace_order/4` enforces — and `Rest`'s own check is what runs.
       with :ok <- Rest.validate_order_edit(order_id, changes),
+           :ok <- OptionKeys.check(:replace_order, opts),
            :ok <- Rest.validate_credentials(credentials) do
         # Read back, as the real package does: the venue's edit response carries no order.
         # Both edited fields show in it — the size was left at the original, so the read-back
@@ -2341,12 +2390,13 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.preview_replace/4`.
   """
   @impl true
-  def preview_replace(credentials, order_id, changes, _opts \\ []) do
+  def preview_replace(credentials, order_id, changes, opts \\ []) do
     with_injection(fn ->
       # The same edit surface replace_order/4 enforces — price and size, both required.
       # Anything less is an edit the venue refuses, and a fake that priced it would let a
       # consumer's suite go green on a call that cannot be made.
       with :ok <- Rest.validate_order_edit(order_id, changes),
+           :ok <- OptionKeys.check(:preview_replace, opts),
            :ok <- Rest.validate_credentials(credentials) do
         {:ok,
          %{
@@ -2401,8 +2451,8 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.list_payment_methods/2`.
   """
   @impl true
-  def list_payment_methods(credentials, _opts \\ []) do
-    with_credentials(credentials, fn ->
+  def list_payment_methods(credentials, opts \\ []) do
+    with_checks(credentials, OptionKeys.check(:list_payment_methods, opts), fn ->
       # One method verified for deposit but not withdrawal, because the two flags disagree
       # routinely and a fake that set them together would hide the case that bites.
       {:ok,
@@ -2431,8 +2481,12 @@ defmodule DpExchange.Coinbase.Fake do
   See `c:DpExchange.Core.Venue.get_payment_method/3`.
   """
   @impl true
-  def get_payment_method(credentials, id, _opts \\ []) do
-    with_checks(credentials, Rest.validate_id(id, :payment_method_id), fn ->
+  def get_payment_method(credentials, id, opts \\ []) do
+    checked =
+      with :ok <- Rest.validate_id(id, :payment_method_id),
+           do: OptionKeys.check(:get_payment_method, opts)
+
+    with_checks(credentials, checked, fn ->
       {:ok, %{"id" => id, "type" => "ACH", "verified" => true, "allow_withdraw" => false}}
     end)
   end
@@ -2450,7 +2504,7 @@ defmodule DpExchange.Coinbase.Fake do
       # consumer ship a move between portfolios it never named. Merged and read as the facade
       # does (`opts` over `request_opts`), then the credential from `request_opts` — the real
       # order.
-      merged = Keyword.merge(request_opts, opts)
+      merged = OptionKeys.merge(request_opts, opts)
 
       with {:ok, from, to} <- Rest.validate_transfer(asset, amount, merged),
            :ok <- Rest.validate_credentials(opts_credentials(request_opts)) do
@@ -2553,7 +2607,10 @@ defmodule DpExchange.Coinbase.Fake do
 
   # Where the facade carries no credential argument, it reads `opts[:credentials]` and
   # defaults to `%{}` — which `Rest` treats as none.
-  defp opts_credentials(opts), do: Keyword.get(opts, :credentials, %{})
+  # Options that are not a keyword list carry none; the option check that runs beside this
+  # refuses them as `{:invalid_options, v}`.
+  defp opts_credentials(opts) when is_list(opts), do: Keyword.get(opts, :credentials, %{})
+  defp opts_credentials(_not_a_list), do: %{}
 
   # The spelling `Rest` sends: `SymbolFormat.to_exchange_symbol/1`, which upper-cases and
   # nothing more. `btc-usd` is the product `BTC-USD`; `BTC/USD` is not a pair it can split

@@ -52,11 +52,15 @@ defmodule DpExchange.Coinbase.ReadSymbolTest do
       refute_receive {:request_sent, _path}, 50
     end
 
-    test "the timeframe and the limit are refused before the symbol, as before" do
+    test "the timeframe is refused before the symbol, and the symbol before the options" do
       assert {:error, {:unsupported_timeframe, "3h"}} =
                Rest.get_historical_prices(nil, "3h", [], [])
 
-      assert {:error, :missing_limit} = Rest.get_trades(nil, [])
+      assert {:error, {:invalid_symbol, nil}} = Rest.get_trades(nil, [])
+      assert {:error, {:invalid_symbol, nil}} = Fake.get_trades(nil, [])
+
+      assert {:error, {:invalid_symbol, nil}} =
+               Rest.get_historical_prices(nil, "1h", [], limt: 1)
     end
 
     test "validate_symbol/1 accepts a non-empty string" do

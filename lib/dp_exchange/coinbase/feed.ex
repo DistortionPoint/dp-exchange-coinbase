@@ -1204,7 +1204,7 @@ defmodule DpExchange.Coinbase.Feed do
 
   use GenServer
 
-  alias DpExchange.Coinbase.{Credentials, Rest, Socket}
+  alias DpExchange.Coinbase.{Credentials, OptionKeys, Rest, Socket}
   alias DpExchange.Core.{Capabilities, Config, Fanout, Notice, Telemetry, Types}
 
   require Logger
@@ -1745,39 +1745,11 @@ defmodule DpExchange.Coinbase.Feed do
   (`{:error, {:unknown_option, key}}`) and options that are not a keyword list
   (`{:error, {:invalid_options, v}}`). `:to` is the subscriber; `:feed` is the facade's
   name for the feed process. A misspelt `too:` subscribed the caller instead of the process
-  it named. See `DpExchange.Coinbase.Rest.check_options/2`.
+  it named. See `DpExchange.Coinbase.OptionKeys`.
   """
   @spec validate_subscribe_options(term()) ::
           :ok | {:error, {:unknown_option, term()} | {:invalid_options, term()}}
-  def validate_subscribe_options(opts), do: Rest.check_options(opts, subscribe_options())
-
-  # A consumer hands the facade's streaming calls the same list it started the venue with, so
-  # every key `start_link/1` (and the supervisor and socket under it) reads is accepted, as
-  # well as the call's own `:to` and the facade's `:feed`.
-  @start_options [
-    :name,
-    :url,
-    :ssl_options,
-    :credentials,
-    :alias_map_source,
-    :alias_map_fetch_timeout_ms,
-    :alias_map_refresh_ms,
-    :alias_map_retry_delay_ms,
-    :subscribe_retry_delay_ms,
-    :resubscribe_interval_ms,
-    :shard_spacing_ms,
-    :level2_pairs_per_socket,
-    :channels,
-    :socket,
-    :max_queue_len
-  ]
-
-  @doc """
-  Every option key `subscribe/3` and `subscribe_notices/2` accept: `:to`, `:feed` and the
-  keys the venue is started with (`start_link/1`).
-  """
-  @spec subscribe_options() :: [atom()]
-  def subscribe_options, do: [:to, :feed | @start_options]
+  def validate_subscribe_options(opts), do: OptionKeys.check(:subscribe, opts)
 
   @doc """
   The subscriber as given if it is a pid or a registered name, or the refusal.

@@ -39,7 +39,7 @@ defmodule DpExchange.Coinbase.Rest do
   live one.
   """
 
-  alias DpExchange.Coinbase.{Auth, IdempotencyKey, SymbolFormat}
+  alias DpExchange.Coinbase.{Auth, IdempotencyKey, OptionKeys, SymbolFormat}
   alias DpExchange.Core.{Config, HttpClient, Instrument, Timeframe, Types}
 
   require Logger
@@ -103,7 +103,8 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_price(String.t(), keyword()) ::
           {:ok, Types.Quote.t()} | {:error, term()} | {:refused, term()}
   def get_price(symbol, opts) do
-    with :ok <- validate_symbol(symbol) do
+    with :ok <- validate_symbol(symbol),
+         :ok <- OptionKeys.check(:get_price, opts) do
       native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
       credentials = opts_credentials(opts)
 
@@ -145,8 +146,8 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, [Types.Candle.t()]} | {:error, term()} | {:refused, term()}
   def get_historical_prices(symbol, timeframe, range, opts) do
     with {:ok, enum} <- granularity_enum(timeframe),
-         {:ok, params} <- candle_params(timeframe, range, enum, opts),
-         :ok <- validate_symbol(symbol) do
+         :ok <- validate_symbol(symbol),
+         {:ok, params} <- candle_params(timeframe, range, enum, opts) do
       native = symbol |> SymbolFormat.to_exchange_symbol() |> segment()
 
       # The venue publishes the same candles twice: `/market/products/…` unauthenticated
@@ -214,7 +215,8 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec get_symbols(keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def get_symbols(opts) do
-    with {:ok, products} <- fetch_products(opts) do
+    with :ok <- OptionKeys.check(:get_symbols, opts),
+         {:ok, products} <- fetch_products(opts) do
       {:ok, Enum.map(products, &SymbolFormat.to_canonical_symbol(&1["product_id"]))}
     end
   end
@@ -229,7 +231,8 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec get_market_overview(keyword()) :: {:ok, map()} | {:error, term()}
   def get_market_overview(opts) do
-    with {:ok, products} <- fetch_products(opts) do
+    with :ok <- OptionKeys.check(:get_market_overview, opts),
+         {:ok, products} <- fetch_products(opts) do
       {:ok, Map.new(products, &market_overview_row/1)}
     end
   end
@@ -243,7 +246,8 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec list_instruments(keyword()) :: {:ok, [Instrument.t()]} | {:error, term()}
   def list_instruments(opts) do
-    with {:ok, products} <- fetch_products(opts) do
+    with :ok <- OptionKeys.check(:list_instruments, opts),
+         {:ok, products} <- fetch_products(opts) do
       {:ok, Enum.map(products, &to_instrument/1)}
     end
   end
@@ -294,7 +298,8 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec get_alias_map(keyword()) :: {:ok, %{String.t() => [String.t()]}} | {:error, term()}
   def get_alias_map(opts) do
-    with {:ok, products} <- fetch_products(opts) do
+    with :ok <- OptionKeys.check(:get_alias_map, opts),
+         {:ok, products} <- fetch_products(opts) do
       {:ok, products |> Enum.reduce(%{}, &add_alias_pair/2) |> sort_alias_values()}
     end
   end
@@ -562,7 +567,7 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec validate_account_options(term()) :: :ok | {:error, term()}
   def validate_account_options(opts) do
-    with :ok <- check_options(opts, [:uuid, :limit, :portfolio]),
+    with :ok <- OptionKeys.check(:get_accounts, opts),
          :ok <- validate_account_uuid(Keyword.get(opts, :uuid)),
          :ok <- balance_checks(opts) do
       if Keyword.get(opts, :uuid) != nil and Keyword.get(opts, :portfolio) != nil,
@@ -581,7 +586,7 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec validate_balance_options(term()) :: :ok | {:error, term()}
   def validate_balance_options(opts) do
-    with :ok <- check_options(opts, [:limit, :portfolio]), do: balance_checks(opts)
+    with :ok <- OptionKeys.check(:get_balances, opts), do: balance_checks(opts)
   end
 
   defp balance_checks(opts) do
@@ -704,10 +709,17 @@ defmodule DpExchange.Coinbase.Rest do
   @spec list_payment_methods(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_payment_methods(credentials, opts) do
-    case request(:get, "/payment_methods", credentials, opts) do
-      {:ok, %{body: %{"payment_methods" => methods}}} when is_list(methods) -> map_rows(methods)
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+    with :ok <- OptionKeys.check(:list_payment_methods, opts) do
+      case request(:get, "/payment_methods", credentials, opts) do
+        {:ok, %{body: %{"payment_methods" => methods}}} when is_list(methods) ->
+          map_rows(methods)
+
+        {:ok, _unexpected} ->
+          {:error, :unexpected_response_shape}
+
+        {:error, reason} ->
+          classify(reason)
+      end
     end
   end
 
@@ -729,7 +741,8 @@ defmodule DpExchange.Coinbase.Rest do
     # An empty id would be `/payment_methods/`, the LIST endpoint, and an id with `/` or `?`
     # another path: so it is refused empty (or not a string) and escaped as a segment
     # otherwise.
-    with :ok <- validate_id(id, :payment_method_id) do
+    with :ok <- validate_id(id, :payment_method_id),
+         :ok <- OptionKeys.check(:get_payment_method, opts) do
       case request(:get, "/payment_methods/#{segment(id)}", credentials, opts) do
         {:ok, %{body: %{"payment_method" => method}}} when is_map(method) -> {:ok, method}
         {:ok, _unexpected} -> {:error, :unexpected_response_shape}
@@ -799,10 +812,13 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_key_permissions(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_key_permissions(credentials, opts) do
-    case request(:get, "/key_permissions", credentials, opts) do
-      {:ok, %{body: %{"can_view" => _view} = permissions}} -> {:ok, permissions}
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+    # `get_roles/1` and `test_connection/2` read this with no keys of their own.
+    with :ok <- OptionKeys.check(:get_roles, opts) do
+      case request(:get, "/key_permissions", credentials, opts) do
+        {:ok, %{body: %{"can_view" => _view} = permissions}} -> {:ok, permissions}
+        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
     end
   end
 
@@ -821,10 +837,12 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec get_server_time(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_server_time(opts) do
-    case request(:get, "/time", nil, opts) do
-      {:ok, %{body: %{} = time}} -> {:ok, time}
-      {:ok, _unexpected} -> {:error, :unexpected_response_shape}
-      {:error, reason} -> classify(reason)
+    with :ok <- OptionKeys.check(:get_server_time, opts) do
+      case request(:get, "/time", nil, opts) do
+        {:ok, %{body: %{} = time}} -> {:ok, time}
+        {:ok, _unexpected} -> {:error, :unexpected_response_shape}
+        {:error, reason} -> classify(reason)
+      end
     end
   end
 
@@ -1078,7 +1096,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec validate_portfolio_breakdown(term(), term()) :: :ok | {:error, term()}
   def validate_portfolio_breakdown(portfolio_uuid, opts) do
     with :ok <- validate_id(portfolio_uuid, :portfolio_uuid),
-         :ok <- check_options(opts, [:currency]),
+         :ok <- OptionKeys.check(:get_portfolio_breakdown, opts),
          do: validate_breakdown_currency(Keyword.get(opts, :currency))
   end
 
@@ -1118,7 +1136,8 @@ defmodule DpExchange.Coinbase.Rest do
   @spec rename_portfolio(map(), String.t(), String.t(), keyword()) ::
           {:ok, Types.Portfolio.t()} | {:error, term()} | {:refused, term()}
   def rename_portfolio(credentials, portfolio_uuid, name, opts) do
-    with :ok <- validate_portfolio_rename(portfolio_uuid, name) do
+    with :ok <- validate_portfolio_rename(portfolio_uuid, name),
+         :ok <- OptionKeys.check(:rename_account, opts) do
       path = "/portfolios/#{segment(portfolio_uuid)}"
 
       # A PUT of the same name is idempotent, so the default retries stay; the signer is
@@ -1151,7 +1170,8 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def delete_portfolio(credentials, portfolio_uuid, opts) do
     # `""` would be `DELETE /portfolios/`, a request naming no portfolio at all.
-    with :ok <- validate_id(portfolio_uuid, :portfolio_uuid) do
+    with :ok <- validate_id(portfolio_uuid, :portfolio_uuid),
+         :ok <- OptionKeys.check(:delete_portfolio, opts) do
       path = "/portfolios/#{segment(portfolio_uuid)}"
 
       case request(:delete, path, credentials, once(opts)) do
@@ -1185,7 +1205,8 @@ defmodule DpExchange.Coinbase.Rest do
   @spec quote_conversion(map(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, Types.Conversion.t()} | {:error, term()} | {:refused, term()}
   def quote_conversion(credentials, from, to, amount, opts) do
-    with :ok <- validate_conversion_quote(from, to, amount) do
+    with :ok <- validate_conversion_quote(from, to, amount),
+         :ok <- OptionKeys.check(:quote_conversion, opts) do
       body =
         %{
           "from_account" => from,
@@ -1367,7 +1388,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_positions(map(), keyword()) ::
           {:ok, [Types.Position.t()]} | {:error, term()} | {:refused, term()}
   def get_positions(credentials, opts) do
-    with {:ok, rows} <- futures_position_rows(credentials, opts) do
+    with {:ok, rows} <- futures_position_rows(:get_positions, credentials, opts) do
       to_positions(rows)
     end
   end
@@ -1385,12 +1406,13 @@ defmodule DpExchange.Coinbase.Rest do
   def list_futures_positions(credentials, opts) do
     # The rows are handed back as the venue's own maps, so each must be one (`get_positions/2`
     # reads them unchecked and refuses a row that is not an object itself, in `to_position/1`).
-    with {:ok, rows} <- futures_position_rows(credentials, opts), do: map_rows(rows)
+    with {:ok, rows} <- futures_position_rows(:list_futures_positions, credentials, opts),
+         do: map_rows(rows)
   end
 
-  defp futures_position_rows(credentials, opts) do
+  defp futures_position_rows(function, credentials, opts) do
     # The CFM endpoints take no portfolio parameter: a portfolio scope is refused, not ignored.
-    with :ok <- reject_portfolio_option(opts) do
+    with :ok <- reject_portfolio_option(function, opts) do
       case request(:get, "/cfm/positions", credentials, opts) do
         {:ok, %{body: %{"positions" => positions}}} when is_list(positions) -> {:ok, positions}
         {:ok, _unexpected} -> {:error, :unexpected_response_shape}
@@ -1421,7 +1443,8 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec validate_futures_position(term(), term()) :: :ok | {:error, term()}
   def validate_futures_position(product_id, opts) do
-    with :ok <- validate_id(product_id, :product_id), do: reject_portfolio_option(opts)
+    with :ok <- validate_id(product_id, :product_id),
+         do: reject_portfolio_option(:get_futures_position, opts)
   end
 
   defp get_futures_position_at(credentials, product_id, opts) do
@@ -1591,7 +1614,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_futures_balance_summary(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_futures_balance_summary(credentials, opts) do
-    with :ok <- reject_portfolio_option(opts) do
+    with :ok <- reject_portfolio_option(:get_futures_balance_summary, opts) do
       case request(:get, "/cfm/balance_summary", credentials, opts) do
         {:ok, %{body: %{"balance_summary" => summary}}} when is_map(summary) -> {:ok, summary}
         {:ok, _unexpected} -> {:error, :unexpected_response_shape}
@@ -1613,7 +1636,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec list_futures_sweeps(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_futures_sweeps(credentials, opts) do
-    with :ok <- reject_portfolio_option(opts) do
+    with :ok <- reject_portfolio_option(:list_futures_sweeps, opts) do
       case request(:get, "/cfm/sweeps", credentials, opts) do
         {:ok, %{body: %{"sweeps" => sweeps}}} when is_list(sweeps) -> map_rows(sweeps)
         {:ok, _unexpected} -> {:error, :unexpected_response_shape}
@@ -1678,7 +1701,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec validate_sweep_amount(term()) :: {:ok, String.t() | nil} | {:error, term()}
   def validate_sweep_amount(opts) do
     # A misspelt `usd_amout:` was dropped, and an absent amount sweeps EVERY available dollar.
-    with :ok <- check_options(opts, [:usd_amount]),
+    with :ok <- OptionKeys.check(:schedule_futures_sweep, opts),
          do: sweep_amount(Keyword.get(opts, :usd_amount))
   end
 
@@ -1702,7 +1725,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec cancel_futures_sweep(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def cancel_futures_sweep(credentials, opts) do
-    with :ok <- reject_portfolio_option(opts) do
+    with :ok <- reject_portfolio_option(:cancel_futures_sweep, opts) do
       case request(:delete, "/cfm/sweeps", credentials, once(opts)) do
         {:ok, %{body: %{} = result}} -> sweep_outcome(result, :sweep_not_cancelled)
         {:ok, _unexpected} -> write_unconfirmed(nil, :unexpected_response_shape)
@@ -1722,7 +1745,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_intraday_margin_setting(map(), keyword()) ::
           {:ok, String.t()} | {:error, term()} | {:refused, term()}
   def get_intraday_margin_setting(credentials, opts) do
-    with :ok <- reject_portfolio_option(opts) do
+    with :ok <- reject_portfolio_option(:get_intraday_margin_setting, opts) do
       case request(:get, "/cfm/intraday/margin_setting", credentials, opts) do
         {:ok, %{body: %{"setting" => setting}}} when is_binary(setting) -> {:ok, setting}
         {:ok, _unexpected} -> {:error, :unexpected_response_shape}
@@ -1751,7 +1774,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def set_intraday_margin_setting(credentials, setting, opts) do
     with :ok <- validate_margin_setting(setting),
-         :ok <- reject_portfolio_option(opts) do
+         :ok <- reject_portfolio_option(:set_intraday_margin_setting, opts) do
       # Setting the same value twice is harmless, so the default retries stay and the signer
       # is counted (see `rename_portfolio/4`).
       calls = :atomics.new(1, signed: false)
@@ -1811,7 +1834,7 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec validate_margin_window_options(term()) :: :ok | {:error, term()}
   def validate_margin_window_options(opts) do
-    with :ok <- check_options(opts, [:margin_profile_type]),
+    with :ok <- OptionKeys.check(:get_current_margin_window, opts),
          do: enum_option(opts, :margin_profile_type, @margin_profile_types)
   end
 
@@ -2252,11 +2275,11 @@ defmodule DpExchange.Coinbase.Rest do
   `{:invalid_status, v}`, `{:invalid_symbol, v}`, `{:invalid_limit, v}`,
   `{:invalid_option, :portfolio, v}`, `{:invalid_option, :limit, v}` (above the spec's
   `int32`) and `{:unknown_option, key}` for a key this read does not honour
-  (`check_options/2`).
+  (`OptionKeys.check/2`).
   """
   @spec validate_order_filters(keyword()) :: :ok | {:error, term()}
   def validate_order_filters(opts) do
-    with :ok <- check_options(opts, [:status, :symbol, :limit, :portfolio]),
+    with :ok <- OptionKeys.check(:get_orders, opts),
          :ok <- valid_statuses(Keyword.get(opts, :status)),
          :ok <- valid_order_symbols(Keyword.get(opts, :symbol)),
          :ok <- valid_page_size(Keyword.get(opts, :limit), @max_int32) do
@@ -2296,56 +2319,19 @@ defmodule DpExchange.Coinbase.Rest do
   `{:error, {:unsupported_option, :portfolio}}`. The futures (CFM) endpoints take no
   portfolio parameter; ignoring the option would answer for a different scope than asked.
   Any other key is `{:error, {:unknown_option, key}}` and non-keyword options
-  `{:error, {:invalid_options, v}}` (`check_options/2`).
+  `{:error, {:invalid_options, v}}` (`DpExchange.Coinbase.OptionKeys.check/2`, the one
+  implementation of the family's unknown-option refusal). `function` names the facade
+  function whose keys apply.
   """
-  @spec reject_portfolio_option(term()) :: :ok | {:error, term()}
-  def reject_portfolio_option(opts) do
-    with :ok <- check_options(opts, [:portfolio]) do
+  @spec reject_portfolio_option(atom(), term()) :: :ok | {:error, term()}
+  def reject_portfolio_option(function, opts) do
+    with :ok <- OptionKeys.check(function, opts) do
       case Keyword.get(opts, :portfolio) do
         nil -> :ok
         _scope -> {:error, {:unsupported_option, :portfolio}}
       end
     end
   end
-
-  # The keys `request/5` forwards to `Core.HttpClient` and the credential `opts_credentials/1`
-  # reads. They are accepted on every read; any other key a read does not name is not.
-  @transport_options [
-    :timeout,
-    :retry_attempts,
-    :retry_delay,
-    :plug,
-    :weight,
-    :rate_limit_blocking,
-    :limiter,
-    :credentials
-  ]
-
-  @doc """
-  Refuses an option key a read does not honour: `{:error, {:unknown_option, key}}`.
-
-  A misspelled `limt: 5` or `symbl: "BTC-USD"` used to be dropped without a word, and the
-  call answered for a different question than the one asked (an unfiltered, unbounded
-  history under a filter's name). `allowed` is the read's own keys; the transport keys
-  (`:plug`, `:retry_attempts`, `:timeout`, `:credentials` and so on) are always accepted.
-  Options that are not a keyword list at all are `{:error, {:invalid_options, v}}`.
-  """
-  @spec check_options(term(), [atom()]) ::
-          :ok | {:error, {:unknown_option, term()} | {:invalid_options, term()}}
-  def check_options(opts, allowed), do: check_keys(opts, allowed ++ @transport_options)
-
-  defp check_keys(opts, allowed) when is_list(opts) do
-    if Keyword.keyword?(opts) do
-      case Enum.find(Keyword.keys(opts), &(&1 not in allowed)) do
-        nil -> :ok
-        key -> {:error, {:unknown_option, key}}
-      end
-    else
-      {:error, {:invalid_options, opts}}
-    end
-  end
-
-  defp check_keys(opts, _allowed), do: {:error, {:invalid_options, opts}}
 
   @doc """
   The local checks `get_trade_history/2` runs on its options before any request:
@@ -2357,15 +2343,13 @@ defmodule DpExchange.Coinbase.Rest do
   `{:invalid_range, [start: s, end: e]}` (the window the caller passed),
   `{:invalid_option, :portfolio, v}`, `{:invalid_option, :limit, v}` (above the spec's
   `int64`) and `{:unknown_option, key}` for a key this read does not honour
-  (`check_options/2`). A string or map in `:start` / `:end` went to the
+  (`OptionKeys.check/2`). A string or map in `:start` / `:end` went to the
   venue as given (or raised in the query encoder), and what it makes of an inverted window is
   unmeasured.
   """
-  @fill_options [:trade_types, :symbol, :order_id, :start, :end, :limit, :portfolio]
-
   @spec validate_fill_filters(keyword()) :: :ok | {:error, term()}
   def validate_fill_filters(opts) do
-    with :ok <- check_options(opts, @fill_options),
+    with :ok <- OptionKeys.check(:get_trade_history, opts),
          :ok <- valid_trade_types(Config.opt(opts, :trade_types, ["FILL"])),
          :ok <- valid_order_symbols(Keyword.get(opts, :symbol)),
          :ok <- valid_fill_order_ids(Keyword.get(opts, :order_id)),
@@ -2440,6 +2424,7 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp close_request(symbol, opts) do
     with :ok <- order_symbol(symbol),
+         :ok <- OptionKeys.check(:close_position, opts),
          {:ok, client_order_id} <- client_order_id(Keyword.get(opts, :client_order_id)),
          {:ok, sized} <- normalise_amounts([:size], Map.new(Keyword.take(opts, [:size]))) do
       {:ok, client_order_id, Map.get(sized, :size)}
@@ -2463,18 +2448,30 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   @doc """
+  The timeframe check `get_historical_prices/4` runs first, before the symbol and the
+  options: a width Coinbase serves, else `{:error, {:unsupported_timeframe, timeframe}}`.
+  Exposed so `DpExchange.Coinbase.Fake` refuses in the real path's order.
+  """
+  @spec validate_timeframe(term()) :: :ok | {:error, {:unsupported_timeframe, term()}}
+  def validate_timeframe(timeframe) do
+    with {:ok, _enum} <- granularity_enum(timeframe), do: :ok
+  end
+
+  @doc """
   The two account names the conversion commit and read require in `opts[:from]` and
   `opts[:to]`, or `{:error, :from_and_to_required}`.
   """
-  @spec convert_accounts(keyword()) ::
-          {:ok, String.t(), String.t()} | {:error, :from_and_to_required}
+  @spec convert_accounts(term()) :: {:ok, String.t(), String.t()} | {:error, term()}
   def convert_accounts(opts) do
-    case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
-      {from, to} when is_binary(from) and is_binary(to) and from != "" and to != "" ->
-        {:ok, from, to}
+    # `commit_conversion/3` and `get_conversion/3` read the same two keys.
+    with :ok <- OptionKeys.check(:commit_conversion, opts) do
+      case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
+        {from, to} when is_binary(from) and is_binary(to) and from != "" and to != "" ->
+          {:ok, from, to}
 
-      _missing ->
-        {:error, :from_and_to_required}
+        _missing ->
+          {:error, :from_and_to_required}
+      end
     end
   end
 
@@ -2516,7 +2513,7 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec transfer_portfolios(term()) :: {:ok, String.t(), String.t()} | {:error, term()}
   def transfer_portfolios(opts) do
-    with :ok <- check_options(opts, [:from, :to]) do
+    with :ok <- OptionKeys.check(:transfer_internal, opts) do
       case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
         {same, same} when is_binary(same) and same != "" ->
           {:error, {:invalid_transfer, :same_account}}
@@ -2537,7 +2534,8 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec required_name(term()) :: {:ok, String.t()} | {:error, term()}
   def required_name(opts) do
-    with :ok <- check_options(opts, [:name]), do: portfolio_name(Keyword.get(opts, :name))
+    with :ok <- OptionKeys.check(:create_account, opts),
+         do: portfolio_name(Keyword.get(opts, :name))
   end
 
   @doc """
@@ -2574,7 +2572,8 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec validate_summary_filters(term()) :: :ok | {:error, term()}
   def validate_summary_filters(opts) do
-    with :ok <- check_options(opts, [:product_type, :contract_expiry_type, :product_venue]),
+    # `get_trade_volume/2` reads the same endpoint and the same keys.
+    with :ok <- OptionKeys.check(:get_fees, opts),
          :ok <- enum_option(opts, :product_type, @product_types),
          :ok <- enum_option(opts, :contract_expiry_type, @contract_expiry_types) do
       enum_option(opts, :product_venue, @product_venues)
@@ -2588,7 +2587,7 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec validate_portfolio_filter(term()) :: :ok | {:error, term()}
   def validate_portfolio_filter(opts) do
-    with :ok <- check_options(opts, [:portfolio_type]),
+    with :ok <- OptionKeys.check(:list_portfolios, opts),
          do: enum_option(opts, :portfolio_type, @portfolio_types)
   end
 
@@ -2622,7 +2621,7 @@ defmodule DpExchange.Coinbase.Rest do
   defp candle_params(timeframe, range, enum, opts) do
     width = timeframe_seconds(timeframe)
 
-    with :ok <- check_options(opts, [:limit, :include_partial]),
+    with :ok <- OptionKeys.check(:get_historical_prices, opts),
          :ok <- check_range_keys(range),
          {:ok, limit} <- candle_limit(opts),
          :ok <- include_partial_option(opts),
@@ -2658,7 +2657,7 @@ defmodule DpExchange.Coinbase.Rest do
   # bounded read. A range that is not a keyword list is `candle_window/2`'s `:invalid_range`.
   defp check_range_keys(range) when is_list(range) do
     if Keyword.keyword?(range),
-      do: check_keys(range, [:start, :end]),
+      do: DpExchange.Core.Options.check(range, [:start, :end]),
       else: :ok
   end
 
@@ -2960,8 +2959,9 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_trades(String.t(), keyword()) ::
           {:ok, [Types.Trade.t()]} | {:error, term()} | {:refused, term()}
   def get_trades(symbol, opts) do
-    with {:ok, limit, since, finish} <- trades_options(opts) do
-      do_get_trades(symbol, {limit, since, finish}, opts)
+    with :ok <- validate_symbol(symbol),
+         {:ok, limit, since, finish} <- trades_options(opts) do
+      fetch_trades(symbol, {limit, since, finish}, opts)
     end
   end
 
@@ -2976,7 +2976,7 @@ defmodule DpExchange.Coinbase.Rest do
   @spec trades_options(keyword()) ::
           {:ok, pos_integer(), DateTime.t() | nil, DateTime.t() | nil} | {:error, term()}
   def trades_options(opts) do
-    with :ok <- check_options(opts, [:limit, :since, :end, :include_broken]),
+    with :ok <- OptionKeys.check(:get_trades, opts),
          {:ok, limit} <- trades_limit(Keyword.get(opts, :limit)),
          {:ok, since} <- trades_bound(opts, :since),
          {:ok, finish} <- trades_bound(opts, :end) do
@@ -3001,10 +3001,6 @@ defmodule DpExchange.Coinbase.Rest do
       %DateTime{} = at -> {:ok, at}
       other -> {:error, {:invalid_option, key, other}}
     end
-  end
-
-  defp do_get_trades(symbol, bounds, opts) do
-    with :ok <- validate_symbol(symbol), do: fetch_trades(symbol, bounds, opts)
   end
 
   defp fetch_trades(symbol, {limit, since, finish}, opts) do
@@ -3182,7 +3178,8 @@ defmodule DpExchange.Coinbase.Rest do
   @spec get_top_of_book(String.t(), keyword()) ::
           {:ok, Types.TopOfBook.t()} | {:error, term()} | {:refused, term()}
   def get_top_of_book(symbol, opts) do
-    with :ok <- validate_symbol(symbol) do
+    with :ok <- validate_symbol(symbol),
+         :ok <- OptionKeys.check(:get_top_of_book, opts) do
       native = SymbolFormat.to_exchange_symbol(symbol)
       credentials = opts_credentials(opts)
 
@@ -3360,9 +3357,9 @@ defmodule DpExchange.Coinbase.Rest do
   # `:depth` is the family's name for levels per side (MD5) and is sent as the venue's
   # `limit`. The old `:limit` spelling is refused by name, never read as `:depth`.
   #
-  # `:limit` passes `check_options/2` only to be refused by name, with the more useful answer.
+  # `:limit` passes `OptionKeys.check/2` only to be refused by name, with the more useful answer.
   defp book_options(opts) do
-    with :ok <- check_options(opts, [:depth, :aggregation_price_increment, :limit]),
+    with :ok <- OptionKeys.check(:get_order_book, opts),
          :ok <- book_limit_refused(opts),
          depth = Keyword.get(opts, :depth),
          :ok <- book_depth(depth),
@@ -3894,6 +3891,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
   def place_order(credentials, request, opts) do
     with {:ok, plan} <- order_plan(request, :place),
+         :ok <- OptionKeys.check(:place_order, opts),
          :ok <- validate_credentials(credentials) do
       body =
         Map.merge(plan.margin, %{
@@ -4749,7 +4747,8 @@ defmodule DpExchange.Coinbase.Rest do
   def cancel_order(credentials, order_id, opts) do
     # `[nil]` or `[""]` is a batch that names no order; the venue's per-row answer for it
     # would be `order_not_in_response` at best. Refused before anything is sent.
-    with :ok <- validate_order_id(order_id) do
+    with :ok <- validate_order_id(order_id),
+         :ok <- OptionKeys.check(:cancel_order, opts) do
       # Once, as `post_once/4` says: a cancel that took effect before a lost answer, retried,
       # comes back "not there to cancel", a refusal for an order this call did cancel.
       case post_once("/orders/batch_cancel", %{"order_ids" => [order_id]}, credentials, opts) do
@@ -4798,7 +4797,8 @@ defmodule DpExchange.Coinbase.Rest do
   def get_order(credentials, order_id, opts) do
     # `""` would build `/orders/historical/`, a different endpoint, `"  "` an id of spaces,
     # and `nil` or a map would be interpolated into the path. None names an order.
-    with :ok <- validate_order_id(order_id) do
+    with :ok <- validate_order_id(order_id),
+         :ok <- OptionKeys.check(:get_order, opts) do
       case request(:get, "/orders/historical/#{segment(order_id)}", credentials, opts) do
         {:ok, %{body: %{"order" => order}}} when is_map(order) -> to_order(order)
         {:ok, %{body: _other}} -> {:error, :unexpected_response_shape}
@@ -5143,6 +5143,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_order(credentials, request, opts) do
     with {:ok, plan} <- order_plan(request, :preview),
+         :ok <- OptionKeys.check(:preview_order, opts),
          :ok <- validate_credentials(credentials) do
       body =
         Map.merge(plan.margin, %{
@@ -5207,7 +5208,8 @@ defmodule DpExchange.Coinbase.Rest do
   @spec preview_replace(map(), String.t(), term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_replace(credentials, order_id, changes, opts) do
-    with {:ok, body} <- edit_body(order_id, changes) do
+    with {:ok, body} <- edit_body(order_id, changes),
+         :ok <- OptionKeys.check(:preview_replace, opts) do
       case post_json("/orders/edit_preview", body, credentials, opts) do
         {:ok, %{body: response}} -> edit_preview_result(response)
         {:error, reason} -> classify(reason)
@@ -5389,6 +5391,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
   def replace_order(credentials, order_id, changes, opts) do
     with {:ok, body} <- edit_body(order_id, changes),
+         :ok <- OptionKeys.check(:replace_order, opts),
          :ok <- validate_credentials(credentials) do
       case post_once("/orders/edit", body, credentials, opts) do
         {:ok, %{body: response}} -> edit_result(response, order_id, credentials, opts)

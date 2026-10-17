@@ -70,7 +70,7 @@ defmodule DpExchange.Coinbase.Prime do
   is worse than a map a caller has to read.
   """
 
-  alias DpExchange.Coinbase.{IdempotencyKey, Rest}
+  alias DpExchange.Coinbase.{IdempotencyKey, OptionKeys}
   alias DpExchange.Core.{Config, HttpClient, Types}
 
   @base_url "https://api.prime.coinbase.com"
@@ -109,9 +109,8 @@ defmodule DpExchange.Coinbase.Prime do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def stake_portfolio(credentials, portfolio_id, asset, amount, opts) do
     with :ok <- valid_portfolio(portfolio_id),
+         :ok <- validate_positional(asset, amount),
          :ok <- validate_stake_options(opts),
-         :ok <- valid_asset(asset),
-         :ok <- valid_amount(amount),
          :ok <- valid_key(opts),
          :ok <- valid_extra(opts) do
       post_write(
@@ -135,9 +134,8 @@ defmodule DpExchange.Coinbase.Prime do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def unstake_portfolio(credentials, portfolio_id, asset, amount, opts) do
     with :ok <- valid_portfolio(portfolio_id),
+         :ok <- validate_positional(asset, amount),
          :ok <- validate_stake_options(opts),
-         :ok <- valid_asset(asset),
-         :ok <- valid_amount(amount),
          :ok <- valid_key(opts),
          :ok <- valid_extra(opts) do
       post_write(
@@ -190,7 +188,7 @@ defmodule DpExchange.Coinbase.Prime do
   @spec validate_validators_query(term(), keyword()) :: :ok | {:error, term()}
   def validate_validators_query(portfolio_id, opts) do
     with :ok <- valid_portfolio(portfolio_id),
-         :ok <- Rest.check_options(opts, [:transaction_ids, :extra]),
+         :ok <- OptionKeys.check(:query_transaction_validators, opts),
          :ok <- valid_extra(opts) do
       case Config.opt(opts, :transaction_ids, nil) do
         ids when is_list(ids) and ids != [] -> valid_transaction_ids(ids)
@@ -241,9 +239,8 @@ defmodule DpExchange.Coinbase.Prime do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def stake_wallet(credentials, portfolio_id, wallet_id, asset, amount, opts) do
     with :ok <- valid_scope(portfolio_id, wallet_id),
+         :ok <- validate_positional(asset, amount),
          :ok <- validate_stake_options(opts),
-         :ok <- valid_asset(asset),
-         :ok <- valid_amount(amount),
          :ok <- valid_key(opts),
          :ok <- valid_extra(opts),
          :ok <- verify_wallet_asset(credentials, portfolio_id, wallet_id, asset, opts) do
@@ -275,9 +272,8 @@ defmodule DpExchange.Coinbase.Prime do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def unstake_wallet(credentials, portfolio_id, wallet_id, asset, amount, opts) do
     with :ok <- valid_scope(portfolio_id, wallet_id),
+         :ok <- validate_positional(asset, amount),
          :ok <- validate_stake_options(opts),
-         :ok <- valid_asset(asset),
-         :ok <- valid_amount(amount),
          :ok <- valid_key(opts),
          :ok <- valid_extra(opts),
          :ok <- verify_wallet_asset(credentials, portfolio_id, wallet_id, asset, opts) do
@@ -317,7 +313,7 @@ defmodule DpExchange.Coinbase.Prime do
           keyword()
         ) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_unstake_wallet(credentials, portfolio_id, wallet_id, _asset, amount, opts) do
-    with :ok <- validate_preview_unstake(portfolio_id, wallet_id, amount) do
+    with :ok <- validate_preview_unstake(portfolio_id, wallet_id, amount, opts) do
       post(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake/preview",
         %{"amount" => Decimal.to_string(amount, :normal)},
@@ -330,12 +326,15 @@ defmodule DpExchange.Coinbase.Prime do
   @doc """
   The local checks `preview_unstake_wallet/6` runs before anything is signed: both ids
   (`{:invalid_portfolio_id, v}` / `{:invalid_wallet_id, v}`), then the amount
-  (`{:invalid_amount, v}`). The asset is not checked, as in the real call. Exposed so
-  `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
+  (`{:invalid_amount, v}`), then the options (`DpExchange.Coinbase.OptionKeys`). The asset is
+  not checked, as in the real call. Exposed so `DpExchange.Coinbase.Fake` refuses exactly as
+  the real path does.
   """
-  @spec validate_preview_unstake(term(), term(), term()) :: :ok | {:error, term()}
-  def validate_preview_unstake(portfolio_id, wallet_id, amount) do
-    with :ok <- valid_scope(portfolio_id, wallet_id), do: valid_amount(amount)
+  @spec validate_preview_unstake(term(), term(), term(), term()) :: :ok | {:error, term()}
+  def validate_preview_unstake(portfolio_id, wallet_id, amount, opts) do
+    with :ok <- valid_scope(portfolio_id, wallet_id),
+         :ok <- valid_amount(amount),
+         do: OptionKeys.check(:preview_unstake_wallet, opts)
   end
 
   @doc """
@@ -349,7 +348,7 @@ defmodule DpExchange.Coinbase.Prime do
   @spec unstake_status(credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def unstake_status(credentials, portfolio_id, wallet_id, opts) do
-    with :ok <- validate_wallet_scope(portfolio_id, wallet_id) do
+    with :ok <- validate_wallet_read(:unstake_status, portfolio_id, wallet_id, opts) do
       get("/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake/status",
         credentials: credentials,
         opts: opts
@@ -405,7 +404,7 @@ defmodule DpExchange.Coinbase.Prime do
   @spec validate_claim(term(), term(), keyword()) :: :ok | {:error, term()}
   def validate_claim(portfolio_id, wallet_id, opts) do
     with :ok <- valid_scope(portfolio_id, wallet_id),
-         :ok <- Rest.check_options(opts, [:amount, :body, :idempotency_key]),
+         :ok <- OptionKeys.check(:claim_rewards, opts),
          :ok <- valid_claim_amount(Config.opt(opts, :amount, nil)),
          :ok <- valid_key(opts) do
       valid_claim_body(Config.opt(opts, :body, %{}))
@@ -423,7 +422,7 @@ defmodule DpExchange.Coinbase.Prime do
   @spec staking_status(credentials(), String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def staking_status(credentials, portfolio_id, wallet_id, opts) do
-    with :ok <- validate_wallet_scope(portfolio_id, wallet_id) do
+    with :ok <- validate_wallet_read(:staking_status, portfolio_id, wallet_id, opts) do
       get("/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/status",
         credentials: credentials,
         opts: opts
@@ -453,35 +452,54 @@ defmodule DpExchange.Coinbase.Prime do
   def validate_scope(portfolio_id, nil), do: valid_portfolio(portfolio_id)
   def validate_scope(portfolio_id, wallet_id), do: valid_scope(portfolio_id, wallet_id)
 
-  @stake_options [:idempotency_key, :extra, :metadata, :portfolio_id, :wallet_id]
-
   @doc """
   Refuses an option a staking write does not honour (`{:error, {:unknown_option, key}}`) and
   options that are not a keyword list (`{:error, {:invalid_options, v}}`). The transport keys
-  always pass; see `DpExchange.Coinbase.Rest.check_options/2`. A misspelt `metdata:` was
+  always pass; see `DpExchange.Coinbase.OptionKeys`. A misspelt `metdata:` was
   dropped and the stake sent without it. Exposed so `DpExchange.Coinbase.Fake` and the
   facade refuse exactly as the real path does.
   """
   @spec validate_stake_options(term()) ::
           :ok | {:error, {:unknown_option, term()} | {:invalid_options, term()}}
-  def validate_stake_options(opts), do: Rest.check_options(opts, @stake_options)
+  def validate_stake_options(opts), do: OptionKeys.check(:stake, opts)
+
+  @doc """
+  The checks `staking_status/4` and `unstake_status/4` run before anything is signed: the
+  ids (`validate_wallet_scope/2`), then the options. `function` names which of the two, for
+  `DpExchange.Coinbase.OptionKeys`. Exposed so `DpExchange.Coinbase.Fake` refuses exactly as
+  the real path does.
+  """
+  @spec validate_wallet_read(atom(), term(), term(), term()) :: :ok | {:error, term()}
+  def validate_wallet_read(function, portfolio_id, wallet_id, opts) do
+    with :ok <- validate_wallet_scope(portfolio_id, wallet_id),
+         do: OptionKeys.check(function, opts)
+  end
 
   @doc """
   The field checks a staking write (`stake/3` / `unstake/3`) runs after the scope, in the
-  order the real path runs them: `asset` a non-blank string (`{:invalid_asset, v}`), `amount`
-  a finite, positive `Decimal` within 64 places (`{:invalid_amount, v}`),
-  `opts[:idempotency_key]` absent or a UUID (`{:invalid_idempotency_key, v}`) and `opts[:extra]`
-  absent or a map (`{:invalid_extra, v}`). Exposed so `DpExchange.Coinbase.Fake` refuses
-  exactly as the real path does.
+  order the real path runs them: the positional arguments (`validate_positional/2`), then
+  the options (`validate_stake_options/1`), `opts[:idempotency_key]` absent or a UUID
+  (`{:invalid_idempotency_key, v}`) and `opts[:extra]` absent or a map
+  (`{:invalid_extra, v}`). Exposed so `DpExchange.Coinbase.Fake` refuses exactly as the
+  real path does.
   """
   @spec validate_write(term(), term(), keyword()) :: :ok | {:error, term()}
   def validate_write(asset, amount, opts) do
-    with :ok <- validate_stake_options(opts),
-         :ok <- valid_asset(asset),
-         :ok <- valid_amount(amount),
+    with :ok <- validate_positional(asset, amount),
+         :ok <- validate_stake_options(opts),
          :ok <- valid_key(opts) do
       valid_extra(opts)
     end
+  end
+
+  @doc """
+  The positional checks of a staking write, which run before its options: `asset` a
+  non-blank string (`{:invalid_asset, v}`), then `amount` a finite, positive `Decimal` within
+  64 places (`{:invalid_amount, v}`).
+  """
+  @spec validate_positional(term(), term()) :: :ok | {:error, term()}
+  def validate_positional(asset, amount) do
+    with :ok <- valid_asset(asset), do: valid_amount(amount)
   end
 
   @doc """

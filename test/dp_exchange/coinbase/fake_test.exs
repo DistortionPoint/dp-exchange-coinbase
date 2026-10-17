@@ -728,7 +728,7 @@ defmodule DpExchange.Coinbase.FakeTest do
 
       assert :ok = DpExchange.Coinbase.Fake.subscribe(["btc-usd"], opts)
       assert_receive {:dp_exchange, _venue, %{symbol: "BTC-USD"}}, 5_000
-      assert Map.has_key?(DpExchange.Coinbase.Fake.coverage(opts), "BTC-USD")
+      assert Map.has_key?(DpExchange.Coinbase.Fake.coverage([]), "BTC-USD")
     end
   end
 

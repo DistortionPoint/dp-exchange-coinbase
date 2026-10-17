@@ -49,7 +49,16 @@ defmodule DpExchange.Coinbase do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Coinbase.{Feed, IdempotencyKey, Prime, Rest, Supervisor, SymbolFormat}
+  alias DpExchange.Coinbase.{
+    Feed,
+    IdempotencyKey,
+    OptionKeys,
+    Prime,
+    Rest,
+    Supervisor,
+    SymbolFormat
+  }
+
   alias DpExchange.Core.{Capabilities, Config, Venue}
 
   # The venue serves none of these. **That is a claim about Coinbase, not about how far
@@ -663,8 +672,14 @@ defmodule DpExchange.Coinbase do
   See `c:DpExchange.Core.Venue.unsubscribe/2`.
   """
   @impl true
-  def unsubscribe(symbols, opts \\ []),
-    do: feed_call(fn -> Feed.unsubscribe(feed(opts), canonical_case(symbols)) end, :ok)
+  def unsubscribe(symbols, opts \\ []) do
+    symbols = canonical_case(symbols)
+
+    with :ok <- Feed.check_symbols(symbols),
+         :ok <- OptionKeys.check(:unsubscribe, opts) do
+      feed_call(fn -> Feed.unsubscribe(feed(opts), symbols) end, :ok)
+    end
+  end
 
   @doc """
   Replaces the subscription's symbol set on the running feed (upper-cased on the way in).
@@ -673,12 +688,17 @@ defmodule DpExchange.Coinbase do
   `c:DpExchange.Core.Venue.update_symbols/2`.
   """
   @impl true
-  def update_symbols(symbols, opts \\ []),
-    do:
+  def update_symbols(symbols, opts \\ []) do
+    symbols = canonical_case(symbols)
+
+    with :ok <- Feed.check_symbols(symbols),
+         :ok <- OptionKeys.check(:update_symbols, opts) do
       feed_call(
-        fn -> Feed.update_symbols(feed(opts), canonical_case(symbols)) end,
+        fn -> Feed.update_symbols(feed(opts), symbols) end,
         {:error, :feed_not_started}
       )
+    end
+  end
 
   # NOT declarable `:unsupported`: `coverage/1` returns a map, so it has no way to
   # answer `{:error, :not_supported}`. It always answers, and an empty map is the honest
@@ -692,6 +712,7 @@ defmodule DpExchange.Coinbase do
   """
   @impl true
   def coverage(opts \\ []) do
+    OptionKeys.check!(:coverage, opts)
     feed = feed(opts)
     if alive?(feed), do: feed_read(fn -> Feed.coverage(feed) end, %{}), else: %{}
   end
@@ -706,6 +727,7 @@ defmodule DpExchange.Coinbase do
   @spec wanted(keyword()) :: [String.t()]
   @impl true
   def wanted(opts \\ []) do
+    OptionKeys.check!(:wanted, opts)
     feed = feed(opts)
     if alive?(feed), do: feed_read(fn -> Feed.wanted(feed) end, []), else: []
   end
@@ -743,6 +765,7 @@ defmodule DpExchange.Coinbase do
           }
         }
   def coverage_by_kind(opts \\ []) do
+    OptionKeys.check!(:coverage_by_kind, opts)
     feed = feed(opts)
     if alive?(feed), do: feed_read(fn -> Feed.coverage_by_kind(feed) end, %{}), else: %{}
   end
@@ -842,7 +865,9 @@ defmodule DpExchange.Coinbase do
   See `c:DpExchange.Core.Venue.market_status/1`.
   """
   @impl true
-  def market_status(_opts), do: {:ok, :open}
+  def market_status(opts) do
+    with :ok <- OptionKeys.check(:market_status, opts), do: {:ok, :open}
+  end
 
   @impl true
   @doc """
@@ -875,8 +900,7 @@ defmodule DpExchange.Coinbase do
   returns the venue's own rows, where it keeps its own name.
   """
   @impl true
-  def get_positions(opts),
-    do: Rest.get_positions(Keyword.get(opts, :credentials, %{}), opts)
+  def get_positions(opts), do: Rest.get_positions(credentials_of(opts), opts)
 
   @doc """
   The venue's own futures position rows, unnormalised.
@@ -885,8 +909,7 @@ defmodule DpExchange.Coinbase do
   """
   @spec list_futures_positions(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def list_futures_positions(opts),
-    do: Rest.list_futures_positions(Keyword.get(opts, :credentials, %{}), opts)
+  def list_futures_positions(opts), do: Rest.list_futures_positions(credentials_of(opts), opts)
 
   @doc """
   One futures position by product id — expiry included.
@@ -1073,7 +1096,8 @@ defmodule DpExchange.Coinbase do
   # The idempotency key is fixed HERE, before the call, so that a `2xx` whose body names no
   # transaction can still answer `{:write_unconfirmed, key, _}` with the key that was sent.
   defp prime_write(operation, asset, amount, opts) do
-    with :ok <- Prime.validate_stake_options(opts) do
+    with :ok <- Prime.validate_positional(asset, amount),
+         :ok <- Prime.validate_stake_options(opts) do
       do_prime_write(operation, asset, amount, opts)
     end
   end
@@ -1192,7 +1216,7 @@ defmodule DpExchange.Coinbase do
   """
   @impl true
   def quote_conversion(from, to, amount, opts),
-    do: Rest.quote_conversion(Keyword.get(opts, :credentials, %{}), from, to, amount, opts)
+    do: Rest.quote_conversion(credentials_of(opts), from, to, amount, opts)
 
   @doc """
   Commits a quoted conversion. **This moves funds.**
@@ -1201,8 +1225,7 @@ defmodule DpExchange.Coinbase do
   this package fills neither in — `opts[:from]` and `opts[:to]` are required.
   """
   @impl true
-  def commit_conversion(id, opts),
-    do: Rest.commit_conversion(Keyword.get(opts, :credentials, %{}), id, opts)
+  def commit_conversion(id, opts), do: Rest.commit_conversion(credentials_of(opts), id, opts)
 
   @doc """
   A conversion's current state.
@@ -1211,8 +1234,7 @@ defmodule DpExchange.Coinbase do
   parameters here — the venue's own rule, and unusual for a read.
   """
   @impl true
-  def get_conversion(id, opts),
-    do: Rest.get_conversion(Keyword.get(opts, :credentials, %{}), id, opts)
+  def get_conversion(id, opts), do: Rest.get_conversion(credentials_of(opts), id, opts)
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`. Convert in two steps with
@@ -1239,8 +1261,7 @@ defmodule DpExchange.Coinbase do
   and deleted ones stay in the listing because old orders still name them.
   """
   @impl true
-  def list_portfolios(opts),
-    do: Rest.list_portfolios(Keyword.get(opts, :credentials, %{}), opts)
+  def list_portfolios(opts), do: Rest.list_portfolios(credentials_of(opts), opts)
 
   @doc """
   One portfolio's full breakdown — balances, positions and margin inside it.
@@ -1333,11 +1354,16 @@ defmodule DpExchange.Coinbase do
   def transfer_internal(asset, amount, opts, request_opts),
     do:
       Rest.transfer_internal(
-        Keyword.get(request_opts, :credentials, %{}),
+        credentials_of(request_opts),
         asset,
         amount,
-        Keyword.merge(request_opts, opts)
+        OptionKeys.merge(request_opts, opts)
       )
+
+  # The credential a call carries in its options, `%{}` (none) when there is none. Options
+  # that are not a keyword list carry none, and are refused by the option check that follows.
+  defp credentials_of(opts) when is_list(opts), do: Keyword.get(opts, :credentials, %{})
+  defp credentials_of(_not_a_list), do: %{}
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
@@ -1503,8 +1529,7 @@ defmodule DpExchange.Coinbase do
   callback means here.
   """
   @impl true
-  def create_account(opts),
-    do: Rest.create_portfolio(Keyword.get(opts, :credentials, %{}), opts)
+  def create_account(opts), do: Rest.create_portfolio(credentials_of(opts), opts)
 
   @doc """
   Renames a portfolio.
@@ -1513,7 +1538,7 @@ defmodule DpExchange.Coinbase do
   """
   @impl true
   def rename_account(id, name, opts),
-    do: Rest.rename_portfolio(Keyword.get(opts, :credentials, %{}), id, name, opts)
+    do: Rest.rename_portfolio(credentials_of(opts), id, name, opts)
 
   @doc """
   What this API key is allowed to do.
@@ -1522,8 +1547,7 @@ defmodule DpExchange.Coinbase do
   `can_transfer` is the one that moves money. Carries the portfolio the key is scoped to.
   """
   @impl true
-  def get_roles(opts),
-    do: Rest.get_key_permissions(Keyword.get(opts, :credentials, %{}), opts)
+  def get_roles(opts), do: Rest.get_key_permissions(credentials_of(opts), opts)
 
   @doc """
   The venue's own clock. **Public.**

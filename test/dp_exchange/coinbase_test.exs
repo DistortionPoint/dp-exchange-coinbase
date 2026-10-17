@@ -327,22 +327,29 @@ defmodule DpExchange.CoinbaseTest do
 
       start_supervised!(%{id: opts[:name], start: {Coinbase, :start_link, [opts]}})
 
+      # The calls read only which feed to reach; a start option handed to them is refused.
+      call_opts = [feed: opts[:feed]]
+
       # The socket cannot connect, so subscribe reports the failure rather than claiming
       # a subscription that will never deliver.
-      assert {:error, _reason} = Coinbase.subscribe(~w(BTC-USD), opts)
+      assert {:error, _reason} = Coinbase.subscribe(~w(BTC-USD), call_opts)
 
       # Coverage is observed, so nothing arrived and nothing is covered.
-      assert Coinbase.coverage(opts) == %{}
+      assert Coinbase.coverage(call_opts) == %{}
 
       # BTC-USD's shard never opened, so there is nothing on the wire to unsubscribe —
       # this reports success honestly rather than pretending a request went anywhere.
-      assert :ok = Coinbase.unsubscribe(~w(BTC-USD), opts)
+      assert :ok = Coinbase.unsubscribe(~w(BTC-USD), call_opts)
 
       # A fresh symbol tries the connection again rather than giving up silently after
       # one failure — and reports the same real failure again, not a stale `:ok`.
-      assert {:error, _reason} = Coinbase.update_symbols(~w(ETH-USD), opts)
+      assert {:error, _reason} = Coinbase.update_symbols(~w(ETH-USD), call_opts)
 
-      assert :ok = Coinbase.subscribe_notices(opts)
+      assert :ok = Coinbase.subscribe_notices(call_opts)
+
+      # A start option is not a call option: it was ignored here before, and is refused now.
+      assert {:error, {:unknown_option, :url}} = Coinbase.update_symbols(~w(ETH-USD), url: "x")
+      assert_raise ArgumentError, fn -> Coinbase.coverage(max_queue_len: 1) end
     end
   end
 

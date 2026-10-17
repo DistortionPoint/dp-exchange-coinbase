@@ -1292,6 +1292,33 @@ None of these raises in your process, and the fake runs the same check in the sa
   `list_portfolios/1` takes `:portfolio_type`; `get_current_margin_window/2` takes
   `:margin_profile_type`. A word outside the spec's enum, or a non-string, is
   `{:error, {:invalid_option, key, value}}`.
+- **Every facade function refuses a key it does not read** — `{:error, {:unknown_option, key}}`,
+  and `{:error, {:invalid_options, v}}` for options that are not a keyword list — before
+  anything is sent. `coverage/1`, `wanted/1` and `coverage_by_kind/1` have no error channel
+  and raise `ArgumentError` instead. A function that answers `{:error, :not_supported}` does
+  so whatever the options. The accepted keys are the shared transport keys
+  (`DpExchange.Core.Options.transport_options/0`) plus the function's own, listed in one
+  table in `DpExchange.Coinbase.OptionKeys` (read it with `OptionKeys.own_keys/1`). In short:
+  no own keys for `get_price`, `get_top_of_book`, `get_symbols`, `get_market_overview`,
+  `list_instruments`, `get_server_time`, `test_connection`, `get_roles`, `market_status`, the
+  order calls other than `close_position` and `get_orders`, `list_payment_methods`,
+  `get_payment_method`, `rename_account`, `delete_portfolio`, `staking_status`,
+  `unstake_status` and `preview_unstake_wallet`; `get_historical_prices` takes `:limit` and
+  `:include_partial`; `get_order_book` `:depth` and `:aggregation_price_increment`;
+  `get_trades` `:limit`, `:since`, `:end`, `:include_broken`; `get_balances` `:limit`,
+  `:portfolio`; `get_accounts` adds `:uuid`; `get_orders` `:status`, `:symbol`, `:limit`,
+  `:portfolio`; `get_trade_history` those plus `:trade_types`, `:order_id`, `:start`, `:end`;
+  `close_position` `:client_order_id`, `:size`; `transfer_internal`, `commit_conversion` and
+  `get_conversion` `:from`, `:to`; `quote_conversion` `:trade_incentive_metadata`;
+  `create_account` `:name`; `list_portfolios` `:portfolio_type`; `get_portfolio_breakdown`
+  `:currency`; the futures calls `:portfolio` (refused as unsupported), except
+  `schedule_futures_sweep` `:usd_amount` and `get_current_margin_window`
+  `:margin_profile_type`; `stake`/`unstake` `:idempotency_key`, `:extra`, `:metadata`,
+  `:portfolio_id`, `:wallet_id`; `claim_rewards` `:amount`, `:body`, `:idempotency_key`;
+  `query_transaction_validators` `:transaction_ids`, `:extra`; `subscribe` and
+  `subscribe_notices` `:to` and `:feed`; and `unsubscribe`, `update_symbols`, `coverage`,
+  `wanted` and `coverage_by_kind` `:feed` only. A venue start option (`:url`, `:name`,
+  `:max_queue_len`, ...) handed to a streaming call is refused, not ignored.
 - **Unknown options are refused.** `get_orders/2`, `get_trade_history/2`, `get_trades/2`,
   `get_historical_prices/4` (options and range) and `get_order_book/2` answer
   `{:error, {:unknown_option, key}}` for a key they do not honour (a misspelt `limt:` used to
