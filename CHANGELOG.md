@@ -20,6 +20,22 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Depends on dp_exchange_core 0.3.105 (conformance group 46: a call that sends no request takes no transport key).
+
+### Changed (BREAKING)
+
+- A shared transport key is accepted only where the call reads it (tick AK). The calls that
+  send no request (`subscribe`, `subscribe_notices`, `unsubscribe`, `update_symbols`,
+  `coverage`, `wanted`, `coverage_by_kind`, `market_status`) now accept only their own keys
+  plus `:credentials`: `timeout: 5_000`, `plug:` and the rest answer
+  `{:error, {:unknown_option, key}}` (the plain-value reads raise `ArgumentError`). On every
+  request call `:environment` and `:base_url` are refused the same way: the hosts are
+  constants and neither was ever read, so a caller who passed one got production regardless.
+- `:adapter`, `:req_adapter`, `:max_retry_after_s`, `:max_body_bytes` and `:log_requests`
+  were accepted and silently dropped on every REST and Prime call; they are now forwarded to
+  `Core.HttpClient`, so `max_body_bytes:` really caps a response body.
+
+
 ## [0.3.138] - 2026-10-18
 
 Depends on dp_exchange_core 0.3.103 (conformance groups 44, fake export parity, and 45, notice shapes).

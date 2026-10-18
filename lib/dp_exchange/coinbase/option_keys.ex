@@ -13,16 +13,28 @@ defmodule DpExchange.Coinbase.OptionKeys do
 
   ## What is allowed
 
-  A function's own keys (the table below) plus `DpExchange.Core.Options.transport_options/0`
-  (`:credentials`, `:plug`, `:timeout`, the retry and limiter knobs, ...). A key that selects
-  nothing for this venue is not here: `:environment` and `:base_url` are accepted as shared
-  transport keys but this package reads neither.
+  A call that sends an HTTP request allows its own keys (the table below) plus
+  `DpExchange.Core.Options.transport_options/0` minus the keys this package cannot honour:
 
-  The streaming calls read only what routes them: `subscribe/2` and `subscribe_notices/1`
-  take `:to` (the subscriber) and `:feed` (which feed process); `unsubscribe/2`,
-  `update_symbols/2`, `coverage/1`, `wanted/1` and `coverage_by_kind/1` take `:feed`. A
-  start option such as `:url` or `:name` handed to them was ignored, and is now refused.
-  `DpExchange.Coinbase.Fake` also reads `:channels` on `subscribe/2`, its own seam.
+    * `:environment` - the REST hosts are module constants; this package selects no sandbox
+    * `:base_url` - the same constants; no call reads an override
+
+  Both are refused as `{:unknown_option, key}` on every call. Every other shared key is
+  forwarded to `Core.HttpClient` by `forwarded/0` (`:timeout`, `:retry_attempts`,
+  `:retry_delay`, `:plug`, `:adapter`, `:req_adapter`, `:weight`, `:rate_limit_blocking`,
+  `:max_retry_after_s`, `:max_body_bytes`, `:log_requests`), `:limiter` is resolved against
+  this venue's own default, and `:credentials` signs the request.
+
+  A call that sends no request allows only its own keys plus `:credentials` (exempt: a
+  consumer hands one credential set to every call, and one a call does not need changes no
+  answer). Any other transport key, `timeout: 5_000` for one, is refused. These are
+  `subscribe/2`, `subscribe_notices/1`, `unsubscribe/2`, `update_symbols/2`, `coverage/1`,
+  `wanted/1`, `coverage_by_kind/1` and `market_status/1`. `subscribe/2` and
+  `subscribe_notices/1` take `:to` (the subscriber) and `:feed` (which feed process); the
+  rest of the feed calls take `:feed`. A start option such as `:url` or `:name` handed to
+  them was ignored, and is refused. `DpExchange.Coinbase.Fake` also reads `:channels` on
+  `subscribe/2`, its own seam. The plain-value reads (`coverage/1`, `wanted/1`,
+  `coverage_by_kind/1`) raise `ArgumentError` instead.
 
   A function that answers `Venue.not_supported()` is not in the table and does not consult
   it: the endpoint's absence is the more useful answer whatever the options.
@@ -72,6 +84,25 @@ defmodule DpExchange.Coinbase.OptionKeys do
   @stake_keys [:idempotency_key, :extra, :metadata, :portfolio_id, :wallet_id]
   @feed_route [:feed]
   @subscriber [:to, :feed]
+
+  # The calls that send no HTTP request. They allow their own keys and `:credentials`.
+  @no_request [
+    :subscribe,
+    :subscribe_notices,
+    :unsubscribe,
+    :update_symbols,
+    :coverage,
+    :wanted,
+    :coverage_by_kind,
+    :market_status
+  ]
+
+  # Shared transport keys this package cannot honour on a request, and why. A key listed here
+  # is refused as `{:unknown_option, key}` on every call.
+  @not_read [
+    environment: "the REST hosts are module constants; this package selects no sandbox",
+    base_url: "the REST hosts are module constants; no call reads an override"
+  ]
 
   @keys %{
     get_price: [],
@@ -147,10 +178,27 @@ defmodule DpExchange.Coinbase.OptionKeys do
   def own_keys(function), do: Map.fetch!(@keys, function)
 
   @doc """
-  Every key `function` accepts: its own keys and `DpExchange.Core.Options.transport_options/0`.
+  The transport keys a request call hands to `Core.HttpClient`: every shared key except
+  `:credentials` (read to sign), `:limiter` (resolved with this venue's own default) and the
+  keys this package cannot honour (see the moduledoc).
+  """
+  @spec forwarded() :: [atom()]
+  def forwarded do
+    Options.transport_options() -- [:credentials, :limiter | Keyword.keys(@not_read)]
+  end
+
+  @doc """
+  Every key `function` accepts.
+
+  A call that sends a request: `transport_options() -- not_read` plus its own keys. A call
+  that sends none (`no_request/0`): its own keys plus `:credentials` only.
   """
   @spec allowed(atom()) :: [atom()]
-  def allowed(function), do: Options.transport_options() ++ own_keys(function)
+  def allowed(function) when function in @no_request,
+    do: [:credentials | own_keys(function)]
+
+  def allowed(function),
+    do: (Options.transport_options() -- Keyword.keys(@not_read)) ++ own_keys(function)
 
   @doc """
   Checks `opts` against what `function` reads.

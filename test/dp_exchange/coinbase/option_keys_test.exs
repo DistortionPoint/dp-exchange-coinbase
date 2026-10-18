@@ -10,7 +10,6 @@ defmodule DpExchange.Coinbase.OptionKeysTest do
 
   alias DpExchange.Coinbase
   alias DpExchange.Coinbase.{Fake, OptionKeys}
-  alias DpExchange.Core.Options
 
   @moduletag :capture_log
 
@@ -128,7 +127,9 @@ defmodule DpExchange.Coinbase.OptionKeysTest do
   end
 
   defp stray_opts do
-    [plug: reporting(self()), retry_attempts: 0, credentials: @credentials, limt: 1]
+    # `limt` first: the first key the call does not read is the one named, and a no-request
+    # call does not read the transport keys that follow.
+    [limt: 1, plug: reporting(self()), retry_attempts: 0, credentials: @credentials]
   end
 
   defp one, do: Decimal.new(1)
@@ -145,13 +146,16 @@ defmodule DpExchange.Coinbase.OptionKeysTest do
       end
     end
 
-    test "allows the shared transport keys everywhere, and a function's own keys on top" do
+    test "allows a transport key only where the call reads it, and a function's own keys" do
       probe = DpExchange.Core.AdapterContract.unknown_option_probe()
+      # `TransportKeysTest` holds the per-call detail; here only that nothing reads these.
+      unread = [:environment, :base_url]
 
       for function <- Keyword.keys(calls()) ++ Keyword.keys(raising_calls()) do
         allowed = OptionKeys.allowed(function)
 
-        assert Options.transport_options() -- allowed == []
+        assert :credentials in allowed
+        assert Enum.all?(unread, &(&1 not in allowed))
         refute probe in allowed
       end
 

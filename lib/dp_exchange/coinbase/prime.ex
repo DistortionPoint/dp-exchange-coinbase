@@ -1042,14 +1042,7 @@ defmodule DpExchange.Coinbase.Prime do
 
   defp request_opts(opts) do
     opts
-    |> Keyword.take([
-      :timeout,
-      :retry_attempts,
-      :retry_delay,
-      :plug,
-      :weight,
-      :rate_limit_blocking
-    ])
+    |> Keyword.take(OptionKeys.forwarded())
     |> Keyword.put(:provider, :coinbase)
     |> Keyword.put_new(:limiter, Config.opt(opts, :limiter, DpExchange.Coinbase.RateLimiter))
   end

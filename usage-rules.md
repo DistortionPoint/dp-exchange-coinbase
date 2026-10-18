@@ -1319,9 +1319,19 @@ None of these raises in your process, and the fake runs the same check in the sa
   and `{:error, {:invalid_options, v}}` for options that are not a keyword list — before
   anything is sent. `coverage/1`, `wanted/1` and `coverage_by_kind/1` have no error channel
   and raise `ArgumentError` instead. A function that answers `{:error, :not_supported}` does
-  so whatever the options. The accepted keys are the shared transport keys
-  (`DpExchange.Core.Options.transport_options/0`) plus the function's own, listed in one
-  table in `DpExchange.Coinbase.OptionKeys` (read it with `OptionKeys.own_keys/1`). In short:
+  so whatever the options. **A shared transport key is accepted only where the call reads
+  it.** A call that sends a request accepts the shared transport keys
+  (`DpExchange.Core.Options.transport_options/0`) except `:environment` and `:base_url`,
+  which this package cannot honour (the hosts are constants), so they are refused as
+  `{:unknown_option, key}`; every other one reaches `Core.HttpClient` (`:timeout`,
+  `:retry_attempts`, `:retry_delay`, `:plug`, `:adapter`, `:req_adapter`, `:weight`,
+  `:rate_limit_blocking`, `:max_retry_after_s`, `:max_body_bytes`, `:log_requests`;
+  `:limiter` picks the limiter and `:credentials` signs). A call that sends no request
+  (`subscribe`, `subscribe_notices`, `unsubscribe`, `update_symbols`, `coverage`, `wanted`,
+  `coverage_by_kind`, `market_status`) accepts only its own keys plus `:credentials`:
+  `timeout: 5_000` there is `{:error, {:unknown_option, :timeout}}` (the plain reads raise).
+  Each function's own keys are listed in one table in `DpExchange.Coinbase.OptionKeys`
+  (read it with `OptionKeys.own_keys/1`). In short:
   no own keys for `get_price`, `get_top_of_book`, `get_symbols`, `get_market_overview`,
   `list_instruments`, `get_server_time`, `test_connection`, `get_roles`, `market_status`, the
   order calls other than `close_position` and `get_orders`, `list_payment_methods`,

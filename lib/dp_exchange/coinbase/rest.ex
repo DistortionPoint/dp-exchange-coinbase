@@ -2797,14 +2797,7 @@ defmodule DpExchange.Coinbase.Rest do
     # justify choosing a default for a caller.
     request_opts =
       opts
-      |> Keyword.take([
-        :timeout,
-        :retry_attempts,
-        :retry_delay,
-        :plug,
-        :weight,
-        :rate_limit_blocking
-      ])
+      |> Keyword.take(OptionKeys.forwarded())
       |> Keyword.put(:provider, :coinbase)
       # A 4xx comes back intact rather than flattened into a message string, so
       # `classify/1` can match the status exactly instead of searching the body for it.
@@ -4701,14 +4694,7 @@ defmodule DpExchange.Coinbase.Rest do
   defp send_json_request(method, path, headers, body, opts) do
     request_opts =
       opts
-      |> Keyword.take([
-        :timeout,
-        :retry_attempts,
-        :retry_delay,
-        :plug,
-        :weight,
-        :rate_limit_blocking
-      ])
+      |> Keyword.take(OptionKeys.forwarded())
       |> Keyword.put(:provider, :coinbase)
       |> Keyword.put(:raw_status, true)
       |> Keyword.put_new(:limiter, Config.opt(opts, :limiter, DpExchange.Coinbase.RateLimiter))
