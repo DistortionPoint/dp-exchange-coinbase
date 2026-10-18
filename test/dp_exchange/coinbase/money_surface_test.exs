@@ -139,8 +139,7 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
                Rest.transfer_internal(@credentials, "USD", Decimal.new("25.5"),
                  from: "src-uuid",
                  to: "dst-uuid",
-                 plug: capturing(%{"source_portfolio_uuid" => "src-uuid"}, me),
-                 retry_attempts: 0
+                 plug: capturing(%{"source_portfolio_uuid" => "src-uuid"}, me)
                )
 
       assert_receive {:request, "POST", path, raw}
@@ -192,8 +191,7 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
                  from: "from-in-request-opts",
                  to: "to-in-request-opts",
                  credentials: @credentials,
-                 plug: capturing(%{}, me),
-                 retry_attempts: 0
+                 plug: capturing(%{}, me)
                )
 
       assert_receive {:request, "POST", _path, raw}
@@ -211,8 +209,7 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
                Rest.transfer_internal(@credentials, "BTC", Decimal.new("0.00000001"),
                  from: "a",
                  to: "b",
-                 plug: capturing(%{}, me),
-                 retry_attempts: 0
+                 plug: capturing(%{}, me)
                )
 
       assert_receive {:request, "POST", _path, raw}
@@ -303,8 +300,7 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
                  Decimal.new("1"),
                  [from: "a", to: "b"],
                  credentials: @credentials,
-                 plug: capturing(%{}, me),
-                 retry_attempts: 0
+                 plug: capturing(%{}, me)
                )
 
       assert_receive {:request, "POST", path, _raw}
@@ -341,8 +337,7 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
                Rest.transfer_internal(@credentials, "USD", Decimal.new("1"),
                  from: "a",
                  to: "b",
-                 plug: failing(500),
-                 retry_attempts: 0
+                 plug: failing(500)
                )
     end
 
@@ -351,8 +346,7 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
                Rest.transfer_internal(@credentials, "USD", Decimal.new("1"),
                  from: "a",
                  to: "b",
-                 plug: failing(403),
-                 retry_attempts: 0
+                 plug: failing(403)
                )
     end
 
@@ -367,8 +361,7 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
                Rest.transfer_internal(@credentials, "USD", Decimal.new("1"),
                  from: "a",
                  to: "b",
-                 plug: plug,
-                 retry_attempts: 0
+                 plug: plug
                )
     end
   end

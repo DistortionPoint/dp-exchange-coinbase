@@ -20,6 +20,18 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- The calls that are always sent exactly once no longer accept `:retry_attempts` or
+  `:retry_delay` (tick AL): `cancel_order`, `replace_order`, `transfer_internal`,
+  `create_account`, `delete_portfolio`, `commit_conversion`, `schedule_futures_sweep` and
+  `cancel_futures_sweep` answer `{:error, {:unknown_option, key}}` for either, whatever the
+  value, before anything is sent (the `Fake` too). They used to accept the key and then
+  overwrite it with `retry_attempts: 1`, so a caller's `retry_attempts: 3` was silently
+  ignored. Writes retried under an idempotency key (`place_order`, `close_position`, the
+  Prime staking writes) keep both keys. `replace_order`'s read-back of the order is a read
+  and now runs with Core's default retry (it no longer inherits a caller's retry value).
+
 ## [0.3.139] - 2026-10-18
 
 Depends on dp_exchange_core 0.3.105 (conformance group 46: a call that sends no request takes no transport key).

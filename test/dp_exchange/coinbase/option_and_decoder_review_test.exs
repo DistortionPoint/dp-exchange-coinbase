@@ -54,6 +54,10 @@ defmodule DpExchange.Coinbase.OptionAndDecoderReviewTest do
   defp opts(body \\ %{}, extra \\ []),
     do: Keyword.merge([plug: responding(body), retry_attempts: 0], extra)
 
+  # The sent-once writes read no retry keys: the same options without them.
+  defp once(body, extra),
+    do: Keyword.merge([plug: responding(body)], extra)
+
   defp fill(overrides \\ %{}) do
     Map.merge(
       %{
@@ -298,14 +302,14 @@ defmodule DpExchange.Coinbase.OptionAndDecoderReviewTest do
   describe "futures and portfolio reads" do
     test "a misspelt option is refused, never read as an absent one" do
       # `usd_amout:` absent would sweep EVERY available dollar.
-      sweep = Rest.schedule_futures_sweep(@credentials, opts(%{}, usd_amout: "5"))
+      sweep = Rest.schedule_futures_sweep(@credentials, once(%{}, usd_amout: "5"))
       window = Rest.get_current_margin_window(@credentials, opts(%{}, margin_profile: "x"))
       listing = Rest.list_portfolios(@credentials, opts(%{}, portfolio_typ: "DEFAULT"))
       breakdown = Rest.get_portfolio_breakdown(@credentials, "pf-1", opts(%{}, currncy: "EUR"))
       fees = Rest.get_fees(@credentials, opts(%{}, product_typ: "SPOT"))
       balances = Rest.get_balances(@credentials, opts(%{}, limt: 5))
       accounts = Rest.get_accounts(@credentials, opts(%{}, uid: "x"))
-      create = Rest.create_portfolio(@credentials, opts(%{}, name: "n", nme: "m"))
+      create = Rest.create_portfolio(@credentials, once(%{}, name: "n", nme: "m"))
 
       assert sweep == {:error, {:unknown_option, :usd_amout}}
       assert window == {:error, {:unknown_option, :margin_profile}}
@@ -325,7 +329,7 @@ defmodule DpExchange.Coinbase.OptionAndDecoderReviewTest do
                  @credentials,
                  "USD",
                  Decimal.new(1),
-                 opts(%{}, from: "a", to: "b", note: "x")
+                 once(%{}, from: "a", to: "b", note: "x")
                )
 
       refute_receive {:sent, _path}, 500
@@ -335,7 +339,6 @@ defmodule DpExchange.Coinbase.OptionAndDecoderReviewTest do
       for call <- [
             &Rest.get_futures_balance_summary/2,
             &Rest.list_futures_sweeps/2,
-            &Rest.cancel_futures_sweep/2,
             &Rest.get_intraday_margin_setting/2
           ] do
         assert {:error, {:unsupported_option, :portfolio}} =
@@ -343,6 +346,13 @@ defmodule DpExchange.Coinbase.OptionAndDecoderReviewTest do
 
         assert {:error, {:unknown_option, :scope}} = call.(@credentials, opts(%{}, scope: "x"))
       end
+
+      # Sent once, so it reads no retry keys: the options carry none.
+      assert {:error, {:unsupported_option, :portfolio}} =
+               Rest.cancel_futures_sweep(@credentials, once(%{}, portfolio: "pf-1"))
+
+      assert {:error, {:unknown_option, :scope}} =
+               Rest.cancel_futures_sweep(@credentials, once(%{}, scope: "x"))
 
       assert {:error, {:unsupported_option, :portfolio}} =
                Rest.set_intraday_margin_setting(

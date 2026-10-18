@@ -409,7 +409,7 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
                  @credentials,
                  "abc-123",
                  %{price: "0.0000001", quantity: 2},
-                 opts(plug)
+                 plug: plug
                )
 
       assert_receive {:sent, "/api/v3/brokerage/orders/edit", raw}

@@ -144,14 +144,14 @@ defmodule DpExchange.Coinbase.ReviewHardeningTest do
       body = %{"results" => [%{"order_id" => "abc", "success" => false}]}
 
       assert {:error, :unexpected_response_shape} =
-               Rest.cancel_order(@credentials, "abc", plug: responding(body), retry_attempts: 0)
+               Rest.cancel_order(@credentials, "abc", plug: responding(body))
     end
 
     test "a non-boolean success is an unreadable answer, not a crash" do
       body = %{"results" => [%{"order_id" => "abc", "success" => "yes"}]}
 
       assert {:error, :unexpected_response_shape} =
-               Rest.cancel_order(@credentials, "abc", plug: responding(body), retry_attempts: 0)
+               Rest.cancel_order(@credentials, "abc", plug: responding(body))
     end
   end
 
@@ -170,8 +170,7 @@ defmodule DpExchange.Coinbase.ReviewHardeningTest do
                  @credentials,
                  "abc-123",
                  %{price: Decimal.new("41000"), quantity: Decimal.new("0.5")},
-                 plug: plug,
-                 retry_attempts: 0
+                 plug: plug
                )
     end
   end

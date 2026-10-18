@@ -1326,7 +1326,14 @@ None of these raises in your process, and the fake runs the same check in the sa
   `{:unknown_option, key}`; every other one reaches `Core.HttpClient` (`:timeout`,
   `:retry_attempts`, `:retry_delay`, `:plug`, `:adapter`, `:req_adapter`, `:weight`,
   `:rate_limit_blocking`, `:max_retry_after_s`, `:max_body_bytes`, `:log_requests`;
-  `:limiter` picks the limiter and `:credentials` signs). A call that sends no request
+  `:limiter` picks the limiter and `:credentials` signs). **The calls that are always sent
+  exactly once read neither `:retry_attempts` nor `:retry_delay`** (`cancel_order`,
+  `replace_order`, `transfer_internal`, `create_account`, `delete_portfolio`,
+  `commit_conversion`, `schedule_futures_sweep`, `cancel_futures_sweep`: no idempotency key
+  the venue honours exists for them), so passing either, with any value, is
+  `{:error, {:unknown_option, key}}` before anything is sent, on the `Fake` too.
+  `place_order`, `close_position` and the Prime staking writes carry a key and keep both.
+  A call that sends no request
   (`subscribe`, `subscribe_notices`, `unsubscribe`, `update_symbols`, `coverage`, `wanted`,
   `coverage_by_kind`, `market_status`) accepts only its own keys plus `:credentials`:
   `timeout: 5_000` there is `{:error, {:unknown_option, :timeout}}` (the plain reads raise).

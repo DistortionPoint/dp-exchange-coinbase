@@ -610,8 +610,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       assert {:ok, %Types.Portfolio{name: "Default Portfolio"}} =
                Rest.create_portfolio(@credentials,
                  name: "Default Portfolio",
-                 plug: responding(body),
-                 retry_attempts: 0
+                 plug: responding(body)
                )
     end
 
@@ -633,8 +632,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
 
       assert {:ok, _response} =
                Rest.delete_portfolio(@credentials, "8bfc20d7-f7c6-4422-bf07-8243ca4169fe",
-                 plug: responding(body),
-                 retry_attempts: 0
+                 plug: responding(body)
                )
     end
 
@@ -647,8 +645,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
                  # The same portfolio on both sides is refused locally; any other uuid will
                  # do, the stub answers the spec's response whatever was sent.
                  to: "3f2a9c1e-7b64-4d08-9e15-a0c2b7d4f681",
-                 plug: responding(body),
-                 retry_attempts: 0
+                 plug: responding(body)
                )
 
       assert result["source_portfolio_uuid"] == "8bfc20d7-f7c6-4422-bf07-8243ca4169fe"
@@ -683,8 +680,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
                Rest.commit_conversion(@credentials, "some-trade-id",
                  from: "USD-account",
                  to: "BTC-account",
-                 plug: responding(body),
-                 retry_attempts: 0
+                 plug: responding(body)
                )
     end
 
@@ -779,17 +775,14 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       body = fixture!("at/schedule_fcm_sweep.json")
 
       assert {:ok, _response} =
-               Rest.schedule_futures_sweep(@credentials,
-                 plug: responding(body),
-                 retry_attempts: 0
-               )
+               Rest.schedule_futures_sweep(@credentials, plug: responding(body))
     end
 
     test "cancel_futures_sweep/2 accepts CancelFCMSweepResponse" do
       body = fixture!("at/cancel_fcm_sweep.json")
 
       assert {:ok, _response} =
-               Rest.cancel_futures_sweep(@credentials, plug: responding(body), retry_attempts: 0)
+               Rest.cancel_futures_sweep(@credentials, plug: responding(body))
     end
 
     test "get_intraday_margin_setting/2 decodes the venue's own setting enum" do
@@ -913,10 +906,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       body = fixture!("at/cancel_orders.json")
 
       assert {:ok, :cancelled} =
-               Rest.cancel_order(@credentials, "0000-00000",
-                 plug: responding(body),
-                 retry_attempts: 0
-               )
+               Rest.cancel_order(@credentials, "0000-00000", plug: responding(body))
     end
 
     test "sends order_ids as a JSON array, per CancelOrdersRequest" do
@@ -924,8 +914,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
 
       assert {:ok, :cancelled} =
                Rest.cancel_order(@credentials, "0000-00000",
-                 plug: capturing(fixture!("at/cancel_orders.json"), me),
-                 retry_attempts: 0
+                 plug: capturing(fixture!("at/cancel_orders.json"), me)
                )
 
       assert_receive {:request, "POST", "/api/v3/brokerage/orders/batch_cancel", _query, raw}
@@ -1070,8 +1059,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
                  @credentials,
                  "0000-000000-000000",
                  %{price: Decimal.new("41000"), quantity: Decimal.new("0.002")},
-                 plug: routing(responses),
-                 retry_attempts: 0
+                 plug: routing(responses)
                )
 
       assert order.id == "0000-000000-000000"

@@ -1259,7 +1259,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, Types.Conversion.t()} | {:error, term()} | {:refused, term()}
   def commit_conversion(credentials, trade_id, opts) do
     with :ok <- validate_id(trade_id, :trade_id),
-         {:ok, from, to} <- convert_accounts(opts) do
+         {:ok, from, to} <- convert_accounts(:commit_conversion, opts) do
       body = %{"from_account" => from, "to_account" => to}
       path = "/convert/trade/#{segment(trade_id)}"
 
@@ -1299,7 +1299,7 @@ defmodule DpExchange.Coinbase.Rest do
           {:ok, Types.Conversion.t()} | {:error, term()} | {:refused, term()}
   def get_conversion(credentials, trade_id, opts) do
     with :ok <- validate_id(trade_id, :trade_id),
-         {:ok, from, to} <- convert_accounts(opts) do
+         {:ok, from, to} <- convert_accounts(:get_conversion, opts) do
       params = %{"from_account" => from, "to_account" => to}
       path = "/convert/trade/#{segment(trade_id)}"
 
@@ -2473,12 +2473,17 @@ defmodule DpExchange.Coinbase.Rest do
 
   @doc """
   The two account names the conversion commit and read require in `opts[:from]` and
-  `opts[:to]`, or `{:error, :from_and_to_required}`.
+  `opts[:to]`, or `{:error, :from_and_to_required}`, after checking `opts` against
+  `function`'s own key table.
+
+  `function` is `:commit_conversion` or `:get_conversion`. Both read `:from` and `:to`, but
+  only the read is retried, so the two tables differ on `:retry_attempts` and
+  `:retry_delay`: checking the read against the commit's table refused a read's retry keys.
   """
-  @spec convert_accounts(term()) :: {:ok, String.t(), String.t()} | {:error, term()}
-  def convert_accounts(opts) do
-    # `commit_conversion/3` and `get_conversion/3` read the same two keys.
-    with :ok <- OptionKeys.check(:commit_conversion, opts) do
+  @spec convert_accounts(:commit_conversion | :get_conversion, term()) ::
+          {:ok, String.t(), String.t()} | {:error, term()}
+  def convert_accounts(function, opts) do
+    with :ok <- OptionKeys.check(function, opts) do
       case {Keyword.get(opts, :from), Keyword.get(opts, :to)} do
         {from, to} when is_binary(from) and is_binary(to) and from != "" and to != "" ->
           {:ok, from, to}
@@ -4666,8 +4671,9 @@ defmodule DpExchange.Coinbase.Rest do
   # package can supply. `place_order/3` and `close_position/3` carry `client_order_id` and
   # keep their retries.
   #
-  # `Keyword.put`, not `put_new`: "sent once" is a guarantee, so a caller's `retry_attempts: 3`
-  # cannot turn a transfer or a cancel into three sends.
+  # These calls do not read `:retry_attempts` or `:retry_delay` at all
+  # (`OptionKeys.allowed/1` refuses both as `{:unknown_option, key}` before anything is
+  # sent), so nothing a caller passed is overwritten here: the put pins the one attempt.
   defp post_once(path, body, credentials, opts),
     do: post_json(path, body, credentials, once(opts))
 

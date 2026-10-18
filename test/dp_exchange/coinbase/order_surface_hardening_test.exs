@@ -62,6 +62,9 @@ defmodule DpExchange.Coinbase.OrderSurfaceHardeningTest do
 
   defp opts(plug), do: [plug: plug, retry_attempts: 0]
 
+  # A sent-once write reads no retry keys.
+  defp once(plug), do: [plug: plug]
+
   defp accepted, do: %{"success" => true, "success_response" => %{"order_id" => "abc-123"}}
 
   defp limit_request(overrides \\ %{}) do
@@ -242,7 +245,7 @@ defmodule DpExchange.Coinbase.OrderSurfaceHardeningTest do
       # A float is refused on this money-moving amount as on an order field: it has already
       # lost digits before it gets here.
       for bad <- ["", "abc", 0, "0", -5, "-1", @huge, Decimal.new("NaN"), %{}, 150.0, 1.5e-8] do
-        sweep_opts = [usd_amount: bad] ++ opts(never_sent())
+        sweep_opts = [usd_amount: bad] ++ once(never_sent())
 
         assert {:error, {:invalid_amount, ^bad}} =
                  Rest.schedule_futures_sweep(@credentials, sweep_opts)
@@ -255,14 +258,14 @@ defmodule DpExchange.Coinbase.OrderSurfaceHardeningTest do
       assert {:ok, _result} =
                Rest.schedule_futures_sweep(
                  @credentials,
-                 [usd_amount: "150.0"] ++ opts(capturing(%{"success" => true}, me))
+                 [usd_amount: "150.0"] ++ once(capturing(%{"success" => true}, me))
                )
 
       assert_receive {:sent, _path, raw}, @wait
       assert Jason.decode!(raw) == %{"usd_amount" => "150.0"}
 
       assert {:ok, _result} =
-               Rest.schedule_futures_sweep(@credentials, opts(capturing(%{"ok" => 1}, me)))
+               Rest.schedule_futures_sweep(@credentials, once(capturing(%{"ok" => 1}, me)))
 
       assert_receive {:sent, _path, raw}, @wait
       assert Jason.decode!(raw) == %{}

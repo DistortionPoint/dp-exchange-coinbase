@@ -57,6 +57,9 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
   defp opts(body \\ %{}, extra \\ []),
     do: Keyword.merge([plug: capturing(body), retry_attempts: 0], extra)
 
+  # The sent-once writes read no retry keys, so they get the same options without them.
+  defp once(body \\ %{}, extra \\ []), do: Keyword.merge([plug: capturing(body)], extra)
+
   describe "an id that becomes a path segment" do
     test "must be a non-empty string; anything else is refused without a request" do
       for bad <- [nil, 1, %{}, :atom, ""] do
@@ -69,13 +72,13 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
                  Rest.get_portfolio_breakdown(@credentials, bad, opts())
 
         assert {:error, {:invalid_id, :portfolio_uuid, ^bad}} =
-                 Rest.delete_portfolio(@credentials, bad, opts())
+                 Rest.delete_portfolio(@credentials, bad, once())
 
         assert {:error, {:invalid_id, :portfolio_uuid, ^bad}} =
                  Rest.rename_portfolio(@credentials, bad, "Name", opts())
 
         assert {:error, {:invalid_id, :trade_id, ^bad}} =
-                 Rest.commit_conversion(@credentials, bad, conversion)
+                 Rest.commit_conversion(@credentials, bad, once(%{}, from: "a", to: "b"))
 
         assert {:error, {:invalid_id, :trade_id, ^bad}} =
                  Rest.get_conversion(@credentials, bad, conversion)
@@ -93,7 +96,7 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
                  Rest.rename_portfolio(@credentials, "pf-1", bad, opts())
 
         assert {:error, :name_required} =
-                 Rest.create_portfolio(@credentials, [name: bad] ++ opts())
+                 Rest.create_portfolio(@credentials, [name: bad] ++ once())
       end
 
       refute_received {:request, _method, _path, _query}
@@ -297,7 +300,7 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
     test "an empty account on a commit or a read is the same refusal as a missing one" do
       for conversion <- [[from: "", to: "b"], [from: "a", to: ""]] do
         assert {:error, :from_and_to_required} =
-                 Rest.commit_conversion(@credentials, "t-1", conversion ++ opts())
+                 Rest.commit_conversion(@credentials, "t-1", conversion ++ once())
 
         assert {:error, :from_and_to_required} =
                  Rest.get_conversion(@credentials, "t-1", conversion ++ opts())
@@ -315,13 +318,13 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
 
         auth = [credentials: @credentials]
 
-        assert expected == Rest.transfer_internal(@credentials, asset, amount, transfer ++ opts())
+        assert expected == Rest.transfer_internal(@credentials, asset, amount, transfer ++ once())
         assert expected == Fake.transfer_internal(asset, amount, transfer, auth)
       end
 
       for transfer <- [[from: "", to: "b"], [from: "a", to: ""]] do
         assert {:error, :missing_portfolio} =
-                 Rest.transfer_internal(@credentials, "USD", amount, transfer ++ opts())
+                 Rest.transfer_internal(@credentials, "USD", amount, transfer ++ once())
 
         assert {:error, :missing_portfolio} =
                  Fake.transfer_internal("USD", amount, transfer, credentials: @credentials)
@@ -349,7 +352,7 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
 
   describe "futures sweeps" do
     test "a 200 saying success false is a refusal, not an ok" do
-      declined = opts(%{"success" => false})
+      declined = once(%{"success" => false})
 
       assert {:refused, :sweep_not_scheduled} =
                Rest.schedule_futures_sweep(@credentials, [usd_amount: "5"] ++ declined)
@@ -359,9 +362,9 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
 
     test "success true, and a body that does not say, are passed through" do
       assert {:ok, %{"success" => true}} =
-               Rest.schedule_futures_sweep(@credentials, opts(%{"success" => true}))
+               Rest.schedule_futures_sweep(@credentials, once(%{"success" => true}))
 
-      assert {:ok, %{}} = Rest.cancel_futures_sweep(@credentials, opts(%{}))
+      assert {:ok, %{}} = Rest.cancel_futures_sweep(@credentials, once(%{}))
     end
   end
 
@@ -387,7 +390,7 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
       changes = %{price: "1", quantity: "1"}
       expected = {:error, {:invalid_order_id, nil}}
 
-      assert expected == Rest.replace_order(@credentials, nil, changes, opts())
+      assert expected == Rest.replace_order(@credentials, nil, changes, once())
       assert expected == Rest.preview_replace(@credentials, nil, changes, opts())
       assert expected == Fake.replace_order(@credentials, nil, changes)
       assert expected == Fake.preview_replace(@credentials, nil, changes)
@@ -425,7 +428,7 @@ defmodule DpExchange.Coinbase.PrivateSurfaceReviewTest do
         body = %{"success" => false, "errors" => errors}
 
         assert {:refused, {:edit_rejected, ^reason}} =
-                 Rest.replace_order(@credentials, "ord-1", changes, opts(body))
+                 Rest.replace_order(@credentials, "ord-1", changes, once(body))
       end
     end
   end

@@ -105,40 +105,37 @@ defmodule DpExchange.Coinbase.NonOrderWritesTest do
       assert {:error, {:write_unconfirmed, nil, {:exchange_error, :coinbase, text}}} =
                Rest.schedule_futures_sweep(@credentials,
                  usd_amount: Decimal.new("5"),
-                 plug: status(503),
-                 retry_attempts: 0
+                 plug: status(503)
                )
 
       assert text =~ "503"
 
       assert {:error, {:write_unconfirmed, nil, {:exchange_error, :coinbase, _text}}} =
-               Rest.cancel_futures_sweep(@credentials, plug: status(500), retry_attempts: 0)
+               Rest.cancel_futures_sweep(@credentials, plug: status(500))
     end
 
     test "a 2xx that is not an object is unconfirmed" do
       list = status(200, ["not", "an", "object"])
 
       assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
-               Rest.schedule_futures_sweep(@credentials, plug: list, retry_attempts: 0)
+               Rest.schedule_futures_sweep(@credentials, plug: list)
 
       assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
-               Rest.cancel_futures_sweep(@credentials, plug: list, retry_attempts: 0)
+               Rest.cancel_futures_sweep(@credentials, plug: list)
     end
 
     test "a venue 4xx is a refusal and success: false stays a refusal" do
       assert {:refused, _reason} =
-               Rest.schedule_futures_sweep(@credentials, plug: status(403), retry_attempts: 0)
+               Rest.schedule_futures_sweep(@credentials, plug: status(403))
 
       assert {:refused, :sweep_not_scheduled} =
                Rest.schedule_futures_sweep(@credentials,
-                 plug: status(200, %{"success" => false}),
-                 retry_attempts: 0
+                 plug: status(200, %{"success" => false})
                )
 
       assert {:refused, :sweep_not_cancelled} =
                Rest.cancel_futures_sweep(@credentials,
-                 plug: status(200, %{"success" => false}),
-                 retry_attempts: 0
+                 plug: status(200, %{"success" => false})
                )
     end
 
@@ -147,16 +144,10 @@ defmodule DpExchange.Coinbase.NonOrderWritesTest do
       me = self()
 
       assert {:error, {:exchange_error, :coinbase, "Throttled by our own rate limiter" <> _r}} =
-               Rest.schedule_futures_sweep(@credentials,
-                 plug: counted_status(200, me),
-                 retry_attempts: 0
-               )
+               Rest.schedule_futures_sweep(@credentials, plug: counted_status(200, me))
 
       assert {:error, {:exchange_error, :coinbase, "Throttled by our own rate limiter" <> _r}} =
-               Rest.cancel_futures_sweep(@credentials,
-                 plug: counted_status(200, me),
-                 retry_attempts: 0
-               )
+               Rest.cancel_futures_sweep(@credentials, plug: counted_status(200, me))
 
       assert {:error, {:invalid_amount, 1.5}} =
                Rest.schedule_futures_sweep(@credentials,

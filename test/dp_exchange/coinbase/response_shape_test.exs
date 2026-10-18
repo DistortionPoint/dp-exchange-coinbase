@@ -220,7 +220,7 @@ defmodule DpExchange.Coinbase.ResponseShapeTest do
 
     test "a cancel result row that is not an object is not about the order" do
       assert {:error, :order_not_in_response} =
-               Rest.cancel_order(@credentials, "abc", opts(%{"results" => [true]}))
+               Rest.cancel_order(@credentials, "abc", plug: answering(%{"results" => [true]}))
     end
   end
 end

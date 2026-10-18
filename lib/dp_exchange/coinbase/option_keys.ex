@@ -25,6 +25,18 @@ defmodule DpExchange.Coinbase.OptionKeys do
   `:max_retry_after_s`, `:max_body_bytes`, `:log_requests`), `:limiter` is resolved against
   this venue's own default, and `:credentials` signs the request.
 
+  ## Sent-once calls read no retry keys
+
+  `cancel_order`, `replace_order`, `transfer_internal`, `create_account`,
+  `delete_portfolio`, `commit_conversion`, `schedule_futures_sweep` and
+  `cancel_futures_sweep` are always sent exactly once: no idempotency key the venue honours
+  exists for them, and a repeat after a lost answer moves funds twice or reports a refusal
+  for a write that took effect. They do not read `:retry_attempts` or `:retry_delay`, so a
+  caller passing either (any value, `0` and `1` included) gets
+  `{:error, {:unknown_option, key}}` before anything is sent, `Fake` included. A write that
+  is retried under an idempotency key (`place_order`, `close_position`, the Prime staking
+  writes) keeps both keys.
+
   A call that sends no request allows only its own keys plus `:credentials` (exempt: a
   consumer hands one credential set to every call, and one a call does not need changes no
   answer). Any other transport key, `timeout: 5_000` for one, is refused. These are
@@ -96,6 +108,24 @@ defmodule DpExchange.Coinbase.OptionKeys do
     :coverage_by_kind,
     :market_status
   ]
+
+  # The calls that are always sent exactly once, whatever the caller passes: an unkeyed write
+  # (`Rest.post_once/4`, `Rest.once/1` force one attempt) the venue cannot tell from its own
+  # repeat. They do not read `:retry_attempts` or `:retry_delay`, so both are refused as
+  # `{:unknown_option, key}` rather than accepted and overwritten. A write that IS retried
+  # under an idempotency key (`place_order`, `close_position`, the Prime staking calls) keeps
+  # both keys.
+  @sent_once [
+    :cancel_order,
+    :replace_order,
+    :transfer_internal,
+    :create_account,
+    :delete_portfolio,
+    :commit_conversion,
+    :schedule_futures_sweep,
+    :cancel_futures_sweep
+  ]
+  @retry_keys [:retry_attempts, :retry_delay]
 
   # Shared transport keys this package cannot honour on a request, and why. A key listed here
   # is refused as `{:unknown_option, key}` on every call.
@@ -190,12 +220,19 @@ defmodule DpExchange.Coinbase.OptionKeys do
   @doc """
   Every key `function` accepts.
 
-  A call that sends a request: `transport_options() -- not_read` plus its own keys. A call
+  A call that sends a request: `transport_options() -- not_read` plus its own keys (and
+  without `:retry_attempts` / `:retry_delay` when the call is always sent once, see the
+  moduledoc). A call
   that sends none (`no_request/0`): its own keys plus `:credentials` only.
   """
   @spec allowed(atom()) :: [atom()]
   def allowed(function) when function in @no_request,
     do: [:credentials | own_keys(function)]
+
+  def allowed(function) when function in @sent_once,
+    do:
+      (Options.transport_options() -- (Keyword.keys(@not_read) ++ @retry_keys)) ++
+        own_keys(function)
 
   def allowed(function),
     do: (Options.transport_options() -- Keyword.keys(@not_read)) ++ own_keys(function)

@@ -86,6 +86,23 @@ defmodule DpExchange.Coinbase.TransportKeysTest do
 
       assert Options.transport_options() -- allowed == [:environment, :base_url]
     end
+
+    test "a sent-once call additionally refuses the retry keys it never reads" do
+      sent_once = [:cancel_order, :replace_order, :transfer_internal, :cancel_futures_sweep]
+
+      for function <- sent_once do
+        allowed = OptionKeys.allowed(function)
+
+        refused = Enum.sort(Options.transport_options() -- allowed)
+
+        assert refused == Enum.sort([:environment, :base_url, :retry_attempts, :retry_delay]),
+               "#{function} should not allow the retry keys"
+      end
+
+      keyed = OptionKeys.allowed(:place_order)
+      assert :retry_attempts in keyed
+      assert :retry_delay in keyed
+    end
   end
 
   for module <- [Coinbase, Fake] do

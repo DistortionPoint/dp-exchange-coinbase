@@ -49,7 +49,7 @@ defmodule DpExchange.Coinbase.ReadSymbolTest do
         assert expected == Rest.get_historical_prices(bad, "1h", [], opts)
       end
 
-      refute_receive {:request_sent, _path}, 50
+      refute_receive {:request_sent, _path}, 500
     end
 
     test "the timeframe is refused before the symbol, and the symbol before the options" do

@@ -882,8 +882,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                  @credentials,
                  "abc-123",
                  %{price: Decimal.new("41000"), quantity: Decimal.new("0.5")},
-                 plug: plug,
-                 retry_attempts: 0
+                 plug: plug
                )
 
       assert order.id == "abc-123"
@@ -905,8 +904,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                  @credentials,
                  "abc-123",
                  %{price: Decimal.new("41000"), quantity: Decimal.new("0.5")},
-                 plug: responding(body),
-                 retry_attempts: 0
+                 plug: responding(body)
                )
     end
 
@@ -925,8 +923,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                  @credentials,
                  "abc-123",
                  %{price: Decimal.new("41000"), quantity: Decimal.new("0.5")},
-                 plug: responding(body),
-                 retry_attempts: 0
+                 plug: responding(body)
                )
     end
 
@@ -936,20 +933,14 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       exploding = fn _conn -> raise "must not call the venue for an unsupported edit" end
 
       assert {:error, {:unsupported_order_edit, [:side]}} =
-               Rest.replace_order(@credentials, "abc-123", %{side: :sell},
-                 plug: exploding,
-                 retry_attempts: 0
-               )
+               Rest.replace_order(@credentials, "abc-123", %{side: :sell}, plug: exploding)
     end
 
     test "an edit that changes nothing is an error" do
       exploding = fn _conn -> raise "must not call the venue with no changes" end
 
       assert {:error, :no_order_changes} =
-               Rest.replace_order(@credentials, "abc-123", %{},
-                 plug: exploding,
-                 retry_attempts: 0
-               )
+               Rest.replace_order(@credentials, "abc-123", %{}, plug: exploding)
     end
 
     test "price alone, or size alone, is refused locally rather than sent half-built" do
@@ -961,14 +952,12 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
 
       assert {:error, :missing_required_edit_field} =
                Rest.replace_order(@credentials, "abc-123", %{price: Decimal.new("41000")},
-                 plug: exploding,
-                 retry_attempts: 0
+                 plug: exploding
                )
 
       assert {:error, :missing_required_edit_field} =
                Rest.replace_order(@credentials, "abc-123", %{quantity: Decimal.new("0.5")},
-                 plug: exploding,
-                 retry_attempts: 0
+                 plug: exploding
                )
     end
 
@@ -996,8 +985,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                  @credentials,
                  "abc-123",
                  %{price: Decimal.new("41000"), quantity: Decimal.new("0.5")},
-                 plug: plug,
-                 retry_attempts: 0
+                 plug: plug
                )
 
       assert_receive {:body, path, raw}
@@ -1395,7 +1383,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
     @edit %{price: Decimal.new("41000"), quantity: Decimal.new("0.5")}
 
     defp replace(plug, order_id \\ "abc-123") do
-      Rest.replace_order(@credentials, order_id, @edit, plug: plug, retry_attempts: 0)
+      Rest.replace_order(@credentials, order_id, @edit, plug: plug)
     end
 
     test "a 2xx that is not a success answer is unconfirmed, with no client_order_id" do
@@ -1439,7 +1427,8 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       opts = [plug: gone, retry_attempts: 0]
 
       assert {:refused, :not_found} = Rest.get_order(@credentials, "abc", opts)
-      assert {:refused, :not_found} = Rest.cancel_order(@credentials, "abc", opts)
+      # A cancel is sent once and reads no retry keys.
+      assert {:refused, :not_found} = Rest.cancel_order(@credentials, "abc", plug: gone)
     end
 
     test "a 404 on a symbol is still :not_listed" do
@@ -1463,7 +1452,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                  Rest.get_order(%{}, bad, plug: never_sent(), retry_attempts: 0)
 
         assert {:error, {:invalid_order_id, ^bad}} =
-                 Rest.cancel_order(%{}, bad, plug: never_sent(), retry_attempts: 0)
+                 Rest.cancel_order(%{}, bad, plug: never_sent())
       end
     end
   end

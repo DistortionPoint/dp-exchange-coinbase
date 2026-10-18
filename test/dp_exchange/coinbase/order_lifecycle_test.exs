@@ -77,10 +77,7 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
       body = %{"results" => [%{"order_id" => "abc-123", "success" => true}]}
 
       assert {:ok, :cancelled} =
-               Rest.cancel_order(@credentials, "abc-123",
-                 plug: responding(body),
-                 retry_attempts: 0
-               )
+               Rest.cancel_order(@credentials, "abc-123", plug: responding(body))
     end
 
     test "a per-order failure refuses, carrying the venue's reason" do
@@ -97,10 +94,7 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
       }
 
       assert {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}} =
-               Rest.cancel_order(@credentials, "abc-123",
-                 plug: responding(body),
-                 retry_attempts: 0
-               )
+               Rest.cancel_order(@credentials, "abc-123", plug: responding(body))
     end
 
     test "a results array that does not mention the order is an error, not a cancellation" do
@@ -109,18 +103,12 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
       body = %{"results" => [%{"order_id" => "someone-else", "success" => true}]}
 
       assert {:error, :order_not_in_response} =
-               Rest.cancel_order(@credentials, "abc-123",
-                 plug: responding(body),
-                 retry_attempts: 0
-               )
+               Rest.cancel_order(@credentials, "abc-123", plug: responding(body))
     end
 
     test "a body with no results at all is unreadable" do
       assert {:error, :unexpected_response_shape} =
-               Rest.cancel_order(@credentials, "abc-123",
-                 plug: responding(%{}),
-                 retry_attempts: 0
-               )
+               Rest.cancel_order(@credentials, "abc-123", plug: responding(%{}))
     end
   end
 

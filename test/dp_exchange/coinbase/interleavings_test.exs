@@ -65,7 +65,7 @@ defmodule DpExchange.Coinbase.InterleavingsTest do
 
       assert_receive {:frame, "subscribe", ["A-USD"]}, 5_000
       :sys.get_state(feed)
-      refute_receive {:frame, _type, _ids}, 0
+      refute_receive {:frame, _type, _ids}, 500
     end
 
     test "a retry whose symbols have all been unsubscribed sends nothing at all" do
@@ -78,7 +78,7 @@ defmodule DpExchange.Coinbase.InterleavingsTest do
       # `get_state/1` is a call, so it is answered only after the retry's handler returned
       # and any frame it sent (synchronously) is already in this mailbox.
       :sys.get_state(feed)
-      refute_receive {:frame, _type, _ids}, 0
+      refute_receive {:frame, _type, _ids}, 500
     end
 
     test "a socket that carries no shard is left as given (the dead-socket guard owns it)" do
@@ -108,7 +108,7 @@ defmodule DpExchange.Coinbase.InterleavingsTest do
       assert_receive {:frame, "subscribe", ["BTC-USD"]}, 5_000
       assert_receive {:frame, "subscribe", ["BTC-USD"]}, 5_000
       :sys.get_state(feed)
-      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change}}, 0
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change}}, 500
     end
 
     test "an unsubscribe answered NotConnectedError is retried, not stranded" do
@@ -128,7 +128,7 @@ defmodule DpExchange.Coinbase.InterleavingsTest do
       assert_receive {:frame, "subscribe", ["NEW-USD"]}, 5_000
 
       assert :sys.get_state(feed).pending_unsubscribes == %{}
-      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change}}, 0
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :coverage_change}}, 500
     end
   end
 

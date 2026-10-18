@@ -38,8 +38,9 @@ defmodule DpExchange.Coinbase.WriteOnceTest do
     api_secret: "dGVzdC1zZWNyZXQtdGhpcnR5LXR3by1ieXRlcyEhISE="
   }
 
-  # Every request is answered 502 and counted. `retry_delay: 1` keeps a retrying build fast
-  # enough to fail this suite rather than stall it.
+  # Every request is answered 502 and counted. These calls do not read `:retry_delay`, so a
+  # retrying build would wait Core's default 1_000 ms before its second send; the drain
+  # window in `requests/1` outlasts that, so a retry would be counted and fail the suite.
   defp failing(test_pid) do
     fn conn ->
       send(test_pid, {:request, conn.request_path})
@@ -50,13 +51,13 @@ defmodule DpExchange.Coinbase.WriteOnceTest do
     end
   end
 
-  defp opts(extra), do: [plug: failing(self()), retry_delay: 1] ++ extra
+  defp opts(extra), do: [plug: failing(self())] ++ extra
 
   defp requests(acc \\ []) do
     receive do
       {:request, path} -> requests([path | acc])
     after
-      100 -> Enum.reverse(acc)
+      2_500 -> Enum.reverse(acc)
     end
   end
 
@@ -110,23 +111,70 @@ defmodule DpExchange.Coinbase.WriteOnceTest do
     assert [_one] = requests()
   end
 
-  # "Sent once" is a guarantee, not a default: the caller's retry_attempts cannot undo it.
-  test "a caller's retry_attempts: 3 still sends a transfer exactly once" do
-    Rest.transfer_internal(
-      @credentials,
-      "USD",
-      Decimal.new("1"),
-      opts(from: "a", to: "b", retry_attempts: 3)
-    )
+  # "Sent once" is a guarantee: the calls do not read the retry keys, so a caller passing
+  # either (any value, 0 and 1 included) is refused before anything is sent, rather than
+  # accepted and overwritten.
+  describe "retry keys are refused on a sent-once call" do
+    test "transfer_internal, any value" do
+      pairs = [retry_attempts: 3, retry_attempts: 1, retry_attempts: 0, retry_delay: 1]
 
-    assert [_one] = requests()
-  end
+      for {key, value} <- pairs do
+        assert {:error, {:unknown_option, ^key}} =
+                 Rest.transfer_internal(
+                   @credentials,
+                   "USD",
+                   Decimal.new("1"),
+                   opts([{:from, "a"}, {:to, "b"}, {key, value}])
+                 )
+      end
 
-  test "a caller's retry_attempts: 3 still sends a cancel and a delete exactly once" do
-    Rest.cancel_order(@credentials, "order-1", opts(retry_attempts: 3))
-    assert [_one] = requests()
+      refute_receive {:request, _path}, 500
+    end
 
-    Rest.delete_portfolio(@credentials, "pf-1", opts(retry_attempts: 3))
-    assert [_one] = requests()
+    test "cancel_order and delete_portfolio" do
+      assert {:error, {:unknown_option, :retry_attempts}} =
+               Rest.cancel_order(@credentials, "order-1", opts(retry_attempts: 3))
+
+      assert {:error, {:unknown_option, :retry_delay}} =
+               Rest.delete_portfolio(@credentials, "pf-1", opts(retry_delay: 1))
+
+      refute_receive {:request, _path}, 500
+    end
+
+    test "the other sent-once writes" do
+      changes = %{price: Decimal.new("10"), quantity: Decimal.new("1")}
+
+      assert {:error, {:unknown_option, :retry_attempts}} =
+               Rest.replace_order(@credentials, "order-1", changes, opts(retry_attempts: 1))
+
+      assert {:error, {:unknown_option, :retry_attempts}} =
+               Rest.create_portfolio(@credentials, opts(name: "p", retry_attempts: 1))
+
+      assert {:error, {:unknown_option, :retry_delay}} =
+               Rest.commit_conversion(
+                 @credentials,
+                 "trade-1",
+                 opts(from: "a", to: "b", retry_delay: 1)
+               )
+
+      assert {:error, {:unknown_option, :retry_attempts}} =
+               Rest.schedule_futures_sweep(
+                 @credentials,
+                 opts(usd_amount: Decimal.new("5"), retry_attempts: 1)
+               )
+
+      assert {:error, {:unknown_option, :retry_attempts}} =
+               Rest.cancel_futures_sweep(@credentials, opts(retry_attempts: 1))
+
+      refute_receive {:request, _path}, 500
+    end
+
+    test "the shared key table (the Fake's too) refuses them, and keeps them for keyed writes" do
+      assert {:error, {:unknown_option, :retry_attempts}} =
+               DpExchange.Coinbase.OptionKeys.check(:cancel_order, retry_attempts: 1)
+
+      assert :ok = DpExchange.Coinbase.OptionKeys.check(:place_order, retry_attempts: 1)
+      assert :ok = DpExchange.Coinbase.OptionKeys.check(:place_order, retry_delay: 1)
+    end
   end
 end

@@ -222,6 +222,43 @@ defmodule DpExchange.Coinbase.OptionKeysTest do
     end
   end
 
+  # Always sent exactly once: no idempotency key the venue honours, so no retry keys.
+  @sent_once ~w(cancel_order replace_order transfer_internal create_account delete_portfolio
+                commit_conversion schedule_futures_sweep cancel_futures_sweep)a
+
+  for module <- [Coinbase, Fake] do
+    describe "#{inspect(module)}: retry keys on a sent-once call" do
+      test "are refused by name for any value, and nothing is sent" do
+        module = unquote(module)
+        probed = Keyword.take(calls(), @sent_once)
+        assert length(probed) == length(@sent_once)
+
+        for {name, call} <- probed, key <- [:retry_attempts, :retry_delay], value <- [0, 1, 3] do
+          answer =
+            call.(module, [{key, value}, plug: reporting(self()), credentials: @credentials])
+
+          assert answer == {:error, {:unknown_option, key}},
+                 "#{name} given #{key}: #{value} answered #{inspect(answer, limit: 6)}"
+        end
+
+        refute_receive {:sent, _path}, 500
+      end
+
+      test "are still read by the writes that carry an idempotency key" do
+        module = unquote(module)
+        keyed = Keyword.take(calls(), [:place_order, :close_position])
+        assert length(keyed) == 2
+
+        for {name, call} <- keyed, key <- [:retry_attempts, :retry_delay] do
+          answer = call.(module, [{key, 1}, limt: 1, credentials: @credentials])
+
+          assert answer == {:error, {:unknown_option, :limt}},
+                 "#{name} reads #{key}, so the stray limt is the first refusal"
+        end
+      end
+    end
+  end
+
   describe "a function the venue does not serve" do
     test "keeps answering not_supported whatever the options" do
       for module <- [Coinbase, Fake] do

@@ -231,8 +231,7 @@ defmodule DpExchange.Coinbase.ConvertTest do
                Rest.commit_conversion(@credentials, "t-1",
                  from: "USD",
                  to: "USDC",
-                 plug: capturing(trade(%{"status" => "TRADE_STATUS_STARTED"}), me),
-                 retry_attempts: 0
+                 plug: capturing(trade(%{"status" => "TRADE_STATUS_STARTED"}), me)
                )
 
       assert conversion.status == :committed
@@ -274,14 +273,20 @@ defmodule DpExchange.Coinbase.ConvertTest do
 
       # The commit MAY have happened: not a plain error, and keyed by the trade committed.
       assert {:error, {:write_unconfirmed, "t-1", :unexpected_response_shape}} =
-               Rest.commit_conversion(@credentials, "t-1", [from: "USD", to: "USDC"] ++ opts)
+               Rest.commit_conversion(
+                 @credentials,
+                 "t-1",
+                 from: "USD",
+                 to: "USDC",
+                 plug: responding(%{})
+               )
 
       assert {:error, :unexpected_response_shape} =
                Rest.get_conversion(@credentials, "t-1", [from: "USD", to: "USDC"] ++ opts)
     end
 
     test "a commit the venue accepted but whose trade cannot be read is unconfirmed" do
-      accounts = [from: "USD", to: "USDC", retry_attempts: 0]
+      accounts = [from: "USD", to: "USDC"]
 
       # A status this package does not know, and an id the trade does not carry. Both leave
       # no `Types.Conversion` to return (it enforces `:id` and `:status`), and a plain error
@@ -315,7 +320,7 @@ defmodule DpExchange.Coinbase.ConvertTest do
         end
       end
 
-      accounts = [from: "USD", to: "USDC", retry_attempts: 0]
+      accounts = [from: "USD", to: "USDC"]
 
       assert {:error, {:write_unconfirmed, "t-1", {:exchange_error, :coinbase, _text}}} =
                Rest.commit_conversion(@credentials, "t-1", accounts ++ [plug: status.(500)])
@@ -362,14 +367,14 @@ defmodule DpExchange.Coinbase.ConvertTest do
     end
 
     test "the facade delegates all three" do
-      base = [credentials: @credentials, retry_attempts: 0]
+      base = [credentials: @credentials]
 
       assert {:ok, _quote} =
                DpExchange.Coinbase.quote_conversion(
                  "USD",
                  "USDC",
                  Decimal.new("1"),
-                 base ++ [plug: responding(trade())]
+                 base ++ [retry_attempts: 0, plug: responding(trade())]
                )
 
       assert {:ok, _commit} =
@@ -381,7 +386,7 @@ defmodule DpExchange.Coinbase.ConvertTest do
       assert {:ok, _read} =
                DpExchange.Coinbase.get_conversion(
                  "t-1",
-                 base ++ [from: "USD", to: "USDC", plug: responding(trade())]
+                 base ++ [retry_attempts: 0, from: "USD", to: "USDC", plug: responding(trade())]
                )
     end
   end

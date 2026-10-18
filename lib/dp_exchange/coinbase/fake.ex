@@ -1266,7 +1266,7 @@ defmodule DpExchange.Coinbase.Fake do
       # did not name converts between the wrong two balances. Then the credential, then the
       # venue's own answer about the id — the real order.
       with :ok <- Rest.validate_id(id, :trade_id),
-           {:ok, from, to} <- Rest.convert_accounts(opts),
+           {:ok, from, to} <- Rest.convert_accounts(:commit_conversion, opts),
            :ok <- Rest.validate_credentials(opts_credentials(opts)),
            {:ok, _status} <- fake_conversion(id) do
         Process.put(@conversions_key, Map.put(conversions(), id, :committed))
@@ -1299,7 +1299,7 @@ defmodule DpExchange.Coinbase.Fake do
   def get_conversion(id, opts \\ []) do
     with_injection(fn ->
       with :ok <- Rest.validate_id(id, :trade_id),
-           {:ok, from, to} <- Rest.convert_accounts(opts),
+           {:ok, from, to} <- Rest.convert_accounts(:get_conversion, opts),
            :ok <- Rest.validate_credentials(opts_credentials(opts)),
            {:ok, known} <- fake_conversion(id) do
         {:ok,

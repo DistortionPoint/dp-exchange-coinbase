@@ -47,6 +47,9 @@ defmodule DpExchange.Coinbase.DecoderRobustnessTest do
   end
 
   defp opts(body), do: [plug: responding(body), retry_attempts: 0]
+
+  # A sent-once call (cancel) reads no retry keys.
+  defp once_opts(body), do: [plug: responding(body)]
   defp private_opts(body), do: [credentials: @credentials] ++ opts(body)
 
   defp fill(overrides) do
@@ -380,7 +383,7 @@ defmodule DpExchange.Coinbase.DecoderRobustnessTest do
       }
 
       assert {:refused, {:cancel_rejected, reason}} =
-               Rest.cancel_order(@credentials, "abc-123", opts(body))
+               Rest.cancel_order(@credentials, "abc-123", once_opts(body))
 
       assert String.length(reason) == 2_048
 
@@ -391,7 +394,7 @@ defmodule DpExchange.Coinbase.DecoderRobustnessTest do
       }
 
       assert {:error, :unexpected_response_shape} =
-               Rest.cancel_order(@credentials, "abc-123", opts(body))
+               Rest.cancel_order(@credentials, "abc-123", once_opts(body))
     end
 
     test "a placement's rejection reason is cut" do

@@ -1128,7 +1128,7 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
                  opts(me, body: %{"inputs" => %{"x" => self()}})
                )
 
-      refute_receive {:request, _method, _path, _raw, _headers}, 50
+      refute_receive {:request, _method, _path, _raw, _headers}, 500
     end
   end
 

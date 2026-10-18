@@ -741,7 +741,7 @@ defmodule DpExchange.CoinbaseTest do
       body = %{"results" => [%{"order_id" => "abc", "success" => true}]}
 
       assert {:ok, :cancelled} =
-               Coinbase.cancel_order(@creds, "abc", plug: json_plug(body), retry_attempts: 0)
+               Coinbase.cancel_order(@creds, "abc", plug: json_plug(body))
     end
 
     test "get_order reaches the venue through the facade" do
@@ -779,7 +779,7 @@ defmodule DpExchange.CoinbaseTest do
 
     test "replace_order refuses an unsupported edit through the facade" do
       assert {:error, {:unsupported_order_edit, [:side]}} =
-               Coinbase.replace_order(@creds, "abc", %{side: :sell}, retry_attempts: 0)
+               Coinbase.replace_order(@creds, "abc", %{side: :sell}, [])
     end
   end
 

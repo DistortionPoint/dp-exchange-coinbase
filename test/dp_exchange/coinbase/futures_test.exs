@@ -251,8 +251,7 @@ defmodule DpExchange.Coinbase.FuturesTest do
       assert {:ok, _result} =
                Rest.schedule_futures_sweep(@credentials,
                  usd_amount: Decimal.new("0.00000001"),
-                 plug: capturing(%{"success" => true}, me),
-                 retry_attempts: 0
+                 plug: capturing(%{"success" => true}, me)
                )
 
       assert_receive {:request, "POST", path, _query, raw}
@@ -267,8 +266,7 @@ defmodule DpExchange.Coinbase.FuturesTest do
 
       assert {:ok, _result} =
                Rest.schedule_futures_sweep(@credentials,
-                 plug: capturing(%{"success" => true}, me),
-                 retry_attempts: 0
+                 plug: capturing(%{"success" => true}, me)
                )
 
       assert_receive {:request, "POST", _path, _query, raw}
@@ -280,8 +278,7 @@ defmodule DpExchange.Coinbase.FuturesTest do
 
       assert {:ok, %{"success" => true}} =
                Rest.cancel_futures_sweep(@credentials,
-                 plug: capturing(%{"success" => true}, me),
-                 retry_attempts: 0
+                 plug: capturing(%{"success" => true}, me)
                )
 
       assert_receive {:request, "DELETE", path, query, _raw}
@@ -407,14 +404,12 @@ defmodule DpExchange.Coinbase.FuturesTest do
 
       assert {:ok, _result} =
                DpExchange.Coinbase.schedule_futures_sweep(@credentials,
-                 plug: responding(%{"success" => true}),
-                 retry_attempts: 0
+                 plug: responding(%{"success" => true})
                )
 
       assert {:ok, _result} =
                DpExchange.Coinbase.cancel_futures_sweep(@credentials,
-                 plug: responding(%{"success" => true}),
-                 retry_attempts: 0
+                 plug: responding(%{"success" => true})
                )
 
       assert {:ok, "X"} =
@@ -484,8 +479,8 @@ defmodule DpExchange.Coinbase.FuturesTest do
       assert {:error, _reason} = Rest.list_futures_positions(@credentials, opts)
       assert {:error, _reason} = Rest.get_futures_balance_summary(@credentials, opts)
       assert {:error, _reason} = Rest.list_futures_sweeps(@credentials, opts)
-      assert {:error, _reason} = Rest.schedule_futures_sweep(@credentials, opts)
-      assert {:error, _reason} = Rest.cancel_futures_sweep(@credentials, opts)
+      assert {:error, _reason} = Rest.schedule_futures_sweep(@credentials, plug: failing(500))
+      assert {:error, _reason} = Rest.cancel_futures_sweep(@credentials, plug: failing(500))
       assert {:error, _reason} = Rest.get_intraday_margin_setting(@credentials, opts)
 
       assert {:error, _reason} =
@@ -505,8 +500,7 @@ defmodule DpExchange.Coinbase.FuturesTest do
       assert {:ok, _result} =
                Rest.schedule_futures_sweep(@credentials,
                  usd_amount: "500",
-                 plug: capturing(%{"success" => true}, me),
-                 retry_attempts: 0
+                 plug: capturing(%{"success" => true}, me)
                )
 
       assert_receive {:request, "POST", _path, _query, raw}

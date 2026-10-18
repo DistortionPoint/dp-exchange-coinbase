@@ -938,7 +938,6 @@ defmodule DpExchange.Coinbase.RestTest do
                Rest.create_portfolio(credentials(),
                  name: "x",
                  plug: plug,
-                 retry_attempts: 0,
                  rate_limit_blocking: true
                )
 
@@ -953,7 +952,7 @@ defmodule DpExchange.Coinbase.RestTest do
       end
 
       assert {:ok, _portfolio} =
-               Rest.create_portfolio(credentials(), name: "x", plug: plug, retry_attempts: 0)
+               Rest.create_portfolio(credentials(), name: "x", plug: plug)
 
       assert Process.get(:rate_limiter_call) == :acquire_without_waiting
     end

@@ -184,8 +184,7 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
                Rest.create_portfolio(@credentials,
                  name: "Strategy A",
                  plug:
-                   capturing(%{"portfolio" => %{"uuid" => "pf-9", "name" => "Strategy A"}}, me),
-                 retry_attempts: 0
+                   capturing(%{"portfolio" => %{"uuid" => "pf-9", "name" => "Strategy A"}}, me)
                )
 
       assert portfolio.id == "pf-9"
@@ -213,10 +212,7 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
       me = self()
 
       assert {:ok, _result} =
-               Rest.delete_portfolio(@credentials, "pf-1",
-                 plug: capturing(%{}, me),
-                 retry_attempts: 0
-               )
+               Rest.delete_portfolio(@credentials, "pf-1", plug: capturing(%{}, me))
 
       assert_receive {:request, "DELETE", path, query, raw}
       assert String.ends_with?(path, "/portfolios/pf-1")
@@ -225,19 +221,18 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
     end
 
     test "an unreadable 2xx on each write is unconfirmed, never a plain error" do
-      opts = [plug: responding(%{}), retry_attempts: 0]
+      opts = [plug: responding(%{})]
 
       assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
                Rest.create_portfolio(@credentials, [name: "X"] ++ opts)
 
       assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
-               Rest.rename_portfolio(@credentials, "pf-1", "X", opts)
+               Rest.rename_portfolio(@credentials, "pf-1", "X", opts ++ [retry_attempts: 0])
 
       # A delete is keyed by the portfolio it names, so the caller can reconcile on it.
       assert {:error, {:write_unconfirmed, "pf-1", :unexpected_response_shape}} =
                Rest.delete_portfolio(@credentials, "pf-1",
-                 plug: responding(["not", "an", "object"]),
-                 retry_attempts: 0
+                 plug: responding(["not", "an", "object"])
                )
     end
 
@@ -247,8 +242,7 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
       assert {:error, {:write_unconfirmed, nil, reason}} =
                Rest.create_portfolio(@credentials,
                  name: "X",
-                 plug: responding(body),
-                 retry_attempts: 0
+                 plug: responding(body)
                )
 
       assert reason == {:missing_required_field, :id}
@@ -267,19 +261,19 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
         |> Plug.Conn.resp(403, Jason.encode!(%{"message" => "no"}))
       end
 
-      opts = [plug: server_error, retry_attempts: 0]
+      opts = [plug: server_error]
 
       assert {:error, {:write_unconfirmed, nil, {:exchange_error, :coinbase, _text}}} =
                Rest.create_portfolio(@credentials, [name: "X"] ++ opts)
 
       assert {:error, {:write_unconfirmed, nil, {:exchange_error, :coinbase, _text}}} =
-               Rest.rename_portfolio(@credentials, "pf-1", "X", opts)
+               Rest.rename_portfolio(@credentials, "pf-1", "X", opts ++ [retry_attempts: 0])
 
       assert {:error, {:write_unconfirmed, "pf-1", {:exchange_error, :coinbase, _text}}} =
                Rest.delete_portfolio(@credentials, "pf-1", opts)
 
       assert {:refused, _reason} =
-               Rest.create_portfolio(@credentials, name: "X", plug: denied, retry_attempts: 0)
+               Rest.create_portfolio(@credentials, name: "X", plug: denied)
     end
 
     test "a 500 is an error on each of the five" do
@@ -289,12 +283,13 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
         |> Plug.Conn.resp(500, Jason.encode!(%{"error" => "nope"}))
       end
 
-      opts = [plug: plug, retry_attempts: 0]
+      opts = [plug: plug]
+      retried = opts ++ [retry_attempts: 0]
 
-      assert {:error, _reason} = Rest.list_portfolios(@credentials, opts)
-      assert {:error, _reason} = Rest.get_portfolio_breakdown(@credentials, "pf-1", opts)
+      assert {:error, _reason} = Rest.list_portfolios(@credentials, retried)
+      assert {:error, _reason} = Rest.get_portfolio_breakdown(@credentials, "pf-1", retried)
       assert {:error, _reason} = Rest.create_portfolio(@credentials, [name: "X"] ++ opts)
-      assert {:error, _reason} = Rest.rename_portfolio(@credentials, "pf-1", "X", opts)
+      assert {:error, _reason} = Rest.rename_portfolio(@credentials, "pf-1", "X", retried)
       assert {:error, _reason} = Rest.delete_portfolio(@credentials, "pf-1", opts)
     end
   end
@@ -331,16 +326,13 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
                )
 
       assert {:ok, _result} =
-               DpExchange.Coinbase.delete_portfolio(@credentials, "pf-1",
-                 plug: responding(%{}),
-                 retry_attempts: 0
-               )
+               DpExchange.Coinbase.delete_portfolio(@credentials, "pf-1", plug: responding(%{}))
     end
 
     test "create_account/1 and rename_account/3 reach the portfolio endpoints" do
       # Advanced Trade has no notion of creating an *account* — a portfolio is the
       # subdivision an API can make, and it is what these callbacks mean here.
-      base = [credentials: @credentials, retry_attempts: 0]
+      base = [credentials: @credentials]
 
       assert {:ok, %{id: "pf-9"}} =
                DpExchange.Coinbase.create_account(
@@ -352,7 +344,8 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
                DpExchange.Coinbase.rename_account(
                  "pf-1",
                  "Renamed",
-                 base ++ [plug: responding(%{"portfolio" => %{"uuid" => "pf-1"}})]
+                 base ++
+                   [plug: responding(%{"portfolio" => %{"uuid" => "pf-1"}}), retry_attempts: 0]
                )
     end
   end
