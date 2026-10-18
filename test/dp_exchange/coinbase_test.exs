@@ -395,9 +395,8 @@ defmodule DpExchange.CoinbaseTest do
                Fake.cancel_order(@fake_credentials, "already-filled")
     end
 
-    test "cancelling an unknown order refuses" do
-      assert {:refused, {:cancel_rejected, _reason}} =
-               Fake.cancel_order(@fake_credentials, "no-such-order")
+    test "cancelling an unknown order refuses as not found, like a read" do
+      assert {:refused, :not_found} = Fake.cancel_order(@fake_credentials, "no-such-order")
     end
 
     test "reading a known order returns it" do

@@ -164,9 +164,7 @@ defmodule DpExchange.Coinbase.ConvertTest do
           {"TRADE_STATUS_CREATED", :quoted},
           {"TRADE_STATUS_STARTED", :committed},
           {"TRADE_STATUS_COMPLETED", :settled},
-          {"TRADE_STATUS_CANCELED", :cancelled},
-          {"TRADE_STATUS_EXPIRED", :expired},
-          {"TRADE_STATUS_FAILED", :failed}
+          {"TRADE_STATUS_CANCELED", :cancelled}
         ] do
       test "#{venue} maps to #{expected}" do
         body = trade(%{"status" => unquote(venue)})
@@ -178,6 +176,19 @@ defmodule DpExchange.Coinbase.ConvertTest do
                  )
 
         assert conversion.status == unquote(expected)
+      end
+    end
+
+    # at-spec.yaml `TradeStatus` lists UNSPECIFIED, CREATED, STARTED, COMPLETED and CANCELED
+    # only. EXPIRED and FAILED were mapped without the spec naming them: a status the venue
+    # never documented is refused like any other unknown word, not given a meaning.
+    test "statuses the spec does not list (EXPIRED, FAILED, UNSPECIFIED) are refused" do
+      for word <- ["TRADE_STATUS_EXPIRED", "TRADE_STATUS_FAILED", "TRADE_STATUS_UNSPECIFIED"] do
+        assert {:error, {:unknown_conversion_status, ^word}} =
+                 Rest.quote_conversion(@credentials, "USD", "USDC", Decimal.new("1"),
+                   plug: responding(trade(%{"status" => word})),
+                   retry_attempts: 0
+                 )
       end
     end
 

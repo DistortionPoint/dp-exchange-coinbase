@@ -88,13 +88,73 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
           %{
             "order_id" => "abc-123",
             "success" => false,
-            "failure_reason" => "UNKNOWN_CANCEL_ORDER"
+            "failure_reason" => "ORDER_IS_FULLY_FILLED"
           }
         ]
       }
 
-      assert {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}} =
+      assert {:refused, {:cancel_rejected, "ORDER_IS_FULLY_FILLED"}} =
                Rest.cancel_order(@credentials, "abc-123", plug: responding(body))
+    end
+
+    # The reason is not taken to mean "no such order" (at-spec.yaml:6373 calls it an internal
+    # error): one read of the order confirms it. POST answers the row, GET answers `status`.
+    defp unknown_cancel_plug(read_status, read_body) do
+      me = self()
+
+      fn conn ->
+        send(me, {:call, conn.method, conn.request_path})
+
+        {status, body} =
+          if conn.method == "POST" do
+            row = %{
+              "order_id" => "abc-123",
+              "success" => false,
+              "failure_reason" => "UNKNOWN_CANCEL_ORDER"
+            }
+
+            {200, %{"results" => [row]}}
+          else
+            {read_status, read_body}
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(status, Jason.encode!(body))
+      end
+    end
+
+    test "UNKNOWN_CANCEL_ORDER confirmed by a 404 read is :not_found, after exactly two requests" do
+      plug = unknown_cancel_plug(404, %{"message" => "NOT_FOUND"})
+
+      assert {:refused, :not_found} = Rest.cancel_order(@credentials, "abc-123", plug: plug)
+
+      assert_receive {:call, "POST", post_path}, 5_000
+      assert String.ends_with?(post_path, "/orders/batch_cancel")
+      assert_receive {:call, "GET", get_path}, 5_000
+      assert String.ends_with?(get_path, "/orders/historical/abc-123")
+      refute_receive {:call, _method, _path}, 500
+    end
+
+    test "UNKNOWN_CANCEL_ORDER with an order that exists stays a cancel rejection" do
+      order = %{"order_id" => "abc-123", "product_id" => "BTC-USD", "status" => "OPEN"}
+      plug = unknown_cancel_plug(200, %{"order" => order})
+
+      assert {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}} =
+               Rest.cancel_order(@credentials, "abc-123", plug: plug)
+
+      assert_receive {:call, "GET", _path}, 5_000
+    end
+
+    test "UNKNOWN_CANCEL_ORDER with a failing read stays a cancel rejection, read once" do
+      plug = unknown_cancel_plug(500, %{"message" => "boom"})
+
+      assert {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}} =
+               Rest.cancel_order(@credentials, "abc-123", plug: plug)
+
+      assert_receive {:call, "POST", _path}, 5_000
+      assert_receive {:call, "GET", _path}, 5_000
+      refute_receive {:call, _method, _path}, 1_500
     end
 
     test "a results array that does not mention the order is an error, not a cancellation" do

@@ -2197,8 +2197,9 @@ defmodule DpExchange.Coinbase.Fake do
   def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
 
   @doc """
-  Cancels an open order this fake holds. An order that is not open, or an unknown id, is
-  `{:refused, {:cancel_rejected, reason}}`. Needs a credential.
+  Cancels an open order this fake holds. An order that is not open is
+  `{:refused, {:cancel_rejected, reason}}`; an unknown id is `{:refused, :not_found}`, as
+  `get_order/3` answers it. Needs a credential.
 
   See `c:DpExchange.Core.Venue.cancel_order/3`.
   """
@@ -2227,8 +2228,7 @@ defmodule DpExchange.Coinbase.Fake do
   defp cancel_found(:error, "already-filled"),
     do: {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_FAILURE_REASON"}}
 
-  defp cancel_found(:error, _unknown),
-    do: {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}}
+  defp cancel_found(:error, _unknown), do: {:refused, :not_found}
 
   @doc """
   An order this process placed, or the one canned order `"fake-order-1"`; any other id is

@@ -813,8 +813,7 @@ defmodule DpExchange.Coinbase.FakeTest do
     test "an id the fake never issued answers as the venue's 404 and unknown cancel" do
       assert {:refused, :not_found} = Fake.get_order(@credentials, "never-issued")
 
-      assert {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}} =
-               Fake.cancel_order(@credentials, "never-issued")
+      assert {:refused, :not_found} = Fake.cancel_order(@credentials, "never-issued")
     end
 
     test "cancelling the canned order is reflected in the next read" do

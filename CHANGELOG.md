@@ -31,6 +31,20 @@ acceptable changelog line.
   ignored. Writes retried under an idempotency key (`place_order`, `close_position`, the
   Prime staking writes) keep both keys. `replace_order`'s read-back of the order is a read
   and now runs with Core's default retry (it no longer inherits a caller's retry value).
+- `cancel_order/3` for an id the venue does not hold is `{:refused, :not_found}` (conformance
+  group 49, as `get_order/3`). The `Fake` answers it for an id it never issued. The real path
+  does NOT infer it from the reason: at-spec.yaml:6373 titles `UNKNOWN_CANCEL_ORDER`
+  "Internal error when placing cancel request" (the words it also gives
+  `INVALID_CANCEL_REQUEST`). On that per-row reason it makes one `get_order` read of the id
+  (sent once) and answers `{:refused, :not_found}` only if the venue's own answer to that read
+  is a 404; any other read answer (the order exists, a transport error) keeps
+  `{:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}}`. Every other reason is unchanged.
+  The cancel was `{:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}` for an unknown id before.
+- A conversion whose status is `TRADE_STATUS_EXPIRED` or `TRADE_STATUS_FAILED` is now refused
+  as `{:unknown_conversion_status, word}` (on a commit, `{:write_unconfirmed, trade_id, _}`)
+  instead of read as `:expired` / `:failed`. at-spec.yaml `TradeStatus` is UNSPECIFIED,
+  CREATED, STARTED, COMPLETED and CANCELED only; the other two were mapped with no spec
+  evidence.
 
 ## [0.3.139] - 2026-10-18
 

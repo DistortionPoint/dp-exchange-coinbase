@@ -43,6 +43,18 @@ defmodule DpExchange.CoinbaseContractTest do
     # generic price-only edit is refused for a reason that has nothing to do with the id
     # assertion 31 is checking.
     order_args: %{order_changes: %{quantity: Decimal.new("0.002"), price: Decimal.new("1")}},
+    # Conformance groups 43 and 48: staking is a Prime call, so the Fake needs a Prime
+    # credential set (not the Advanced Trade `credentials:` above) and the portfolio to stake in.
+    endpoint_opts: %{
+      {:stake, 3} => [
+        portfolio_id: "pf-1",
+        credentials: %{access_key: "k", passphrase: "p", signing_key: "c2VjcmV0"}
+      ],
+      {:unstake, 3} => [
+        portfolio_id: "pf-1",
+        credentials: %{access_key: "k", passphrase: "p", signing_key: "c2VjcmV0"}
+      ]
+    },
     # Conformance group 42: the REAL `Rest.place_order/3` (not the Fake) with the venue
     # answering 503 to every attempt, i.e. a fault after the send, retried fast. The contract's
     # base request is passed through unmapped. A request without `:order_type` is refused

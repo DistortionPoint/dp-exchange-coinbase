@@ -1372,8 +1372,9 @@ defmodule DpExchange.Coinbase.Rest do
   defp conversion_status("TRADE_STATUS_STARTED"), do: :committed
   defp conversion_status("TRADE_STATUS_COMPLETED"), do: :settled
   defp conversion_status("TRADE_STATUS_CANCELED"), do: :cancelled
-  defp conversion_status("TRADE_STATUS_EXPIRED"), do: :expired
-  defp conversion_status("TRADE_STATUS_FAILED"), do: :failed
+  # at-spec.yaml `TradeStatus` is UNSPECIFIED | CREATED | STARTED | COMPLETED | CANCELED.
+  # `TRADE_STATUS_EXPIRED` and `TRADE_STATUS_FAILED` used to be mapped here although the spec
+  # names neither; an undocumented word is refused like any other unknown one.
   defp conversion_status(_other), do: nil
 
   # --- US derivatives (CFM) -----------------------------------------------
@@ -4758,17 +4759,27 @@ defmodule DpExchange.Coinbase.Rest do
       # Once, as `post_once/4` says: a cancel that took effect before a lost answer, retried,
       # comes back "not there to cancel", a refusal for an order this call did cancel.
       case post_once("/orders/batch_cancel", %{"order_ids" => [order_id]}, credentials, opts) do
-        {:ok, %{body: body}} -> cancel_result(body, order_id)
+        {:ok, %{body: body}} -> cancel_result(body, order_id, credentials, opts)
         {:error, reason} -> classify(reason)
       end
     end
   end
 
-  defp cancel_result(%{"results" => results}, order_id) when is_list(results) do
+  defp cancel_result(%{"results" => results}, order_id, credentials, opts)
+       when is_list(results) do
     # A row that is not an object cannot be about this order; it used to raise here.
     case Enum.find(results, &(is_map(&1) and &1["order_id"] == order_id)) do
       %{"success" => true} ->
         {:ok, :cancelled}
+
+      # `UNKNOWN_CANCEL_ORDER` is NOT taken to mean "no such order": at-spec.yaml:6373 titles
+      # it "Internal error when placing cancel request", the words it also gives
+      # INVALID_CANCEL_REQUEST, and the venue's answer for an unknown id was never measured.
+      # Mapping the reason to `:not_found` would be a substitution. It is CONFIRMED instead by
+      # one read of the order (conformance group 49 wants `:not_found` for an id nobody placed):
+      # only when that read answers `{:refused, :not_found}` is the cancel `:not_found`.
+      %{"success" => false, "failure_reason" => "UNKNOWN_CANCEL_ORDER"} ->
+        confirm_unknown_order(order_id, credentials, opts)
 
       # Bounded, and a string: a venue's `failure_reason` was copied whole into the return
       # value (a whole error page, or a map), as `refusal/2`'s text never was.
@@ -4789,7 +4800,18 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  defp cancel_result(_body, _order_id), do: {:error, :unexpected_response_shape}
+  defp cancel_result(_body, _order_id, _credentials, _opts),
+    do: {:error, :unexpected_response_shape}
+
+  # One read, sent once (`retry_attempts: 1`, so the confirmation is bounded). Anything but the
+  # venue's own 404 for the id (the order exists, a transport error, an unreadable body) keeps
+  # the refusal the cancel was given.
+  defp confirm_unknown_order(order_id, credentials, opts) do
+    case get_order(credentials, order_id, Keyword.put(opts, :retry_attempts, 1)) do
+      {:refused, :not_found} -> {:refused, :not_found}
+      _other -> {:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}}
+    end
+  end
 
   @doc """
   One order by its venue id.

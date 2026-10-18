@@ -875,7 +875,10 @@ shape. The fake's sweep queue and margin setting are remembered per process, lik
 each time; `get_order/3` and `get_orders/2` return that order with its own symbol, side,
 size and price, `cancel_order/3` marks it cancelled so the next read says `:cancelled`, and
 an id the fake never issued answers as the venue does (`{:refused, :not_found}` on a read,
-`{:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}}` on a cancel). A caller-supplied
+`{:refused, :not_found}` on a cancel too. The real path does not infer that from the venue's
+per-row `UNKNOWN_CANCEL_ORDER` (the spec titles it only "Internal error when placing cancel
+request"): it reads the order once and answers `:not_found` only when that read is a 404,
+otherwise `{:refused, {:cancel_rejected, "UNKNOWN_CANCEL_ORDER"}}`). A caller-supplied
 `client_order_id` sent twice returns the ORIGINAL order, as the idempotent venue does, not
 a second one; the side comes back as the atom, not the string you sent. Before anything is
 placed, `fake-order-1` is a canned open BTC-USD order.
