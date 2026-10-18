@@ -1177,6 +1177,9 @@ defmodule DpExchange.Coinbase.Fake do
   # The transaction id is derived from the idempotency key, so a unique key (generated when
   # the caller gives none) is a unique transaction and a REUSED key answers with the original,
   # as the venue's "subsequent requests using the same key will not create new transactions".
+  # That is the PORTFOLIO-scoped wording (and `claim_rewards`'); the wallet-scoped stake and
+  # unstake say a repeated key "will fail", which this fake does not model (it has no
+  # transaction store), so it answers the original there too.
   #
   # This fake has no wallet inventory, so the real path's wallet-asset check
   # (`{:wallet_asset_mismatch, _, _}`) cannot be modelled: a wallet is taken to hold the asset

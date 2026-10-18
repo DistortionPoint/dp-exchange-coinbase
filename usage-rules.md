@@ -971,8 +971,15 @@ them.** Portfolio-scoped calls send a flat `{idempotency_key, currency_symbol, a
 inputs: {amount, ...}}` — no `currency` field at all, because a wallet already names one
 asset on the venue's side — and `opts[:extra]` merges into `inputs`, not the top level.
 `opts[:metadata]` (the venue's `external_id` object) is sent as its own top-level key on
-both scopes, as the spec's portfolio and wallet requests each allow; a value that is not a
-map is `{:error, {:invalid_metadata, v}}`. Before this version the portfolio-scoped body
+both scopes, as the spec's portfolio and wallet requests each allow. The spec's metadata
+objects define `external_id` only (a string, at most 255 bytes), so a value that is not a map
+holding just that, or that carries any other member, is `{:error, {:invalid_metadata, v}}`.
+**A repeated idempotency key behaves differently by scope:** the portfolio-scoped calls and
+`claim_rewards` return the original response; the wallet-scoped `stake`/`unstake` documented
+"subsequent requests using the same key will fail", so a re-sent wallet write is
+`{:write_unconfirmed, key, _}`, not a refusal and not proof nothing was staked: read
+`staking_status/4` first. (The Fake answers a reused key with the original for both scopes.)
+Before this version the portfolio-scoped body
 dropped it, so the option did nothing there. `opts[:extra]` fills in fields this package
 does not know; it **cannot replace**
 `amount`, `currency_symbol`, `idempotency_key` or `transaction_ids`, the ones it validated.

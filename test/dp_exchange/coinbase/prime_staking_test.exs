@@ -822,6 +822,47 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       refute_received {:request, _method, _path, _raw, _headers}
     end
 
+    test "metadata carries external_id only, a string of at most 255 bytes (both schemas)" do
+      me = self()
+      one = Decimal.new("1")
+
+      for bad <- [
+            %{"note" => "x"},
+            %{"external_id" => 5},
+            %{"external_id" => String.duplicate("a", 256)},
+            %{"external_id" => "ok", "other" => "x"}
+          ] do
+        opts = opts(me, metadata: bad)
+
+        assert {:error, {:invalid_metadata, ^bad}} =
+                 Prime.stake_portfolio(@credentials, "pf-1", "ETH", one, opts)
+
+        assert {:error, {:invalid_metadata, ^bad}} =
+                 Prime.unstake_wallet(@credentials, "pf-1", "w-9", "ETH", one, opts)
+
+        assert {:error, {:invalid_metadata, ^bad}} =
+                 Fake.stake("ETH", one,
+                   portfolio_id: "pf-1",
+                   credentials: @credentials,
+                   metadata: bad
+                 )
+      end
+
+      limit = %{"external_id" => String.duplicate("a", 255)}
+
+      assert {:ok, _result} =
+               Prime.stake_portfolio(
+                 @credentials,
+                 "pf-1",
+                 "ETH",
+                 one,
+                 opts(me, metadata: limit)
+               )
+
+      assert_receive {:request, "POST", _path, raw, _headers}, 5_000
+      assert Jason.decode!(raw)["metadata"] == limit
+    end
+
     test "a preview sends only {amount} — no currency, no idempotency_key" do
       # PreviewUnstakeRequest's body is `{amount}` alone
       # (docs/reference/coinbase/openapi/prime-spec.yaml:9083-9090). This used to send the
@@ -888,6 +929,40 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
 
       assert {:error, :missing_transaction_ids} =
                Prime.query_transaction_validators(@credentials, "pf-1", transaction_ids: [])
+    end
+
+    test "the validator query's paging fields are held to the spec, nothing sent" do
+      me = self()
+
+      for {extra, key, value} <- [
+            {%{"limit" => 0}, "limit", 0},
+            {%{"limit" => 1001}, "limit", 1001},
+            {%{"limit" => "5"}, "limit", "5"},
+            {%{"sort_direction" => "UP"}, "sort_direction", "UP"},
+            {%{"cursor" => 7}, "cursor", 7}
+          ] do
+        assert {:error, {:invalid_extra, ^key, ^value}} =
+                 Prime.query_transaction_validators(
+                   @credentials,
+                   "pf-1",
+                   opts(me, transaction_ids: ["t-1"], extra: extra)
+                 )
+      end
+
+      refute_receive {:request, _method, _path, _raw, _headers}, 500
+
+      assert {:ok, _result} =
+               Prime.query_transaction_validators(
+                 @credentials,
+                 "pf-1",
+                 opts(me,
+                   transaction_ids: ["t-1"],
+                   extra: %{"limit" => 1000, "sort_direction" => "ASC", "cursor" => "c"}
+                 )
+               )
+
+      assert_receive {:request, "POST", _path, raw, _headers}, 5_000
+      assert %{"limit" => 1000, "sort_direction" => "ASC"} = Jason.decode!(raw)
     end
 
     test "a transport failure stays an error, not a refusal" do

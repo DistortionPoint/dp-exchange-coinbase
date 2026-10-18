@@ -186,20 +186,40 @@ defmodule DpExchange.Coinbase.Prime do
   order: the portfolio id (`{:invalid_portfolio_id, v}`), `opts[:extra]` a map
   (`{:invalid_extra, v}`), `opts[:transaction_ids]` present and non-empty
   (`{:error, :missing_transaction_ids}`) and each id a non-empty string, at most 100
-  (`{:invalid_transaction_ids, ids}`). Exposed so `DpExchange.Coinbase.Fake` refuses exactly
+  (`{:invalid_transaction_ids, ids}`); `extra` members `cursor` (string), `limit` (1..1000) and
+  `sort_direction` (`"DESC"` / `"ASC"`) are checked when present
+  (`{:invalid_extra, key, value}`). Exposed so `DpExchange.Coinbase.Fake` refuses exactly
   as the real path does.
   """
   @spec validate_validators_query(term(), keyword()) :: :ok | {:error, term()}
   def validate_validators_query(portfolio_id, opts) do
     with :ok <- valid_portfolio(portfolio_id),
          :ok <- OptionKeys.check(:query_transaction_validators, opts),
-         :ok <- valid_extra(opts) do
+         :ok <- valid_extra(opts),
+         :ok <- valid_query_paging(extra_fields(opts)) do
       case Config.opt(opts, :transaction_ids, nil) do
         ids when is_list(ids) and ids != [] -> valid_transaction_ids(ids)
         _missing_or_empty -> {:error, :missing_transaction_ids}
       end
     end
   end
+
+  # The three paging fields the request documents, when `opts[:extra]` carries them:
+  # `cursor` a string, `limit` an int32 "Default is 100, maximum is 1000", `sort_direction`
+  # `DESC` or `ASC` (prime-spec.yaml, `ListTransactionValidatorsRequest`, `SortDirection`).
+  # Any other member of `extra` stays the caller's own, as documented.
+  defp valid_query_paging(extra) do
+    bad =
+      Enum.find(["cursor", "limit", "sort_direction"], fn key ->
+        Map.has_key?(extra, key) and not paging_value?(key, Map.fetch!(extra, key))
+      end)
+
+    if bad, do: {:error, {:invalid_extra, bad, Map.fetch!(extra, bad)}}, else: :ok
+  end
+
+  defp paging_value?("cursor", value), do: is_binary(value)
+  defp paging_value?("limit", value), do: is_integer(value) and value >= 1 and value <= 1000
+  defp paging_value?("sort_direction", value), do: value in ["DESC", "ASC"]
 
   # The spec's `transaction_ids` is an array of strings, "maximum of 100 transaction IDs
   # allowed per request" (prime-spec.yaml, `ListTransactionValidators`). A non-string element
@@ -237,7 +257,18 @@ defmodule DpExchange.Coinbase.Prime do
 
   An unconfirmed write is `{:error, {:write_unconfirmed, idempotency_key, reason}}`, as
   `stake_portfolio/5` documents: the key is the one actually sent, generated or the
-  caller's, so the caller can retry with it.
+  caller's, so the caller can reconcile with it.
+
+  **A repeated key FAILS at this path; it does not return the original.** The wallet-scoped
+  `StakingInitiateRequest` and `StakingUnstakeRequest` say "Subsequent requests using the same
+  key will fail" (prime-spec.yaml, the `idempotency_key` description on
+  `/wallets/{wid}/staking/initiate` and `.../unstake`), where the portfolio-scoped ones and
+  `claim_rewards/4` say they "will not create new transactions" / "return the original
+  response". So a wallet write whose answer was lost and which was re-sent comes back as a
+  `4xx` to the retry, which is `write_unconfirmed` here, never a refusal: do not read it as
+  "nothing was staked", look the transaction up with `staking_status/4` before trying again.
+  `WalletStakeInputs.amount` is documented "ETH only"; for other assets the venue's reading of
+  `inputs.amount` is unmeasured.
   """
   @spec stake_wallet(credentials(), String.t(), String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -599,12 +630,30 @@ defmodule DpExchange.Coinbase.Prime do
   # `opts[:metadata]` is the spec's `PortfolioStakingMetadata` / `WalletStakingMetadata`, an
   # object (`external_id`), on the portfolio- and wallet-scoped writes alike. Anything else is
   # refused here rather than sent for the venue to reject (or, as a string, to misread).
+  #
+  # Both metadata schemas define `external_id` and nothing else (prime-spec.yaml
+  # `PortfolioStakingMetadata`: up to 255 characters; `WalletStakingMetadata`: up to 255
+  # bytes), so only that member is accepted, as a string within 255 bytes (the stricter of
+  # the two). A member the spec does not describe is refused, not sent for the venue to drop.
   defp valid_metadata(opts) do
     case Keyword.get(opts, :metadata) do
       nil -> :ok
-      metadata when is_map(metadata) -> :ok
+      metadata when is_map(metadata) -> documented_metadata(metadata)
       other -> {:error, {:invalid_metadata, other}}
     end
+  end
+
+  defp documented_metadata(metadata) do
+    valid? =
+      Enum.all?(metadata, fn
+        {key, value} when key in [:external_id, "external_id"] ->
+          is_binary(value) and byte_size(value) <= 255
+
+        _undocumented ->
+          false
+      end)
+
+    if valid?, do: :ok, else: {:error, {:invalid_metadata, metadata}}
   end
 
   # `extra_fields/1` and `claim_rewards_body/1` spell every key with `to_string/1`, which
@@ -814,7 +863,10 @@ defmodule DpExchange.Coinbase.Prime do
 
   # Core retries a non-GET once by default. Both POST paths here are safe to repeat, so three
   # attempts are requested explicitly (a caller can still lower it): `post_write/4` carries an
-  # `idempotency_key` the venue answers a repeat of with the original response, and `post/4`
+  # `idempotency_key`, which the portfolio-scoped writes and `claim_rewards` answer a repeat of
+  # with the original response and the wallet-scoped stake/unstake answer with a failure
+  # (prime-spec.yaml says "will fail"); that failure is a 4xx to a retry, which `unwrap_write/3`
+  # reports as `write_unconfirmed`, so a repeat can never be read as a refusal. And `post/4`
   # only reads or previews (a validator query, an unstake preview). Every send re-signs.
   defp retried(opts), do: Keyword.update(opts, :retry_attempts, 3, &(&1 || 3))
 

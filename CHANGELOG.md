@@ -45,6 +45,16 @@ acceptable changelog line.
   instead of read as `:expired` / `:failed`. at-spec.yaml `TradeStatus` is UNSPECIFIED,
   CREATED, STARTED, COMPLETED and CANCELED only; the other two were mapped with no spec
   evidence.
+- `query_transaction_validators/3` checks the paging members of `opts[:extra]` it can name
+  from the spec: `cursor` a string, `limit` an integer 1..1000, `sort_direction` `"DESC"` or
+  `"ASC"`; otherwise `{:error, {:invalid_extra, key, value}}` and nothing is sent.
+- Prime staking `opts[:metadata]` is held to the spec: `PortfolioStakingMetadata` and
+  `WalletStakingMetadata` define `external_id` only (a string, at most 255 bytes), so a map
+  with any other member, or a non-string or longer `external_id`, is
+  `{:error, {:invalid_metadata, v}}` (it was any map). The docs now say a repeated
+  idempotency key FAILS on the wallet-scoped stake/unstake (the portfolio ones and
+  `claim_rewards` return the original); a re-sent wallet write was already
+  `write_unconfirmed`, never a refusal.
 
 ## [0.3.139] - 2026-10-18
 
