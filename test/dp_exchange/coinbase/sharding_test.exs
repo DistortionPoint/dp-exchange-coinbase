@@ -899,7 +899,8 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
           assert notice.severity == :warning
           assert notice.details.channel == "user"
-          assert notice.details.reason =~ "credentials_required"
+          assert notice.details.reason == :subscribe_failed
+          assert notice.details.message =~ "credentials_required"
         end)
 
       # Matched as a whole line, not by phrase. `capture_log/1` captures the WHOLE VM, and
@@ -945,7 +946,8 @@ defmodule DpExchange.Coinbase.ShardingTest do
 
           assert notice.severity == :warning
           assert notice.details.channel == "ticker"
-          assert notice.details.reason =~ "send_timeout"
+          assert notice.details.reason == :subscribe_failed
+          assert notice.details.message =~ "send_timeout"
         end)
 
       # Matched as a whole line, not by phrase. `capture_log/1` captures the WHOLE VM, and
@@ -1119,7 +1121,8 @@ defmodule DpExchange.Coinbase.ShardingTest do
           assert notice.details.channel == "level2"
           assert notice.details.removed_count == 1
           assert notice.details.added_count == 1
-          assert notice.details.reason =~ "send_timeout"
+          assert notice.details.reason == :unsubscribe_failed
+          assert notice.details.message =~ "send_timeout"
         end)
 
       # Matched as a whole line, not by phrase. `capture_log/1` captures the WHOLE VM, and

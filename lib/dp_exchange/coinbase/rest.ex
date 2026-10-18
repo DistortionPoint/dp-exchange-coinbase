@@ -530,7 +530,8 @@ defmodule DpExchange.Coinbase.Rest do
   With `opts[:uuid]` this reads the single account
   (`GET /accounts/{account_uuid}`); without, it pages the list as `get_balances/2` does.
   `opts[:limit]` is the venue's page size and must be an integer in `1..250`
-  (`validate_account_options/1`).
+  (`validate_account_options/1`); beside `:uuid` it is
+  `{:error, {:unsupported_option, :limit}}`, as `:portfolio` is.
   """
   @spec get_accounts(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -563,17 +564,30 @@ defmodule DpExchange.Coinbase.Rest do
   documented page size, "by default 49, max 250"). Errors: `{:invalid_id, :uuid, v}`,
   `{:invalid_limit, v}`. `:portfolio` is sent as `retail_portfolio_id` on the listing
   (`{:invalid_option, :portfolio, v}` when malformed); the single-account read has no such
-  parameter, so `:uuid` together with `:portfolio` is `{:unsupported_option, :portfolio}`.
+  parameter, so `:uuid` together with `:portfolio` is `{:unsupported_option, :portfolio}`; it
+  has no page size either, so `:uuid` together with `:limit` is
+  `{:unsupported_option, :limit}`.
   """
   @spec validate_account_options(term()) :: :ok | {:error, term()}
   def validate_account_options(opts) do
     with :ok <- OptionKeys.check(:get_accounts, opts),
          :ok <- validate_account_uuid(Keyword.get(opts, :uuid)),
          :ok <- balance_checks(opts) do
-      if Keyword.get(opts, :uuid) != nil and Keyword.get(opts, :portfolio) != nil,
-        do: {:error, {:unsupported_option, :portfolio}},
-        else: :ok
+      single_account_scope(opts)
     end
+  end
+
+  # `GET /accounts/{account_uuid}` takes neither `retail_portfolio_id` nor `limit`
+  # (at-spec.yaml `RetailBrokerageApi_GetAccount`): both belong to the listing. Accepting
+  # them beside `:uuid` and sending neither answered a different question than the one asked.
+  defp single_account_scope(opts) do
+    if Keyword.get(opts, :uuid) == nil, do: :ok, else: list_only_options(opts)
+  end
+
+  defp list_only_options(opts) do
+    Enum.find_value([:portfolio, :limit], :ok, fn key ->
+      if Keyword.get(opts, key) != nil, do: {:error, {:unsupported_option, key}}
+    end)
   end
 
   @doc """

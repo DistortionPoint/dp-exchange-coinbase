@@ -765,6 +765,63 @@ defmodule DpExchange.Coinbase.PrimeStakingTest do
       refute Map.has_key?(body["inputs"], "external_id")
     end
 
+    test "opts[:metadata] is a top-level member of both portfolio-scoped bodies too" do
+      # PortfolioStakingMetadata, prime-spec.yaml:7286 (initiate) and :7453 (unstake). The
+      # portfolio body used to drop it while the wallet body sent it.
+      me = self()
+      metadata = %{"external_id" => "ext-2"}
+      extra = opts(me, metadata: metadata)
+
+      assert {:ok, _result} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", Decimal.new("1"), extra)
+
+      assert_receive {:request, "POST", "/v1/portfolios/pf-1/staking/initiate", raw, _headers}
+      assert Jason.decode!(raw)["metadata"] == metadata
+
+      assert {:ok, _result} =
+               Prime.unstake_portfolio(@credentials, "pf-1", "ETH", Decimal.new("1"), extra)
+
+      assert_receive {:request, "POST", "/v1/portfolios/pf-1/staking/unstake", raw, _headers}
+      assert Jason.decode!(raw)["metadata"] == metadata
+    end
+
+    test "a portfolio body without metadata carries no metadata member" do
+      me = self()
+
+      assert {:ok, _result} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", Decimal.new("1"), opts(me))
+
+      assert_receive {:request, "POST", _path, raw, _headers}
+      refute Map.has_key?(Jason.decode!(raw), "metadata")
+    end
+
+    test "metadata that is not a map is refused on both scopes and by the Fake, nothing sent" do
+      me = self()
+      bad = opts(me, metadata: "ext-3")
+      one = Decimal.new("1")
+
+      assert {:error, {:invalid_metadata, "ext-3"}} =
+               Prime.stake_portfolio(@credentials, "pf-1", "ETH", one, bad)
+
+      assert {:error, {:invalid_metadata, "ext-3"}} =
+               Prime.unstake_portfolio(@credentials, "pf-1", "ETH", one, bad)
+
+      assert {:error, {:invalid_metadata, "ext-3"}} =
+               Prime.stake_wallet(@credentials, "pf-1", "w-9", "ETH", one, bad)
+
+      assert {:error, {:invalid_metadata, "ext-3"}} =
+               Prime.unstake_wallet(@credentials, "pf-1", "w-9", "ETH", one, bad)
+
+      assert {:error, {:invalid_metadata, "ext-3"}} =
+               Fake.stake("ETH", one,
+                 portfolio_id: "pf-1",
+                 credentials: @credentials,
+                 metadata: "ext-3"
+               )
+
+      refute_received {:request, _method, _path, _raw, _headers}
+    end
+
     test "a preview sends only {amount} — no currency, no idempotency_key" do
       # PreviewUnstakeRequest's body is `{amount}` alone
       # (docs/reference/coinbase/openapi/prime-spec.yaml:9083-9090). This used to send the

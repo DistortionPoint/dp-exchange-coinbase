@@ -3498,7 +3498,8 @@ defmodule DpExchange.Coinbase.Feed do
           channel: channel,
           removed_count: length(removed),
           added_count: length(added),
-          reason: quoted(reason)
+          reason: :unsubscribe_failed,
+          message: quoted(reason)
         }
       )
 
@@ -3618,7 +3619,12 @@ defmodule DpExchange.Coinbase.Feed do
       Notice.new(:coverage_change, :coinbase,
         severity: :warning,
         message: "#{channel} subscribe for #{length(symbols)} symbol(s) never took — #{outlook}",
-        details: %{channel: channel, symbol_count: length(symbols), reason: quoted(reason)}
+        details: %{
+          channel: channel,
+          symbol_count: length(symbols),
+          reason: :subscribe_failed,
+          message: quoted(reason)
+        }
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})
@@ -3642,7 +3648,8 @@ defmodule DpExchange.Coinbase.Feed do
           shard: index,
           channel: channel,
           symbol_count: length(symbols),
-          reason: quoted(reason)
+          reason: :shard_open_failed,
+          message: quoted(reason)
         }
       )
 
@@ -3794,7 +3801,8 @@ defmodule DpExchange.Coinbase.Feed do
           shard: index,
           channel: channel,
           symbol_count: length(symbols),
-          reason: text
+          reason: :shard_crashed,
+          message: text
         }
       )
 
@@ -4140,7 +4148,7 @@ defmodule DpExchange.Coinbase.Feed do
       message:
         "alias catalogue unavailable — delivering under the venue's own product id " <>
           "rather than the caller's requested symbol",
-      details: %{reason: quoted(reason)}
+      details: %{reason: :alias_catalogue_unavailable, message: quoted(reason)}
     )
   end
 

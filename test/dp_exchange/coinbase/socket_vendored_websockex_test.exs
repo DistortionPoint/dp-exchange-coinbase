@@ -78,7 +78,8 @@ defmodule DpExchange.Coinbase.SocketVendoredWebSockexTest do
     assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_down, details: details}},
                    10_000
 
-    assert details.reason =~ "invalid_close_code"
+    assert details.reason == :disconnected
+    assert details.message =~ "invalid_close_code"
     assert Process.alive?(socket_pid)
   end
 

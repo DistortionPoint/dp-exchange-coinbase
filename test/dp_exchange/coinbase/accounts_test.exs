@@ -274,6 +274,22 @@ defmodule DpExchange.Coinbase.AccountsTest do
       assert path =~ "/accounts/abc"
     end
 
+    test "a uuid beside limit: or portfolio: is refused and nothing is sent" do
+      # `GET /accounts/{account_uuid}` takes neither; accepting them and sending neither
+      # answered a different question than the one asked.
+      refusing = fn _conn -> raise "must not be sent" end
+
+      for {key, value} <- [limit: 10, portfolio: "pf-1"] do
+        opts = [uuid: "abc"] ++ [{key, value}]
+
+        assert {:error, {:unsupported_option, ^key}} =
+                 Rest.get_accounts(@credentials, opts ++ [plug: refusing, retry_attempts: 0])
+
+        assert {:error, {:unsupported_option, ^key}} =
+                 DpExchange.Coinbase.Fake.get_accounts(@credentials, opts)
+      end
+    end
+
     test "a single-account body whose account is not an object is unreadable, not [nil]" do
       for account <- [nil, "abc", [], 7] do
         assert {:error, :unexpected_response_shape} =

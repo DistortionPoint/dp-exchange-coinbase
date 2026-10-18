@@ -89,7 +89,7 @@ of two ways, and which one it is depends on what the endpoint gives it:
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.95`.
+`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.101`.
 
 ```elixir
 # before
@@ -832,6 +832,24 @@ as bounded text), once per lost link. A socket that already reported its own dro
 crashed is not reported a second time. A link gauge built on `:link, :up` / `:down` therefore
 no longer stays "up" after a shard crash.
 
+### Notice `details.reason` is a stable atom; the text is `details.message`
+
+`details.reason` on a notice is an atom, or a tuple led by an atom, never text; the bounded
+failure text, where there is one, is in `details.message`. The atoms this package raises
+beyond the ones named elsewhere in this file:
+
+- `:link_down`: `:disconnected` (the socket dropped and reconnects) and `:shard_crashed`
+  (a shard socket crashed; `details.shard`, `channel`, `symbol_count`).
+- `:coverage_change`: `:subscribe_failed`, `:unsubscribe_failed` and `:shard_open_failed`.
+- `:data_quality`: `:alias_catalogue_unavailable` (attribution degraded),
+  `:unsubscribed_channel`, `:undecodable` (a frame that is not JSON) and the existing
+  `:sequence_gap`, `:sequence_reset`, `:out_of_order`, `:unexpected_event`,
+  `:unexpected_frame` and the decoder tuples such as `{:invalid_decimal, :price, text}`.
+- `:refusal`: `:subscription_rejected`, with `details.symbols`.
+
+Telemetry `reason` stays bounded text. Before this version the first five carried the text in
+`details.reason`; match on the atom and read `details.message` for the text.
+
 ## Testing against this package
 
 Use `DpExchange.Coinbase.Fake`, selected per process through `DpExchange.Core.Config`. It
@@ -949,8 +967,11 @@ them.** Portfolio-scoped calls send a flat `{idempotency_key, currency_symbol, a
 `opts[:extra]` merges into that same top level. Wallet-scoped calls send `{idempotency_key,
 inputs: {amount, ...}}` — no `currency` field at all, because a wallet already names one
 asset on the venue's side — and `opts[:extra]` merges into `inputs`, not the top level.
-`opts[:metadata]` is sent as its own sibling key on a wallet-scoped call only; the
-portfolio-scoped body does not carry it. `opts[:extra]` fills in fields this package does not know; it **cannot replace**
+`opts[:metadata]` (the venue's `external_id` object) is sent as its own top-level key on
+both scopes, as the spec's portfolio and wallet requests each allow; a value that is not a
+map is `{:error, {:invalid_metadata, v}}`. Before this version the portfolio-scoped body
+dropped it, so the option did nothing there. `opts[:extra]` fills in fields this package
+does not know; it **cannot replace**
 `amount`, `currency_symbol`, `idempotency_key` or `transaction_ids`, the ones it validated.
 
 **What is refused before anything is signed.** `:portfolio_id` and `:wallet_id` are path
@@ -1257,7 +1278,9 @@ readable `order_id` refuses the whole `get_orders/2` list.
 
 `:limit` is the venue's **page size**, not a cap: the walk collects every page, so take what
 you want from the list. On `get_balances/2` and `get_accounts/2` it must be an integer in
-`1..250` (the venue's "max 250"); on orders and fills any positive integer.
+`1..250` (the venue's "max 250"); on orders and fills any positive integer. The
+single-account read (`get_accounts(uuid: _)`) has no page size, so `uuid:` together with
+`limit:` is `{:error, {:unsupported_option, :limit}}`, as it is for `portfolio:`.
 
 `get_orders/2` returned one page until 0.3.36. If you built your own cursor loop on top of
 it, it now returns the whole set and your loop will see a single page with nothing after it.

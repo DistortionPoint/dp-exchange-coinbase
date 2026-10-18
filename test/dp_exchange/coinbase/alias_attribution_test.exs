@@ -273,10 +273,12 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       Feed.subscribe(feed, ~w(XLM-USDC), to: self())
 
       assert_receive {:dp_exchange, :coinbase,
-                      %Notice{kind: :data_quality, details: %{reason: reason}} = notice},
+                      %Notice{kind: :data_quality, details: %{reason: reason, message: text}} =
+                        notice},
                      5_000
 
-      assert reason =~ "simulated_catalog_failure"
+      assert reason == :alias_catalogue_unavailable
+      assert text =~ "simulated_catalog_failure"
       assert notice.message =~ "alias catalogue unavailable"
 
       send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
@@ -469,10 +471,14 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
           # guarantees the permanent-failure branch has actually run before it is
           # asserted against.
           assert_receive {:dp_exchange, :coinbase,
-                          %Notice{kind: :data_quality, details: %{reason: reason}}},
+                          %Notice{
+                            kind: :data_quality,
+                            details: %{reason: reason, message: text}
+                          }},
                          5_000
 
-          assert reason =~ "boom"
+          assert reason == :alias_catalogue_unavailable
+          assert text =~ "boom"
         end)
 
       # Every one of these matches the ALIAS CATALOGUE line specifically, not the bare
@@ -555,10 +561,12 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       assert :ok = Feed.subscribe_notices(feed, to: self())
 
       assert_receive {:dp_exchange, :coinbase,
-                      %Notice{kind: :data_quality, details: %{reason: reason}} = notice},
+                      %Notice{kind: :data_quality, details: %{reason: reason, message: text}} =
+                        notice},
                      5_000
 
-      assert reason =~ "simulated_catalog_failure"
+      assert reason == :alias_catalogue_unavailable
+      assert text =~ "simulated_catalog_failure"
       assert notice.message =~ "alias catalogue unavailable"
     end
 

@@ -55,6 +55,8 @@ defmodule DpExchange.Coinbase.Prime do
   the first. And `opts[:extra]` fills in
   fields this module does not know; it cannot replace `amount`, `currency_symbol`,
   `idempotency_key` or `transaction_ids`, which are the ones it validated.
+  `opts[:metadata]` (the spec's `external_id` object) is sent on all four staking writes,
+  portfolio- and wallet-scoped; a value that is not a map is `{:error, {:invalid_metadata, v}}`.
 
   ## What was measured, and what was not
 
@@ -112,7 +114,8 @@ defmodule DpExchange.Coinbase.Prime do
          :ok <- validate_positional(asset, amount),
          :ok <- validate_stake_options(opts),
          :ok <- valid_key(opts),
-         :ok <- valid_extra(opts) do
+         :ok <- valid_extra(opts),
+         :ok <- valid_metadata(opts) do
       post_write(
         "/portfolios/#{portfolio_id}/staking/initiate",
         portfolio_stake_body(asset, amount, opts),
@@ -137,7 +140,8 @@ defmodule DpExchange.Coinbase.Prime do
          :ok <- validate_positional(asset, amount),
          :ok <- validate_stake_options(opts),
          :ok <- valid_key(opts),
-         :ok <- valid_extra(opts) do
+         :ok <- valid_extra(opts),
+         :ok <- valid_metadata(opts) do
       post_write(
         "/portfolios/#{portfolio_id}/staking/unstake",
         portfolio_stake_body(asset, amount, opts),
@@ -243,6 +247,7 @@ defmodule DpExchange.Coinbase.Prime do
          :ok <- validate_stake_options(opts),
          :ok <- valid_key(opts),
          :ok <- valid_extra(opts),
+         :ok <- valid_metadata(opts),
          :ok <- verify_wallet_asset(credentials, portfolio_id, wallet_id, asset, opts) do
       post_write(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/initiate",
@@ -276,6 +281,7 @@ defmodule DpExchange.Coinbase.Prime do
          :ok <- validate_stake_options(opts),
          :ok <- valid_key(opts),
          :ok <- valid_extra(opts),
+         :ok <- valid_metadata(opts),
          :ok <- verify_wallet_asset(credentials, portfolio_id, wallet_id, asset, opts) do
       post_write(
         "/portfolios/#{portfolio_id}/wallets/#{wallet_id}/staking/unstake",
@@ -479,16 +485,17 @@ defmodule DpExchange.Coinbase.Prime do
   The field checks a staking write (`stake/3` / `unstake/3`) runs after the scope, in the
   order the real path runs them: the positional arguments (`validate_positional/2`), then
   the options (`validate_stake_options/1`), `opts[:idempotency_key]` absent or a UUID
-  (`{:invalid_idempotency_key, v}`) and `opts[:extra]` absent or a map
-  (`{:invalid_extra, v}`). Exposed so `DpExchange.Coinbase.Fake` refuses exactly as the
-  real path does.
+  (`{:invalid_idempotency_key, v}`), `opts[:extra]` absent or a map
+  (`{:invalid_extra, v}`) and `opts[:metadata]` absent or a map (`{:invalid_metadata, v}`).
+  Exposed so `DpExchange.Coinbase.Fake` refuses exactly as the real path does.
   """
   @spec validate_write(term(), term(), keyword()) :: :ok | {:error, term()}
   def validate_write(asset, amount, opts) do
     with :ok <- validate_positional(asset, amount),
          :ok <- validate_stake_options(opts),
-         :ok <- valid_key(opts) do
-      valid_extra(opts)
+         :ok <- valid_key(opts),
+         :ok <- valid_extra(opts) do
+      valid_metadata(opts)
     end
   end
 
@@ -589,6 +596,17 @@ defmodule DpExchange.Coinbase.Prime do
 
   defp invalid_extra(value), do: {:error, {:invalid_extra, value}}
 
+  # `opts[:metadata]` is the spec's `PortfolioStakingMetadata` / `WalletStakingMetadata`, an
+  # object (`external_id`), on the portfolio- and wallet-scoped writes alike. Anything else is
+  # refused here rather than sent for the venue to reject (or, as a string, to misread).
+  defp valid_metadata(opts) do
+    case Keyword.get(opts, :metadata) do
+      nil -> :ok
+      metadata when is_map(metadata) -> :ok
+      other -> {:error, {:invalid_metadata, other}}
+    end
+  end
+
   # `extra_fields/1` and `claim_rewards_body/1` spell every key with `to_string/1`, which
   # raised `Protocol.UndefinedError` in the caller's process for a tuple or map key.
   defp nameable_keys?(map), do: Enum.all?(Map.keys(map), &(is_atom(&1) or is_binary(&1)))
@@ -678,12 +696,19 @@ defmodule DpExchange.Coinbase.Prime do
   # had just checked and the caller had just been told was the one sent. `extra` is for the
   # fields the venue documents and this module does not know; the key, the symbol and the
   # amount are not among them. See `extra_fields/1`.
+  #
+  # `opts[:metadata]` is a top-level member of both portfolio-scoped requests
+  # (`PortfolioStakingMetadata`, prime-spec.yaml:7286, :7453; `external_id`). It was dropped
+  # here while the wallet body sent it, so the same option did nothing on one scope.
   defp portfolio_stake_body(asset, amount, opts) do
-    Map.merge(extra_fields(opts), %{
+    opts
+    |> extra_fields()
+    |> Map.merge(%{
       "idempotency_key" => Keyword.get(opts, :idempotency_key) || IdempotencyKey.generate(),
       "currency_symbol" => String.upcase(asset),
       "amount" => Decimal.to_string(amount, :normal)
     })
+    |> put_present("metadata", Config.opt(opts, :metadata, nil))
   end
 
   # `WalletStakeInputs`/`WalletUnstakeInputs` carry `amount` (plus asset-specific fields like

@@ -111,8 +111,9 @@ defmodule DpExchange.Coinbase.Socket do
   notices through the one fan-out path that is never bounded.
 
   A frame that is not JSON at all raises a `:data_quality` notice whose `details.reason` is
-  the decoder's own message (the byte and its position), not the decoder's error struct, which
-  holds the entire frame and would copy it into every notice.
+  `:undecodable` and whose `details.message` is the decoder's own message (the byte and its
+  position), not the decoder's error struct, which holds the entire frame and would copy it
+  into every notice.
 
   ## `market_trades` — the trade tape, taker side, and no snapshot history
 
@@ -721,7 +722,12 @@ defmodule DpExchange.Coinbase.Socket do
     # A short reason such as `{:remote, :closed}` prints exactly as before.
     reason_text = inspect(reason, limit: 50, printable_limit: 1_024)
 
-    notify(state, Notice.new(:link_down, :coinbase, details: %{reason: reason_text}))
+    # `details.reason` is the stable atom; the bounded text is `details.message`.
+    notify(
+      state,
+      Notice.new(:link_down, :coinbase, details: %{reason: :disconnected, message: reason_text})
+    )
+
     report_link_down(state)
     Telemetry.link_down(:coinbase, reason_text)
 
@@ -966,7 +972,7 @@ defmodule DpExchange.Coinbase.Socket do
         state,
         Notice.new(:data_quality, :coinbase,
           message: "received an unsubscribed channel",
-          details: %{channel: channel}
+          details: %{reason: :unsubscribed_channel, channel: channel}
         )
       )
 
@@ -1727,13 +1733,21 @@ defmodule DpExchange.Coinbase.Socket do
         state,
         Notice.new(:data_quality, :coinbase,
           message: "dropped a #{channel} frame for #{subject}: #{inspect(reason)}",
-          details: Map.merge(extra, %{payload: subject, channel: channel, reason: reason})
+          details: Map.merge(extra, quality_details(subject, channel, reason))
         )
       )
 
       remember_fault(state, reported, fault)
     end
   end
+
+  # `details.reason` is an atom or a tuple led by an atom, never text. A binary reason (a
+  # decode error's message) becomes `:undecodable` and its text moves to `details.message`.
+  defp quality_details(subject, channel, reason) when is_binary(reason),
+    do: %{payload: subject, channel: channel, reason: :undecodable, message: reason}
+
+  defp quality_details(subject, channel, reason),
+    do: %{payload: subject, channel: channel, reason: reason}
 
   # At the cap the set starts over holding only the new fault. It used to stop remembering,
   # which meant a fault first seen past the cap was notified on EVERY frame that carried it

@@ -1242,7 +1242,8 @@ defmodule DpExchange.Coinbase.FeedTest do
       send(feed, {:EXIT, socket, reason})
 
       assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_down} = notice}, 5_000
-      assert byte_size(notice.details.reason) < 4_096
+      assert notice.details.reason == :shard_crashed
+      assert byte_size(notice.details.message) < 4_096
       assert byte_size(notice.message) < 4_096
     end
 

@@ -20,6 +20,33 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Depends on dp_exchange_core 0.3.103 (conformance groups 44, fake export parity, and 45, notice shapes).
+
+### Fixed
+
+- **BREAKING (notice shape): `Notice.details.reason` is an atom or atom-led tuple, never
+  text** (Core's notice conformance rules). The text moved to `details.message`:
+  `:link_down` from a socket drop is `:disconnected`, from a crashed shard `:shard_crashed`;
+  `:coverage_change` is `:subscribe_failed`, `:unsubscribe_failed` or `:shard_open_failed`;
+  the degraded-attribution `:data_quality` is `:alias_catalogue_unavailable`; an unsubscribed
+  channel notice gained `:unsubscribed_channel`; a frame that is not JSON is `:undecodable`
+  (was the decoder's text). Telemetry `reason` is unchanged.
+- **`opts[:metadata]` is now sent on the portfolio-scoped staking writes.** The spec gives
+  `PortfolioStakingInitiate` and `PortfolioStakingUnstake` a top-level `metadata`
+  (`external_id`) member (prime-spec.yaml:7286, :7453), the same option the wallet-scoped
+  body already sent; `Prime.stake_portfolio/5` and `unstake_portfolio/5` accepted it and sent
+  nothing. A `:metadata` that is not a map is now `{:error, {:invalid_metadata, v}}` on all
+  four staking writes, and the Fake refuses it identically.
+- **`get_accounts(uuid: _, limit: _)` is `{:error, {:unsupported_option, :limit}}`.**
+  `GET /accounts/{account_uuid}` has no page size; the key was validated and then sent
+  nowhere, while `portfolio:` beside `uuid:` was already refused. The Fake refuses identically.
+
+### Documentation
+
+- `usage-rules.md` stated the `dp_exchange_core` floor as `~> 0.3.95`; it is `~> 0.3.101`.
+  The staking `:metadata` paragraph and the `get_accounts` option notes now match the code,
+  and `OptionKeys`' moduledoc lists `get_alias_map` among the functions with no own keys.
+
 ## [0.3.137] - 2026-10-17
 
 ### Changed — BREAKING

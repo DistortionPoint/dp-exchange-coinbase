@@ -1353,6 +1353,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
 
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality} = notice}
       assert notice.details.channel == "status"
+      assert notice.details.reason == :unsubscribed_channel
     end
   end
 end

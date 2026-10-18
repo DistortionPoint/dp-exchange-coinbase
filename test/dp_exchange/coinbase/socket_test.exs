@@ -271,11 +271,12 @@ defmodule DpExchange.Coinbase.SocketTest do
                Socket.handle_disconnect(%{reason: {:remote, 1006, body}}, state())
 
       assert_received {:dp_exchange, :coinbase,
-                       %Notice{kind: :link_down, details: %{reason: reason}}}
+                       %Notice{kind: :link_down, details: %{reason: reason, message: text}}}
 
-      assert is_binary(reason)
-      assert byte_size(reason) < 2_048
-      assert reason =~ "remote"
+      assert reason == :disconnected
+      assert is_binary(text)
+      assert byte_size(text) < 2_048
+      assert text =~ "remote"
     end
 
     test "disconnecting also tells Feed WHICH link dropped, so coverage can narrow to it" do
@@ -686,8 +687,9 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert {:ok, _state} = Socket.handle_frame({:text, huge}, state())
 
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality} = notice}
-      assert is_binary(notice.details.reason)
-      assert notice.details.reason =~ "position 1"
+      assert notice.details.reason == :undecodable
+      assert is_binary(notice.details.message)
+      assert notice.details.message =~ "position 1"
       assert :erlang.external_size(notice) < 5_000
     end
 

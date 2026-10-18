@@ -32,7 +32,7 @@ defmodule DpExchange.Coinbase.OptionKeys do
   The map under `@keys` in this module is the source; this list mirrors it.
 
     * no own keys: `get_price`, `get_top_of_book`, `get_symbols`, `get_market_overview`,
-      `list_instruments`, the order calls `place_order`, `preview_order`, `replace_order`,
+      `list_instruments`, `get_alias_map`, the order calls `place_order`, `preview_order`, `replace_order`,
       `preview_replace`, `cancel_order` and `get_order`, `list_payment_methods`,
       `get_payment_method`, `get_roles`, `get_server_time`, `test_connection`,
       `market_status`, `rename_account`, `delete_portfolio`, `staking_status`,
@@ -41,7 +41,8 @@ defmodule DpExchange.Coinbase.OptionKeys do
     * `get_order_book`: `:depth`, `:aggregation_price_increment` (`:limit` is refused by name)
     * `get_trades`: `:limit`, `:since`, `:end`, `:include_broken`
     * `get_balances`: `:limit`, `:portfolio`
-    * `get_accounts`: `:uuid`, `:limit`, `:portfolio`
+    * `get_accounts`: `:uuid`, `:limit`, `:portfolio` (`:uuid` with either of the other two
+      is refused as `{:unsupported_option, key}`: the single-account read takes neither)
     * `get_fees`, `get_trade_volume`: `:product_type`, `:contract_expiry_type`,
       `:product_venue`
     * `get_orders`: `:status`, `:symbol`, `:limit`, `:portfolio`
