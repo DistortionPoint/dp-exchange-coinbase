@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.140] - 2026-10-18
+
 ### Changed (BREAKING)
 
 - The calls that are always sent exactly once no longer accept `:retry_attempts` or
