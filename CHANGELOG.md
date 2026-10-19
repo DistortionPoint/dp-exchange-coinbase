@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.141] - 2026-10-19
+
 ### Changed (BREAKING)
 
 - **`replace_order/4` and `preview_replace/4` answer the family tag for a change that is not a
