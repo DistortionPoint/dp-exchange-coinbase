@@ -1,6 +1,6 @@
 # Design Documentation
 
-Welcome to the design documentation for `dp_exchange_core`. This section is the collaborative workspace between the architect and Claude for iterative design, from initial concept through implementation planning. The conventions here are shared across the DpExchange package family and were adopted from `dp_crypto_management`.
+Welcome to the design documentation for `dp_exchange_coinbase`. This section is the collaborative workspace between the architect and Claude for iterative design, from initial concept through implementation planning. The conventions here are shared across the DpExchange package family and were adopted from `dp_crypto_management`.
 
 ## Design Workflow Process
 
@@ -75,8 +75,7 @@ docs/design/
 │   └── iteration-cycles.md             # Review and iteration process
 ├── ideas/                              # Non-blocking discoveries (idea docs)
 │   └── <topic>.md                      # No date prefix; deleted when work lands
-├── closed/                             # Historical archive — completed plans
-│   ├── README.md                       # Explains archive-only purpose
+├── closed/                             # Historical archive — completed plans (read-only)
 │   └── YYYY-MM-DD_topic-name.md        # Same filenames, preserved chronology
 │       + YYYY-MM-DD_topic-name/        # Matching code samples directory moves too
 └── [Active Design Documents]           # Open plans currently being worked on

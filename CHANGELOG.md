@@ -20,6 +20,41 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`preview_order/3` and `preview_replace/4` refuse a `200` that is not a preview.** The
+  venue's schemas require `errs` (order preview) and `errors` (edit preview) on the response. A
+  `200` object without that list (`{}`, another service's reply, or `null` in its place) came
+  back `{:ok, %{order_total: nil, ...}}`, a preview of nothing that reads as "the venue priced
+  my order". It is now `{:error, :unexpected_response_shape}`; an empty list is still a
+  preview, a non-empty one is still `{:refused, {:preview_rejected, errs}}` /
+  `{:refused, {:edit_preview_rejected, errors}}`.
+- **Dependency floor.** Audited every `Decimal`, `Jason`, `Req`, `:telemetry` and standard
+  library call in `lib/` and `test/` against decimal 2.0.0, jason 1.4.0, req 0.7.0 and Elixir
+  1.18. The only call missing at a floor was `Decimal.lte?/2` (decimal 2.2), already replaced
+  in `consistent_bar/4`; no other call is.
+
+### Documentation
+
+- `usage-rules.md`: new "The REST token is minted per attempt, for one method and path"
+  section (the JWT's `uri` claim is `METHOD host/path` without the query, is signed again for
+  every attempt, and a `401` is a one-attempt `{:refused, {:venue_error, 401, _}}`, with host
+  clock skew as the first thing to rule out). The refusal list names the two-element
+  `{:refused, {:venue_error, status}}` (a refusal with no text) and `{:refused, :not_found}`.
+  The missing-limiter answer is `{:error, {:exchange_error, :coinbase, "Rate limiter
+  unavailable"}}` (it was written as the bare string, untagged since transport failures kept
+  Core's tag). The Core floor is `~> 0.3.109`, not `0.3.101`. The preview shape refusal above is
+  listed.
+- `docs/design/README.md` names this package (it said `dp_exchange_core`) and no longer lists a
+  `closed/README.md` that does not exist; the code-samples template configures
+  `:dp_exchange_coinbase`.
+
+### Tests
+
+- `test/dp_exchange/coinbase/jwt_binding_test.exs` pins the JWT's `uri` claim for a GET (no
+  query string), POST, PUT and DELETE, a percent-encoded path segment, a fresh token per
+  attempt of a retried read, and a `401` answered after exactly one attempt.
+
 ## [0.3.141] - 2026-10-19
 
 ### Changed (BREAKING)

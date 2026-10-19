@@ -89,7 +89,7 @@ of two ways, and which one it is depends on what the endpoint gives it:
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.101`.
+`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.109`.
 
 ```elixir
 # before
@@ -148,8 +148,8 @@ children = [{DpExchange.Coinbase, credentials: my_credentials()}]
 
 The venue supervises a limiter configured from the ceilings it declares. That is not a
 convenience: `Core.HttpClient` fails closed when no limiter is reachable, so a venue
-package that expected someone else to start one answers `{:error, "Rate limiter
-unavailable"}` to everything.
+package that expected someone else to start one answers `{:error, {:exchange_error,
+:coinbase, "Rate limiter unavailable"}}` to everything.
 
 **Which of the two declared ceilings the limiter is configured from follows whether you
 passed `credentials:` above** — see "Credentials choose the endpoint" below. Pass none
@@ -329,6 +329,10 @@ If you have better numbers, that field is where to correct them.
   received the request and declined it, in its own words. Permanent **for the request as
   sent** — a caller whose key was rotated signs again with the new one, which is a
   different request rather than a retry of this one. The message is cut at 2,048 characters.
+  A refusal whose body carries no `message`, `error_details` or `error` text (an empty body, an
+  HTML page) is the two-element `{:refused, {:venue_error, status}}`.
+- `{:refused, :not_found}` — a `404` on an order, account, portfolio or conversion.
+- A `401` is never retried and never an `{:ok, _}`: see "The REST token" below.
 - `{:error, {:unsupported_timeframe, tf}}` — a width it does not serve. Your mistake, not
   a transient one.
 - `{:error, {:missing_credentials, :coinbase}}` — this call needs a credential and was not
@@ -352,6 +356,21 @@ flattened error string for `"404"`, which meant:
 Both are fixed; the status is now matched exactly, as the other four venue packages in
 this family already did. **If you were matching `{:error, message}` for authentication
 failures, they now arrive as `{:refused, {:venue_error, 401, _}}`.**
+
+## The REST token is minted per attempt, for one method and path
+
+Each REST request carries its own Ed25519 JWT, valid for two minutes. Its `uri` claim is
+`METHOD api.coinbase.com/api/v3/brokerage/<path>`: the verb and the path as sent, percent-encoded
+as sent, **without the query string**. A token is therefore never reused for another call, and
+never for the next attempt of the same one: `Core.HttpClient` signs again for every attempt of a
+retried read (and of a retried `place_order/3` / `close_position/3`), so the last retry is not
+carrying the first attempt's expired token.
+
+A `401` from the venue is a refusal, `{:refused, {:venue_error, 401, message}}`, answered after
+one attempt: this package does not retry it, because the same bytes cannot succeed. Two causes
+are worth ruling out before blaming the key: a host clock more than about two minutes from the
+venue's produces the same `401` for a good key, so compare `get_server_time/1` (public, unsigned)
+with your own clock. That cause is documentation-derived and has not been probed with a live key.
 
 ## Signing failures stop here, rather than being sent unsigned
 
@@ -1433,6 +1452,11 @@ twice** answers, because a duplicate is not something to merge or pick between:
 - `get_balances/2` — the same account row twice.
 - `get_symbols/1`, `get_market_overview/1`, `list_instruments/1`, `get_alias_map/1` — two
   catalogue rows that disagree about one product. The same row repeated is kept once.
+
+`preview_order/3` and `preview_replace/4` answer `{:error, :unexpected_response_shape}` for a
+`200` that does not carry the list the venue's schema requires (`errs` on an order preview,
+`errors` on an edit preview): `{}`, another object, or a `null` or non-list in its place. It is
+not a preview of nothing with every figure `nil`.
 
 A balance's `available_balance` or `hold` below zero is not stated (`nil`, and so the total is
 `nil`), and a market-overview `price`, `high_24h` or `low_24h` at or below zero, or a negative

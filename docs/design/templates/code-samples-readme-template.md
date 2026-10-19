@@ -226,7 +226,7 @@ Required configuration updates:
 
 ```elixir
 # In config/config.exs or appropriate environment file
-config :dp_exchange_core, FeatureName,
+config :dp_exchange_coinbase, FeatureName,
   setting_one: "value",
   setting_two: true
 ```

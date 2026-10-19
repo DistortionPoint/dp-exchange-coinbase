@@ -3563,12 +3563,16 @@ defmodule DpExchange.Coinbase.Rest do
   # have traded: every number in it parses and is positive, and the bar is still impossible.
   # Refused rather than carried, as a quote read from it would be a plausible wrong one.
   defp consistent_bar(open, high, low, close) do
-    inside? = fn price -> Decimal.lte?(low, price) and Decimal.lte?(price, high) end
+    inside? = fn price -> not_above?(low, price) and not_above?(price, high) end
 
-    if Decimal.lte?(low, high) and inside?.(open) and inside?.(close),
+    if not_above?(low, high) and inside?.(open) and inside?.(close),
       do: :ok,
       else: {:error, :unexpected_response_shape}
   end
+
+  # `Decimal.lte?/2` arrived in decimal 2.2; `mix.exs` admits 2.0, where it is undefined
+  # and the package fails to compile (the scheduled dependency-floor check caught it).
+  defp not_above?(a, b), do: Decimal.compare(a, b) != :gt
 
   # An undated bar cannot be placed in a series, and the local clock would place it wrongly
   # while looking right. Refuse instead.
@@ -5195,30 +5199,31 @@ defmodule DpExchange.Coinbase.Rest do
     {:refused, {:preview_rejected, errs}}
   end
 
-  # `errs` is the venue's list of reasons. Anything else that is present (a string, a map, a
-  # number) is not an empty list: it fell through to the success clause below and a preview
-  # the venue had put an error on read as a green light.
-  defp preview_result(%{"errs" => errs}) when not (is_nil(errs) or is_list(errs)),
-    do: {:error, :unexpected_response_shape}
-
-  defp preview_result(%{} = response) do
-    {:ok,
-     %{
-       order_total: decimal(response["order_total"]),
-       commission_total: decimal(response["commission_total"]),
-       base_size: decimal(response["base_size"]),
-       quote_size: decimal(response["quote_size"]),
-       best_bid: decimal(response["best_bid"]),
-       best_ask: decimal(response["best_ask"]),
-       slippage: decimal(response["slippage"]),
-       # The venue's own words, unedited. A warning summarised here is a warning a caller
-       # cannot act on.
-       warning: response["warning"],
-       preview_id: response["preview_id"]
-     }}
-  end
+  # `errs` is the venue's list of reasons, and `OrderPreviewResponse` requires it
+  # (at-spec.yaml:8660-8672). Anything else (a string, a map, a number, `null`) is not an empty
+  # list, and neither is its absence: a 200 object without it (`{}`, or some other service's
+  # reply) fell through to the success clause below as a preview of nothing, every field
+  # `nil`, which a caller reads as "the venue priced my order".
+  defp preview_result(%{"errs" => errs} = response) when is_list(errs),
+    do: {:ok, preview_fields(response)}
 
   defp preview_result(_other), do: {:error, :unexpected_response_shape}
+
+  defp preview_fields(response) do
+    %{
+      order_total: decimal(response["order_total"]),
+      commission_total: decimal(response["commission_total"]),
+      base_size: decimal(response["base_size"]),
+      quote_size: decimal(response["quote_size"]),
+      best_bid: decimal(response["best_bid"]),
+      best_ask: decimal(response["best_ask"]),
+      slippage: decimal(response["slippage"]),
+      # The venue's own words, unedited. A warning summarised here is a warning a caller
+      # cannot act on.
+      warning: response["warning"],
+      preview_id: response["preview_id"]
+    }
+  end
 
   @doc """
   Prices an amendment to a working order **without making it**.
@@ -5254,11 +5259,9 @@ defmodule DpExchange.Coinbase.Rest do
     {:refused, {:edit_preview_rejected, errors}}
   end
 
-  # As `preview_result/1`: a present `errors` that is not a list is unreadable, not empty.
-  defp edit_preview_result(%{"errors" => bad}) when not (is_nil(bad) or is_list(bad)),
-    do: {:error, :unexpected_response_shape}
-
-  defp edit_preview_result(%{} = response) do
+  # As `preview_result/1`: `PreviewEditOrderResponse` requires `errors` (at-spec.yaml:8916-8958),
+  # so one that is absent, `null` or not a list is unreadable, never an empty list.
+  defp edit_preview_result(%{"errors" => errors} = response) when is_list(errors) do
     {:ok,
      %{
        order_total: decimal(response["order_total"]),

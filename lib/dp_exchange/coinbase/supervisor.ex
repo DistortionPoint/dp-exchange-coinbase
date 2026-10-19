@@ -28,8 +28,8 @@ defmodule DpExchange.Coinbase.Supervisor do
   It also fixes a real usability trap. `Core.HttpClient` fails closed when no limiter is
   running, which is correct — an unmetered package is how a venue answers with HTTP 429
   while a budget panel reads comfortable. But it means a venue package that expected
-  someone else to start a limiter answers `{:error, "Rate limiter unavailable"}` to every
-  call, and the error does not say what is missing. Measured while writing this package's
+  someone else to start a limiter answers `{:error, {:exchange_error, :coinbase,
+  "Rate limiter unavailable"}}` to every call, and the error does not say what is missing. Measured while writing this package's
   tier-2 tests, which is exactly the tier that catches integration gaps a fake cannot.
 
   A consumer may still supply its own limiter through `Core.Config`'s
