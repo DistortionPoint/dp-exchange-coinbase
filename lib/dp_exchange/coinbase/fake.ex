@@ -260,7 +260,8 @@ defmodule DpExchange.Coinbase.Fake do
       # Coinbase does not serve, fails here.
       with :ok <- Rest.validate_timeframe(timeframe),
            :ok <- Rest.validate_symbol(symbol),
-           :ok <- Rest.validate_candle_request(timeframe, range, opts) do
+           :ok <- Rest.validate_candle_request(timeframe, range, opts),
+           :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
         if native(symbol) in @symbols do
           # A bar, not a quote. The fake returned `get_price/2`'s `Quote` here, which agreed
           # with the real package's own defect — a suite reproducing the bug it is meant to
@@ -320,8 +321,12 @@ defmodule DpExchange.Coinbase.Fake do
   # The real path's order: the options are refused locally, before any request, so they win
   # over an unlisted symbol (which only the venue can name). The check is `Rest`'s own.
   defp fake_order_book(symbol, opts) do
+    # A credential, when given, is signed with (`/product_book` rather than the public path),
+    # so a malformed one is refused here as the real read refuses it, ahead of the venue's
+    # word on the symbol. `subscribe/2` builds its snapshot through here with no options.
     with :ok <- Rest.validate_symbol(symbol),
-         :ok <- Rest.validate_book_options(opts) do
+         :ok <- Rest.validate_book_options(opts),
+         :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
       case Map.fetch(@price, native(symbol)) do
         {:ok, price} ->
           # `Rest` accepts any depth up to the spec's `int32`, and the venue answers with the
@@ -369,7 +374,8 @@ defmodule DpExchange.Coinbase.Fake do
       # venue refuses. `Rest.trades_options/1` is that check (the limit, then `:since` and
       # `:end`), called rather than re-stated.
       with :ok <- Rest.validate_symbol(symbol),
-           {:ok, limit, since, finish} <- Rest.trades_options(opts) do
+           {:ok, limit, since, finish} <- Rest.trades_options(opts),
+           :ok <- Rest.validate_optional_credentials(Keyword.get(opts, :credentials)) do
         trades_for(symbol, limit, since, finish)
       end
     end)

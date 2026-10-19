@@ -77,6 +77,78 @@ defmodule DpExchange.Coinbase.SocketBranchesTest do
 
       assert after_drop.short_sessions == 1
     end
+
+    test "reports no link_down: there was no link_up for it to close" do
+      never_connected = %{state() | connected_at: nil}
+
+      assert {:reconnect, _after_drop} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, never_connected)
+
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :link_down}}, 500
+      refute_receive {:dp_exchange, :coinbase, :link_down, _socket}, 500
+    end
+  end
+
+  describe "handle_disconnect/2 — a failed reconnect attempt is not another link going down" do
+    # `websockex` calls the callback for the drop of a live session and again for every
+    # reconnect attempt that fails. Each of the later calls used to send a `:link_down`
+    # notice, a telemetry event and a `Feed` link report with no `:link_up` between them.
+    setup do
+      marker = "marker_#{System.unique_integer([:positive])}"
+      test = self()
+      id = "link-down-pairing-#{marker}"
+
+      :telemetry.attach(
+        id,
+        [:dp_exchange, :link, :down],
+        fn _event, _measurements, metadata, _config ->
+          if is_binary(metadata[:reason]) and metadata[:reason] =~ marker,
+            do: send(test, {:telemetry_link_down, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(id) end)
+      %{reason: {:remote, marker}}
+    end
+
+    test "the session's drop reports once; the failed attempt after it reports nothing",
+         %{reason: reason} do
+      me = self()
+
+      assert {:reconnect, after_drop} =
+               Socket.handle_disconnect(%{reason: reason, attempt_number: 1}, state())
+
+      assert after_drop.connected_at == nil
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :link_down}}
+      assert_received {:dp_exchange, :coinbase, :link_down, ^me}
+      assert_received {:telemetry_link_down, _metadata}
+
+      # The reconnect fails: attempt 2, and `handle_connect/2` has not run since the drop.
+      assert {:reconnect, _still_down} =
+               Socket.handle_disconnect(%{reason: reason, attempt_number: 2}, after_drop)
+
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :link_down}}, 500
+      refute_receive {:dp_exchange, :coinbase, :link_down, _socket}, 500
+      refute_receive {:telemetry_link_down, _metadata}, 500
+    end
+
+    test "a reconnect that succeeds re-arms the pairing: the next drop reports again",
+         %{reason: reason} do
+      assert {:reconnect, down} =
+               Socket.handle_disconnect(%{reason: reason, attempt_number: 1}, state())
+
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :link_down}}
+
+      assert {:ok, up} = Socket.handle_connect(%{}, %{down | connected_once?: true})
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :link_up}}
+      refute_received {:dp_exchange, :coinbase, %Notice{kind: :link_down}}
+
+      assert {:reconnect, _down_again} =
+               Socket.handle_disconnect(%{reason: reason, attempt_number: 1}, up)
+
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :link_down}}
+    end
   end
 
   describe "frames whose fields are present but unreadable" do
@@ -156,6 +228,82 @@ defmodule DpExchange.Coinbase.SocketBranchesTest do
       refute_received {:dp_exchange, :coinbase, %Types.Trade{}}
       assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality} = notice}
       assert notice.details.reason == {:unparseable_venue_timestamp, "123"}
+    end
+  end
+
+  describe "an event of a subscribed channel that is none of the known shapes" do
+    # These were dropped without a word, so a venue changing the shape of its ticker or book
+    # events read as a quiet market. Reported once per shape and connection; the frame's other
+    # events are still decoded.
+    @event_time "2026-08-28T14:53:45.000000Z"
+
+    test "a ticker event with no tickers, or no object at all, is reported once per shape" do
+      ticker = %{"product_id" => "BTC-USD", "price" => "100.5"}
+      good = %{"type" => "update", "tickers" => [ticker]}
+      bad = %{"type" => "update", "tickers" => nil}
+
+      payload = %{
+        "channel" => "ticker",
+        "timestamp" => @event_time,
+        "events" => [bad, bad, "junk", "more junk", good]
+      }
+
+      assert {:ok, after_frame} = frame(payload, state())
+
+      assert_received {:dp_exchange, :coinbase, %Types.Quote{symbol: "BTC-USD"}}
+
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality} = shape}
+      assert shape.details.channel == :ticker
+      assert shape.details.reason == :unexpected_event
+      assert shape.details.payload == "type=update keys=tickers,type"
+      assert is_binary(shape.details.event)
+
+      assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality} = junk}
+      assert junk.details.payload == "not an object: string"
+
+      # The repeats were withheld, and a second frame with the same shapes says nothing more.
+      refute_received {:dp_exchange, :coinbase, %Notice{}}
+      assert {:ok, _again} = frame(payload, after_frame)
+      refute_receive {:dp_exchange, :coinbase, %Notice{kind: :data_quality}}, 500
+    end
+
+    test "a level2 event with no usable product or rows is reported; neighbours deliver" do
+      row = %{
+        "event_time" => @event_time,
+        "side" => "bid",
+        "price_level" => "100.00",
+        "new_quantity" => "2"
+      }
+
+      events = [
+        %{"type" => "update", "product_id" => "BTC-USD", "updates" => nil},
+        %{"type" => "update", "product_id" => 7, "updates" => []},
+        %{"type" => "mystery"},
+        42,
+        %{"type" => "snapshot", "product_id" => "ETH-USD", "updates" => [row]}
+      ]
+
+      payload = %{"channel" => "l2_data", "timestamp" => @event_time, "events" => events}
+
+      assert {:ok, _state} = frame(payload, state())
+
+      assert_received {:dp_exchange, :coinbase, %Types.OrderBook{symbol: "ETH-USD"}}
+
+      shapes =
+        for _notice <- 1..3 do
+          assert_received {:dp_exchange, :coinbase, %Notice{kind: :data_quality} = notice}
+          assert notice.details.channel == :level2
+          assert notice.details.reason == :unexpected_event
+          notice.details.payload
+        end
+
+      assert Enum.sort(shapes) == [
+               "not an object: number",
+               "type=mystery keys=type",
+               "type=update keys=product_id,type,updates"
+             ]
+
+      refute_received {:dp_exchange, :coinbase, %Notice{}}
     end
   end
 

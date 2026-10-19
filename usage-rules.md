@@ -548,11 +548,13 @@ venue renamed (see "Frames are tagged with the symbol you subscribed" above) is 
 asked for it, not as the venue tagged it, and one you no longer want is left out. The
 numbering is per connection, so any of those could be the one that lost a message. Treat it
 exactly as `:link_up` below: the book you built from deltas is no longer reliable, so
-re-read it. This package does it for you: on a gap it re-issues the `level2` subscription of
-the connection that gapped (at most one snapshot burst per five seconds per shard; a gap inside
-that interval is not dropped but answered by one trailing re-issue when the interval ends), and
-the venue answers a subscribe with a fresh snapshot. A frame whose sequence number is not above the last one
-applied is dropped, never applied. A `level2` snapshot level with size `0` is dropped; a delta
+re-read it. This package does it for you: on a gap it unsubscribes the `level2` symbols of
+the connection that gapped and subscribes them again, in that order (at most one snapshot
+burst per five seconds per shard; a gap inside that interval is not dropped but answered by
+one trailing refresh when the interval ends), and the venue answers the new subscription with
+a fresh snapshot. A plain re-subscribe would bring none: the venue replays nothing for a
+product the connection already carries. A frame whose sequence number is not above the last
+one applied is dropped, never applied. A `level2` snapshot level with size `0` is dropped; a delta
 keeps its zero, which means "remove this price".
 
 **A `:data_quality` fault is reported once per connection, not once per frame.** The same
@@ -839,7 +841,9 @@ failure text, where there is one, is in `details.message`. The atoms this packag
 beyond the ones named elsewhere in this file:
 
 - `:link_down`: `:disconnected` (the socket dropped and reconnects) and `:shard_crashed`
-  (a shard socket crashed; `details.shard`, `channel`, `symbol_count`).
+  (a shard socket crashed; `details.shard`, `channel`, `symbol_count`). **A `:link_down` is
+  sent once per outage and closed by the next `:link_up`:** the reconnect attempts that then
+  fail, and a crash of a socket whose link was already down, send no further `:link_down`.
 - `:coverage_change`: `:subscribe_failed`, `:unsubscribe_failed` and `:shard_open_failed`.
 - `:data_quality`: `:alias_catalogue_unavailable` (attribution degraded),
   `:unsubscribed_channel`, `:undecodable` (a frame that is not JSON) and the existing

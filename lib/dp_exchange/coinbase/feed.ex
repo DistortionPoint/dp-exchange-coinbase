@@ -736,8 +736,16 @@ defmodule DpExchange.Coinbase.Feed do
 
   `Socket` reports a `:sequence_gap` for the connection that lost a message (the venue
   numbers messages per connection), and the book a consumer built from that shard's deltas is
-  no longer reliable. This coordinator re-issues the `level2` subscribe of that one shard,
-  and the venue answers with a fresh snapshot. At most one such re-issue goes out per shard
+  no longer reliable. This coordinator unsubscribes that one shard's `level2` symbols and
+  subscribes them again, in that order on the same connection, and the venue answers the new
+  subscription with a fresh snapshot. **A plain re-subscribe would not do:** the venue
+  replays no snapshot for a product the session already carries (measured by
+  DpCryptoManagement, 2026-09-07: the same 30 products re-sent fourteen times returned
+  `books=30` once and `books=0` every time after; see
+  `docs/reference/coinbase/level2-session-limit.md`), so the re-issue this used to send left
+  the unreliable book unrepaired until the next reconnect. A failed unsubscribe is stranded
+  and repaired on the next resubscribe tick, which releases then re-subscribes the shard.
+  At most one such re-issue goes out per shard
   per `@gap_resubscribe_min_ms` (5s), so a venue that keeps dropping messages is not answered
   with a snapshot burst per gap. **A gap inside the interval is deferred, not dropped**: one
   trailing re-issue per shard is scheduled for when the interval ends
@@ -1880,8 +1888,10 @@ defmodule DpExchange.Coinbase.Feed do
     # sibling packages.
     Process.flag(:trap_exit, true)
 
+    # Validated like the other delays: a value `Process.send_after/3` cannot take fails the
+    # start with the same `ArgumentError`, instead of crashing from the timer call.
     resubscribe_interval_ms =
-      Keyword.get(opts, :resubscribe_interval_ms) || @default_resubscribe_interval_ms
+      delay_opt!(opts, :resubscribe_interval_ms, @default_resubscribe_interval_ms)
 
     # See the moduledoc's "`level2_pairs_per_socket` — a supervision option" section.
     # `Keyword.get/2 || default` is the same nil-vs-absent-safe shape
@@ -2292,9 +2302,10 @@ defmodule DpExchange.Coinbase.Feed do
   end
 
   # A `level2` connection detected a gap in the venue's sequence (MD9): the books built from
-  # its deltas are no longer reliable. The shard is re-issued through the same
-  # `:resubscribe_shard` step a reconnect uses, and the venue answers a subscribe with a
-  # fresh snapshot for each symbol. Only a `level2` shard is acted on (a `ticker` or
+  # its deltas are no longer reliable. The shard is repaired with the `:refresh_shard` step,
+  # an unsubscribe then a subscribe of its symbols, because the venue answers only a NEW
+  # subscription with a snapshot and replays nothing for a product the session still carries
+  # (see `issue_gap_resubscribe/3`). Only a `level2` shard is acted on (a `ticker` or
   # `market_trades` gap leaves no book to repair), and at most once per
   # `@gap_resubscribe_min_ms` per shard: a venue that keeps dropping messages must not be
   # answered with a snapshot burst per gap, which is itself load on the same connection. The
@@ -2533,6 +2544,20 @@ defmodule DpExchange.Coinbase.Feed do
     end
   end
 
+  # A `level2` gap's repair: see `issue_gap_resubscribe/3` for why a plain re-subscribe is not
+  # one. Like `:resubscribe_shard`, nothing in the message is trusted when it fires: the
+  # shard's membership is read from `state` now, and a shard that is gone, or now holds
+  # another socket, is skipped.
+  def handle_info({:refresh_shard, key, socket}, state) do
+    case Map.get(state.shards, key) do
+      %{socket: ^socket, symbols: [_first | _rest] = symbols} ->
+        {:noreply, refresh_shard(state, key, socket, symbols)}
+
+      _gone_replaced_or_empty ->
+        {:noreply, state}
+    end
+  end
+
   # The other half of `init/1`'s `Process.flag(:trap_exit, true)`. Every shard's socket
   # is a linked child of THIS process (see `get_socket/1` — `Socket.start_link/1` is
   # always called from inside a `Feed` callback), so an abnormal socket exit arrives
@@ -2661,20 +2686,60 @@ defmodule DpExchange.Coinbase.Feed do
     end
   end
 
+  # **A gap is answered by releasing the shard's symbols and asking for them again, not by
+  # asking again.** The venue replays no snapshot for a product the session already carries:
+  # DpCryptoManagement re-sent the same 30 products fourteen times on one socket and got
+  # `books=30` the first time and `books=0` every time after
+  # (docs/reference/coinbase/level2-session-limit.md, probe 1). The `:resubscribe_shard`
+  # re-issue this used to send was therefore ignored by the venue, and the book the gap made
+  # unreliable stayed so until the next reconnect. Probe 3 of the same document shows an
+  # unsubscribe followed by a subscribe on one socket DOES bring a fresh snapshot each time,
+  # so that pair is what `:refresh_shard` sends, unsubscribe first (see `refresh_shard/4`).
   defp issue_gap_resubscribe(state, key, socket) do
-    %{symbols: symbols} = Map.fetch!(state.shards, key)
-    pending = Map.get(state.pending_unsubscribes, key, [])
-
-    send(
-      self(),
-      {:resubscribe_shard, key, socket, "level2", pending, symbols, state.credentials}
-    )
+    send(self(), {:refresh_shard, key, socket})
 
     %{
       state
       | gap_resubscribed_at:
           Map.put(state.gap_resubscribed_at, key, System.monotonic_time(:millisecond))
     }
+  end
+
+  # The shard's symbols are unsubscribed, and only once that frame has gone out are they
+  # subscribed again, on the same connection: the order the session-limit probes rely on (the
+  # release precedes the request, so the shard never holds more than its own count). Anything
+  # already stranded for the shard is released in the same frame.
+  #
+  # A failed unsubscribe is not retried here: it is stranded (`strand_unsubscribe/7`), which
+  # is exactly the state `handle_info(:resubscribe, _)` repairs on its next tick by releasing
+  # then re-subscribing the whole shard, the refresh this was after. A deferred retry of the
+  # reconcile message would cut the release to symbols no longer wanted (`current_reconcile/5`)
+  # and so quietly turn the refresh back into a plain subscribe.
+  defp refresh_shard(state, key, socket, symbols) do
+    if sendable?(state, socket) do
+      release = Enum.uniq(Map.get(state.pending_unsubscribes, key, []) ++ symbols)
+
+      case unsubscribe_step(socket, "level2", release) do
+        :ok ->
+          {:noreply, state} =
+            attempt_channel_subscribe(socket, "level2", symbols, state.credentials, 1, state)
+
+          clear_pending_unsubscribe(state, key, release)
+
+        {:error, reason} ->
+          strand_unsubscribe(
+            state,
+            key,
+            "level2",
+            release,
+            symbols,
+            reason,
+            "it will be picked back up on the next unconditional resubscribe cycle"
+          )
+      end
+    else
+      state
+    end
   end
 
   # **A symbol that cannot be sent is refused before it reaches shared state.** This feed is
@@ -3295,6 +3360,17 @@ defmodule DpExchange.Coinbase.Feed do
 
     Enum.each(closed, &Process.exit(&1, :shutdown))
 
+    # **A retired link is closed on the metrics channel, and only there.** The socket is
+    # stopped by its parent, so it runs no `handle_disconnect/2` and never reports its own
+    # `:link_down`; a consumer tracking open links by `[:dp_exchange, :link, :up]` and `:down`
+    # would see this one up forever. A socket already in `down_links` reported its drop, so it
+    # is not closed twice. No `Core.Notice` follows: a `:link_down` notice means the route to
+    # the venue was lost, a condition to act on, and a shard retired because its symbols were
+    # unsubscribed is the consumer's own request, not an outage.
+    closed
+    |> Enum.reject(&MapSet.member?(state.down_links, &1))
+    |> Enum.each(fn _socket -> Telemetry.link_down(:coinbase, :retired) end)
+
     # A retired shard's gap bookkeeping goes with it, as `shard_crashes` does. Both maps are
     # keyed by shard and were never pruned, so a universe that shrank kept an entry per index
     # it ever had, and a trailing re-issue timer armed for a shard that is gone still ran its
@@ -3683,8 +3759,9 @@ defmodule DpExchange.Coinbase.Feed do
     # here, once per lost link. A socket already in `down_links` reported its own drop (its
     # `:link_down` precedes the `:EXIT` in this mailbox, signals from one process being
     # ordered) and its telemetry went with it, so it is not emitted twice.
-    unless MapSet.member?(state.down_links, socket),
-      do: Telemetry.link_down(:coinbase, quoted(reason))
+    already_down? = MapSet.member?(state.down_links, socket)
+
+    unless already_down?, do: Telemetry.link_down(:coinbase, quoted(reason))
 
     state = %{
       state
@@ -3694,7 +3771,19 @@ defmodule DpExchange.Coinbase.Feed do
         down_links: MapSet.delete(state.down_links, socket)
     }
 
-    notify_shard_crashed(state, channel, index, symbols, reason)
+    # **The notice follows the same rule as the metric: a `:link_down` closes a `:link_up`.** A
+    # socket already in `down_links` reported its own `:link_down` notice (and no `:link_up`
+    # has followed), so a second one for the crash would be a down with no up between, the
+    # shape the notice contract forbids. The crash is logged instead; the new socket's first
+    # connect sends the `:link_up` that closes the one outstanding `:link_down`.
+    if already_down? do
+      Logger.warning(
+        "[Coinbase Feed] #{channel} shard #{index} (#{length(symbols)} symbol(s)) crashed " <>
+          "(#{quoted(reason)}) while its link was already down — reopening"
+      )
+    else
+      notify_shard_crashed(state, channel, index, symbols, reason)
+    end
 
     now_ms = System.monotonic_time(:millisecond)
     {delay, crashes} = crash_reopen_delay(state.shard_crashes, key, now_ms)

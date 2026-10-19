@@ -317,6 +317,13 @@ defmodule DpExchange.Coinbase.FeedTest do
 
       send(feed, {:dp_exchange, :coinbase, :sequence_gap, book_socket})
 
+      # The venue replays no snapshot for a product the session already carries, so the repair
+      # is a release then a request, in that order on the one connection.
+      assert_receive {:frame, :book, %{"type" => "unsubscribe", "channel" => "level2"} = freed},
+                     5_000
+
+      assert Enum.sort(freed["product_ids"]) == ["BTC-USD", "ETH-USD"]
+
       assert_receive {:frame, :book, %{"type" => "subscribe", "channel" => "level2"} = frame},
                      5_000
 
@@ -335,8 +342,64 @@ defmodule DpExchange.Coinbase.FeedTest do
       assert [{"level2", 0}] = Map.keys(state.gap_resubscribe_due)
 
       send(feed, {:gap_resubscribe_due, {"level2", 0}})
+      assert_receive {:frame, :book, %{"type" => "unsubscribe", "channel" => "level2"}}, 5_000
       assert_receive {:frame, :book, %{"type" => "subscribe", "channel" => "level2"}}, 5_000
       assert :sys.get_state(feed).gap_resubscribe_due == %{}
+    end
+
+    test "a failed release on a gap is stranded, not retried as a plain subscribe" do
+      # A deferred retry of the reconcile would cut the release to symbols no longer wanted
+      # and turn the refresh back into the plain re-subscribe the venue ignores. The release
+      # is stranded instead, so the next resubscribe tick releases then re-requests the shard.
+      {feed, socket} = start_with_socket()
+
+      :sys.replace_state(feed, fn state ->
+        %{state | shards: %{{"level2", 0} => %{socket: socket, symbols: ["BTC-USD"]}}}
+      end)
+
+      send(feed, {:refresh_shard, {"level2", 0}, socket})
+
+      state = :sys.get_state(feed)
+      assert state.pending_unsubscribes == %{{"level2", 0} => ["BTC-USD"]}
+      assert state.shards[{"level2", 0}].symbols == ["BTC-USD"]
+    end
+
+    test "a refresh for a shard that is gone, replaced or empty sends nothing" do
+      book_socket = recording_socket(:book)
+      other_socket = recording_socket(:other)
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | shards: %{
+              {"level2", 0} => %{socket: book_socket, symbols: ["BTC-USD"]},
+              {"level2", 1} => %{socket: other_socket, symbols: []}
+            }
+        }
+      end)
+
+      send(feed, {:refresh_shard, {"level2", 0}, other_socket})
+      send(feed, {:refresh_shard, {"level2", 1}, other_socket})
+      send(feed, {:refresh_shard, {"level2", 9}, book_socket})
+
+      _settled = :sys.get_state(feed)
+      refute_receive {:frame, _tag, _frame}, 500
+    end
+
+    test "a refresh for a shard whose link is down waits for the reconnect to re-issue it" do
+      book_socket = recording_socket(:book)
+      feed = start_feed()
+
+      :sys.replace_state(feed, fn state ->
+        %{state | shards: %{{"level2", 0} => %{socket: book_socket, symbols: ["BTC-USD"]}}}
+      end)
+
+      send(feed, {:dp_exchange, :coinbase, :link_down, book_socket})
+      send(feed, {:refresh_shard, {"level2", 0}, book_socket})
+
+      _settled = :sys.get_state(feed)
+      refute_receive {:frame, :book, _frame}, 500
     end
 
     test "a deferred gap re-issue for a shard that is gone does nothing" do

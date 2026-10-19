@@ -8,7 +8,7 @@ defmodule DpExchange.Coinbase.FeedDelayOptsTest do
   # `handle_info`, on every alias fetch; it now fails the start, as `shard_spacing_ms` does.
 
   @options ~w(subscribe_retry_delay_ms alias_map_retry_delay_ms alias_map_fetch_timeout_ms
-              alias_map_refresh_ms)a
+              alias_map_refresh_ms resubscribe_interval_ms)a
 
   defp feed_opts(extra) do
     base = [

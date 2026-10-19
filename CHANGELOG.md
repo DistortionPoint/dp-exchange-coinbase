@@ -20,6 +20,60 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `level2` sequence gap now actually repairs the book (tick AM).** The repair re-sent the
+  shard's subscribe on the belief that the venue answers a subscribe with a full snapshot.
+  By DpCryptoManagement's probe 1 (`docs/reference/coinbase/level2-session-limit.md`: the same
+  30 products re-sent fourteen times returned `books=30`, then `books=0` every time) the venue
+  replays nothing for a product the session already carries, so the book the gap had made
+  unreliable stayed so until the next reconnect, while the notice said it was being
+  re-issued. The gap now unsubscribes the shard's symbols and subscribes them again, in that
+  order on the same connection (probe 3's pattern, and the order that keeps the shard inside
+  its own symbol count). A failed unsubscribe is stranded and repaired by the next resubscribe
+  tick, which releases then re-subscribes the shard. A reconnect, which is a new session, still
+  re-issues with a plain subscribe. Not measured against the live venue by this repo.
+- **`:link_down` closes a `:link_up`, once (tick AM).** `websockex` calls `handle_disconnect/2`
+  for the drop of a live session and again for every reconnect attempt that then fails; each
+  call sent a `:link_down` notice, a `[:dp_exchange, :link, :down]` event and a `Feed` link
+  report with no `:link_up` between them, one per backoff turn for the whole outage. Only the
+  drop of a session that ran is reported now (`link_reconnect_attempt` still reports every
+  attempt). And a shard socket that crashes while its link is already down no longer sends a
+  second `:link_down` notice (it was already withheld from telemetry); it is logged.
+- **An unusable `ticker` or `level2` event is reported, not dropped in silence (tick AM).** An
+  event with no `tickers` list, no usable `product_id` or `updates`, an unknown `type`, or that
+  is not an object at all produced no notice, so a venue changing the shape of those events
+  read as a quiet market (`market_trades` already reported it). It is a `:data_quality` notice
+  with `details.reason: :unexpected_event`, `details.channel` `:ticker` or `:level2`,
+  `details.payload` the event's shape (type and key names, never values) and `details.event`
+  the bounded event, once per shape and connection. The frame's other events still decode.
+- **`Fake.get_order_book/2`, `get_trades/2` and `get_historical_prices/4` refuse a credential the
+  real read refuses (tick AM).** Each real read signs when given `opts[:credentials]` and
+  answers `{:error, {:missing_credentials | :invalid_credentials, :coinbase}}` for one that
+  cannot sign, after its local option checks and ahead of the venue's word on the symbol. The
+  fake ignored the option, so a consumer's test with a mistyped key passed against it and was
+  refused in production (`get_price/2` and the catalogue reads already agreed).
+
+- **A retired shard's link is closed on the metrics channel (tick AM).** A shard socket stopped
+  because its symbols were unsubscribed runs no `handle_disconnect/2`, so its
+  `[:dp_exchange, :link, :up]` was never closed and a consumer tracking open links saw it up
+  forever. Retiring it now emits `[:dp_exchange, :link, :down]` with reason `":retired"` (not
+  when the socket had already reported its drop). No `:link_down` notice is sent: that kind
+  means the route was lost, and a retire is the consumer's own request.
+- **`resubscribe_interval_ms` is validated at start like the other delays (tick AM).** A value
+  that is not a non-negative integer is an `ArgumentError` from `Feed.start_link/1`
+  (`"resubscribe_interval_ms must be a non-negative integer, got: ..."`); `nil` still takes the
+  default.
+
+### Documentation
+
+- `docs/reference/coinbase/level2-session-limit.md` records what probes 1 and 3 imply for gap
+  repair, and what is not known about a `level2` subscription's life against its JWT's
+  two-minute expiry: the token is built per frame sent (first subscribe, retries, the
+  60-second re-issue, reconnects, gap refresh), never cached, but whether the venue enforces
+  expiry on a live subscription is neither documented nor probed (tier 3). `usage-rules.md`
+  states the gap repair and the once-per-outage `:link_down`.
+
 ## [0.3.140] - 2026-10-18
 
 ### Changed (BREAKING)

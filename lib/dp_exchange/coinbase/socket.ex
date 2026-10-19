@@ -722,14 +722,26 @@ defmodule DpExchange.Coinbase.Socket do
     # A short reason such as `{:remote, :closed}` prints exactly as before.
     reason_text = inspect(reason, limit: 50, printable_limit: 1_024)
 
-    # `details.reason` is the stable atom; the bounded text is `details.message`.
-    notify(
-      state,
-      Notice.new(:link_down, :coinbase, details: %{reason: :disconnected, message: reason_text})
-    )
+    # **`:link_down` closes a `:link_up`, and only a `:link_up`.** `websockex` calls this
+    # callback once for the drop of a live session AND once more for every reconnect attempt
+    # that then fails (`attempt_number` 2, 3, ...). Those later calls have no session behind
+    # them: `handle_connect/2` has not run since the last drop, so `:connected_at` is `nil`. They
+    # used to send a second, third, ... `:link_down` notice, `Telemetry.link_down/2` and
+    # `Feed` link report with no `:link_up` in between, one per backoff turn for the whole
+    # outage, which breaks the pairing the notice contract states (a consumer counting downs
+    # against ups saw N outages for one). Only the drop of a session that ran is reported;
+    # the backoff below is unaffected, and `Telemetry.link_reconnect_attempt/3` still reports
+    # every attempt.
+    if link_was_up?(state) do
+      # `details.reason` is the stable atom; the bounded text is `details.message`.
+      notify(
+        state,
+        Notice.new(:link_down, :coinbase, details: %{reason: :disconnected, message: reason_text})
+      )
 
-    report_link_down(state)
-    Telemetry.link_down(:coinbase, reason_text)
+      report_link_down(state)
+      Telemetry.link_down(:coinbase, reason_text)
+    end
 
     # `attempt_number` comes from `websockex` itself. It is a documented key of the
     # `connection_status_map` this function already pattern-matches on
@@ -820,6 +832,10 @@ defmodule DpExchange.Coinbase.Socket do
       delay -> :ok
     end
   end
+
+  # A session ran since the last drop: `handle_connect/2` set `:connected_at` and no
+  # `handle_disconnect/2` has cleared it. A state without the key is one no session ran on.
+  defp link_was_up?(state), do: is_integer(Map.get(state, :connected_at))
 
   # Connected, and for at least `@stable_session_ms`. A state with no `:connected_at` (no
   # session ran since the last drop) is not stable: with nothing to measure the age from,
@@ -1256,7 +1272,43 @@ defmodule DpExchange.Coinbase.Socket do
     deliver_delta(state, symbol, rows)
   end
 
-  defp decode_book_event(_other, state), do: state
+  # An event of a `subscribed` data channel that is none of the shapes above (no `product_id`,
+  # an `updates` that is not a list, an unknown `type`, not an object at all) used to be
+  # dropped without a word, so a venue changing the shape of its book events read as a quiet
+  # market. It is reported once per shape and connection, as an unreadable `market_trades`
+  # event already was; the frame's other events are still decoded.
+  defp decode_book_event(other, state), do: report_unusable_event(state, :level2, other)
+
+  # The subject is the event's SHAPE (its type and key names), never its values: a venue that
+  # keeps sending the malformed event is one fault, reported once, however many products or
+  # prices it carries (`report_quality/5` remembers `{channel, subject, kind}`). The bounded
+  # event itself rides in `details.event`.
+  defp report_unusable_event(state, channel, event) do
+    extra = %{event: brief(event)}
+    report_quality(state, channel, event_shape(event), :unexpected_event, extra)
+  end
+
+  defp event_shape(event) when is_map(event) do
+    keys = event |> Map.keys() |> Enum.filter(&is_binary/1) |> Enum.sort() |> Enum.join(",")
+
+    type =
+      case Map.get(event, "type") do
+        text when is_binary(text) -> brief(text)
+        other -> kind_name(other)
+      end
+
+    brief("type=" <> type <> " keys=" <> keys)
+  end
+
+  defp event_shape(other), do: "not an object: " <> kind_name(other)
+
+  defp kind_name(nil), do: "absent"
+  defp kind_name(value) when is_binary(value), do: "string"
+  defp kind_name(value) when is_list(value), do: "list"
+  defp kind_name(value) when is_number(value), do: "number"
+  defp kind_name(value) when is_boolean(value), do: "boolean"
+  defp kind_name(value) when is_map(value), do: "object"
+  defp kind_name(_other), do: "other"
 
   # The ticker twin of `decode_book_event/2` above, and total in the same way.
   #
@@ -1271,7 +1323,10 @@ defmodule DpExchange.Coinbase.Socket do
   defp decode_ticker_event(%{"tickers" => tickers}, state, timestamp) when is_list(tickers),
     do: Enum.reduce(tickers, state, &deliver_ticker(&1, &2, timestamp))
 
-  defp decode_ticker_event(_unusable, state, _timestamp), do: state
+  # Reported, not dropped quietly: see `decode_book_event/2`'s last clause. A `tickers` that is
+  # `null`, a missing one, or an event that is not an object is the venue changing a shape.
+  defp decode_ticker_event(unusable, state, _timestamp),
+    do: report_unusable_event(state, :ticker, unusable)
 
   # Bids/asks are sorted ONCE here, decoding this one frame's own rows — not maintained
   # or re-sorted against anything held across frames, which is the work this module no
@@ -1611,8 +1666,9 @@ defmodule DpExchange.Coinbase.Socket do
         })
 
         # MD9: a delta stream that detects a gap asks for a fresh snapshot. `Feed` owns the
-        # shard's subscription, so it is told which connection gapped and re-issues the
-        # level2 subscribe for it; the venue answers a subscribe with a full snapshot.
+        # shard's subscription, so it is told which connection gapped and releases then
+        # re-requests the shard's level2 symbols; the venue answers a NEW subscription with a
+        # full snapshot and replays nothing for a product the session already carries.
         report_sequence_gap(state)
 
         dispatch(decoded, %{state | last_seq: seq, stale_run: nil})

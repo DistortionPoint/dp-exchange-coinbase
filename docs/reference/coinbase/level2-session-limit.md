@@ -253,3 +253,38 @@ between attempts and so no prior socket to contaminate a later one. The defect i
 to a harness that opens and tears down a fresh socket per attempt in a loop — exactly the
 single-oversized probe's own shape, and exactly the shape a future consumer probing this
 venue with `Socket` directly is likely to reach for again.
+
+## What probes 1 and 3 mean for repairing a book after a sequence gap
+
+Probe 1 (a repeated subscribe replays no snapshot: `books=30`, then `books=0` fourteen
+times) and probe 3 (unsubscribe then subscribe delivers a fresh snapshot every time) say
+which request brings a snapshot and which does not. **Only a subscription the session does
+not already hold is answered with one.** `Feed` used to answer a `:sequence_gap` on a
+`level2` connection by re-sending the shard's subscribe, on the belief that "the venue
+answers a subscribe with a full snapshot". By probe 1 the venue ignored that repeat, so the
+book the gap had made unreliable stayed so until the connection next dropped. It now sends
+the shard's unsubscribe and then its subscribe on the same connection (`:refresh_shard`), the
+order probe 3 measured and the order that keeps the shard inside its own symbol count. The
+consequence is attributed, not measured by this repo: probe 1 and probe 3 were run by
+DpCryptoManagement (issue #22), and nobody has yet observed a gap repair against the live
+venue.
+
+## The JWT on a `level2` subscribe, and what is not known about its lifetime
+
+A `level2` subscribe carries a JWT when this package holds credentials ("Optional here;
+recommended for connection reliability", `at-async.json`). The token is built inside
+`Socket.subscription_frame/3` every time a frame is sent, never cached or carried in a
+retry's closure: the first subscribe of a shard, each of its retries
+(`@subscribe_retry_delay_ms`), the 60-second re-issue, the re-issue after a reconnect and
+the gap refresh all sign a new one with a two-minute `exp` (`jwt-auth.md`).
+
+**Not documented, and not probed:** whether the venue ends or degrades a `level2`
+subscription when the JWT it was made with expires, rather than checking the token only when
+the subscribe arrives. The AsyncAPI schema says nothing either way. Nothing here assumes the
+second reading except one place: the re-issue interval. `next_resubscribe_delay/1` lengthens
+the 60-second default past 120 seconds once a feed has more than 116 shards at the default
+one-second spacing (`(shards - 1) * 1_000 + 5_000`), at which point a shard is re-subscribed
+(so re-signed) less often than a token lives. If a venue were found to
+enforce expiry on a live subscription, that is the bound to revisit. Measuring it needs an
+authenticated session held open for more than two minutes, which is tier 3 and a
+consumer's to run.
