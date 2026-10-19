@@ -329,25 +329,18 @@ defmodule DpExchange.Coinbase.OrderInputHardeningTest do
   end
 
   describe "replace_order/4 and preview_replace/4" do
-    test "a nil price or size is not 'given'" do
-      for changes <- [
-            %{price: nil, quantity: Decimal.new("1")},
-            %{price: Decimal.new("1"), quantity: nil}
+    test "a present nil price or size is invalid, not 'no change'" do
+      for {changes, expected} <- [
+            {%{price: nil, quantity: Decimal.new("1")}, {:invalid_price, nil}},
+            {%{price: Decimal.new("1"), quantity: nil}, {:invalid_quantity, nil}},
+            {%{price: nil, quantity: nil}, {:invalid_quantity, nil}}
           ] do
-        assert {:error, :missing_required_edit_field} =
+        assert {:error, expected} ==
                  Rest.replace_order(@credentials, "abc", changes, opts(never_sent()))
 
-        assert {:error, :missing_required_edit_field} =
+        assert {:error, expected} ==
                  Rest.preview_replace(@credentials, "abc", changes, opts(never_sent()))
       end
-
-      assert {:error, :no_order_changes} =
-               Rest.replace_order(
-                 @credentials,
-                 "abc",
-                 %{price: nil, quantity: nil},
-                 opts(never_sent())
-               )
     end
 
     test "an amount that is not a finite positive number is refused" do

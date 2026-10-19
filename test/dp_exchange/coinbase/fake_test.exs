@@ -444,12 +444,17 @@ defmodule DpExchange.Coinbase.FakeTest do
     end
 
     test "preview_replace refuses an edit the venue refuses" do
-      assert {:error, {:unsupported_order_edit, [:side]}} =
+      assert {:error, {:unsupported_order_field, :side}} =
                Fake.preview_replace(@credentials, "abc", %{side: :sell})
     end
 
-    test "preview_replace refuses price alone — EditOrderRequest requires size too" do
-      assert {:error, :missing_required_edit_field} =
+    test "preview_replace prices price alone against the order's own size" do
+      assert {:ok, preview} =
+               Fake.preview_replace(@credentials, "fake-order-1", %{price: Decimal.new("41000")})
+
+      assert Decimal.equal?(preview.base_size, Decimal.new("0.5"))
+
+      assert {:refused, :not_found} =
                Fake.preview_replace(@credentials, "abc", %{price: Decimal.new("41000")})
     end
   end

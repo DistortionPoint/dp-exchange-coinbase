@@ -932,33 +932,114 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       # price would leave it holding one it did not ask for.
       exploding = fn _conn -> raise "must not call the venue for an unsupported edit" end
 
-      assert {:error, {:unsupported_order_edit, [:side]}} =
+      assert {:error, {:unsupported_order_field, :side}} =
                Rest.replace_order(@credentials, "abc-123", %{side: :sell}, plug: exploding)
+
+      # The first unread key, whatever else is wrong with the map.
+      assert {:error, {:unsupported_order_field, :side}} =
+               Rest.replace_order(@credentials, "abc-123", %{side: :sell, price: "x"},
+                 plug: exploding
+               )
+    end
+
+    test "a present price or quantity is judged as place_order judges it, nil included" do
+      exploding = fn _conn -> raise "must not call the venue for an invalid change" end
+
+      for {changes, expected} <- [
+            {%{price: nil}, {:invalid_price, nil}},
+            {%{quantity: nil}, {:invalid_quantity, nil}},
+            {%{price: "cheap"}, {:invalid_price, "cheap"}},
+            {%{price: 1.5}, {:invalid_price, 1.5}},
+            {%{quantity: "0"}, {:invalid_quantity, "0"}}
+          ] do
+        assert {:error, expected} ==
+                 Rest.replace_order(@credentials, "abc-123", changes, plug: exploding)
+      end
     end
 
     test "an edit that changes nothing is an error" do
       exploding = fn _conn -> raise "must not call the venue with no changes" end
 
-      assert {:error, :no_order_changes} =
+      assert {:error, {:invalid_order_request, %{}}} =
                Rest.replace_order(@credentials, "abc-123", %{}, plug: exploding)
     end
 
-    test "price alone, or size alone, is refused locally rather than sent half-built" do
+    test "price alone, or size alone, reads the order and sends the unchanged field beside it" do
       # `EditOrderRequest` requires order_id, price AND size, all three
-      # (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852). This used to send whichever
-      # one the caller supplied and drop the other with `put_unless_nil/3` — a body shape the
-      # venue does not document and this package never measured the venue's handling of.
-      exploding = fn _conn -> raise "must not send a half-built edit" end
+      # (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852), and `Core.Venue.replace_order/4`
+      # does not require a change to name both, so the other is taken from the order.
+      me = self()
 
-      assert {:error, :missing_required_edit_field} =
+      order = %{
+        "order_id" => "abc-123",
+        "status" => "OPEN",
+        "order_configuration" => %{
+          "limit_limit_gtc" => %{"base_size" => "0.75", "limit_price" => "40000"}
+        }
+      }
+
+      plug = fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:request, conn.method, conn.request_path, raw})
+
+        body =
+          if conn.request_path =~ "/orders/edit",
+            do: %{"success" => true},
+            else: %{"order" => order}
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:ok, _order} =
                Rest.replace_order(@credentials, "abc-123", %{price: Decimal.new("41000")},
-                 plug: exploding
+                 plug: plug
                )
 
-      assert {:error, :missing_required_edit_field} =
+      assert_receive {:request, "GET", "/api/v3/brokerage/orders/historical/abc-123", _}, 5_000
+      assert_receive {:request, "POST", "/api/v3/brokerage/orders/edit", raw}, 5_000
+
+      assert Jason.decode!(raw) == %{
+               "order_id" => "abc-123",
+               "price" => "41000",
+               "size" => "0.75"
+             }
+
+      assert {:ok, _order} =
                Rest.replace_order(@credentials, "abc-123", %{quantity: Decimal.new("0.5")},
-                 plug: exploding
+                 plug: plug
                )
+
+      assert_receive {:request, "POST", "/api/v3/brokerage/orders/edit", raw}, 5_000
+      assert Jason.decode!(raw) == %{"order_id" => "abc-123", "price" => "40000", "size" => "0.5"}
+    end
+
+    test "a field the order does not state is unavailable, and nothing is sent" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "order" => %{
+              "order_id" => "abc-123",
+              "order_configuration" => %{"market_market_ioc" => %{"quote_size" => "10"}}
+            }
+          })
+        )
+      end
+
+      assert {:error, {:order_field_unavailable, :quantity}} =
+               Rest.replace_order(@credentials, "abc-123", %{price: Decimal.new("41000")},
+                 plug: plug
+               )
+
+      refute_receive {:path, "/api/v3/brokerage/orders/edit"}, 500
     end
 
     test "the edit body carries both price and size, as strings" do

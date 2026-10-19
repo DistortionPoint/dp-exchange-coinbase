@@ -20,6 +20,29 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **`replace_order/4` and `preview_replace/4` answer the family tag for a change that is not a
+  change (Core conformance group 50).** A non-map was `{:error, {:invalid_order_changes, v}}`
+  and an empty map (or one whose `:price` and `:quantity` are both `nil`) was
+  `{:error, :no_order_changes}`; both are now `{:error, {:invalid_order_request, v}}`, `v`
+  the value as given (`%{}`, `nil`, `"price"`, `[price: "1"]`). Real path and `Fake` alike.
+- **The rest of `Core.Venue.replace_order/4`'s change-map rules are conformed (same two calls).**
+  The first key other than `:price` and `:quantity` is `{:error, {:unsupported_order_field,
+  key}}` (was `{:unsupported_order_edit, keys}`, the whole list). Each field present is judged
+  by `place_order/3`'s rule and tag, and a present `nil` is `{:invalid_price, nil}` /
+  `{:invalid_quantity, nil}` rather than "not given". **A change may name only one field**
+  (`:missing_required_edit_field` is gone): `EditOrderRequest` requires `price` and `size`, so
+  the unchanged one is read from the order with `get_order/3` and sent beside the new one. The
+  read and the edit are two requests, so an order that fills or is cancelled between them is
+  edited with a stale value (the venue's refusal is the backstop); a field the order does not
+  state (a market or quote-sized order has no limit price) is
+  `{:error, {:order_field_unavailable, field}}`, and a failed read is returned as it came with
+  nothing sent. The `Fake` keeps the order's own field and refuses an unknown id for a partial
+  change as `{:refused, :not_found}`.
+- `preview_order/3` already answers a request `place_order/3` refuses with the identical tuple
+  (both run `Rest.order_plan/2`); a test now pins all five of Core's `order_request_cases/1`.
+
 ### Fixed
 
 - **A `level2` sequence gap now actually repairs the book (tick AM).** The repair re-sent the

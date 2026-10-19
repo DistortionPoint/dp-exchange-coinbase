@@ -455,7 +455,7 @@ defmodule DpExchange.CoinbaseTest do
     end
 
     test "editing anything else is refused, matching the venue's edit surface" do
-      assert {:error, {:unsupported_order_edit, [:time_in_force]}} =
+      assert {:error, {:unsupported_order_field, :time_in_force}} =
                Fake.replace_order(@fake_credentials, "fake-order-1", %{time_in_force: :ioc})
     end
   end
@@ -777,7 +777,7 @@ defmodule DpExchange.CoinbaseTest do
     end
 
     test "replace_order refuses an unsupported edit through the facade" do
-      assert {:error, {:unsupported_order_edit, [:side]}} =
+      assert {:error, {:unsupported_order_field, :side}} =
                Coinbase.replace_order(@creds, "abc", %{side: :sell}, [])
     end
   end

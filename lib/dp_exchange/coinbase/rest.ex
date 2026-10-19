@@ -2404,14 +2404,18 @@ defmodule DpExchange.Coinbase.Rest do
   defp valid_fill_time(other, bound), do: {:error, {:invalid_time, bound, other}}
 
   @doc """
-  The local checks `replace_order/4` and `preview_replace/4` run on `changes`: only `:price`
-  and `:quantity`, and both, each a finite positive number (`{:invalid_price, v}` /
-  `{:invalid_quantity, v}`; a float is refused).
+  The local checks `replace_order/4` and `preview_replace/4` run on `changes`, in
+  `Core.Venue.replace_order/4`'s order: a non-map or empty map is
+  `{:invalid_order_request, v}`; the first key other than `:price` and `:quantity` is
+  `{:unsupported_order_field, key}`; then each field present is a finite positive number
+  (`{:invalid_quantity, v}` / `{:invalid_price, v}`; a float or a present `nil` is refused). A
+  field left out is not required: the unchanged one is read from the order when the edit is
+  sent.
   """
   @spec validate_order_edit(term()) :: :ok | {:error, term()}
   def validate_order_edit(changes) do
     with :ok <- editable_changes(changes),
-         {:ok, _amounts} <- normalise_amounts([:price, :quantity], changes) do
+         {:ok, _amounts} <- normalise_edit_amounts(changes) do
       :ok
     end
   end
@@ -2423,7 +2427,7 @@ defmodule DpExchange.Coinbase.Rest do
   """
   @spec validate_order_edit(term(), term()) :: :ok | {:error, term()}
   def validate_order_edit(order_id, changes) do
-    with :ok <- edit_order_id(order_id), do: validate_order_edit(changes)
+    with :ok <- validate_order_id(order_id), do: validate_order_edit(changes)
   end
 
   @doc """
@@ -5236,8 +5240,9 @@ defmodule DpExchange.Coinbase.Rest do
   @spec preview_replace(map(), String.t(), term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_replace(credentials, order_id, changes, opts) do
-    with {:ok, body} <- edit_body(order_id, changes),
-         :ok <- OptionKeys.check(:preview_replace, opts) do
+    with :ok <- validate_order_edit(order_id, changes),
+         :ok <- OptionKeys.check(:preview_replace, opts),
+         {:ok, body} <- edit_body(credentials, order_id, changes, opts) do
       case post_json("/orders/edit_preview", body, credentials, opts) do
         {:ok, %{body: response}} -> edit_preview_result(response)
         {:error, reason} -> classify(reason)
@@ -5384,23 +5389,23 @@ defmodule DpExchange.Coinbase.Rest do
   which no order is live, and on a moving market that window is where the fill a caller
   wanted goes to someone else.
 
-  Coinbase accepts `price` and `size` only. **Anything else in the request is refused rather
-  than dropped** — a caller trying to change the side or the time-in-force is describing a
-  different order, and silently editing only the price would leave it holding one it did not
-  ask for.
+  Coinbase accepts `price` and `quantity` (sent as `size`) only. A non-map or empty change is
+  `{:error, {:invalid_order_request, v}}`, and **the first other key is refused rather than
+  dropped** as `{:error, {:unsupported_order_field, key}}` — a caller trying to change the
+  side or the time-in-force is describing a different order. Each field present is judged as
+  `place_order/3` judges it (`{:invalid_price, v}`, `{:invalid_quantity, v}`; a present `nil`
+  is invalid, not "no change").
 
-  **Both `price` and `size` must be given, even to change only one.**
-  `EditOrderRequest` declares `order_id`, `price` *and* `size` all required
-  (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852) — there is no documented meaning
-  for the venue reusing the order's current value when one is absent, so this package does
-  not assume one. It used to send whichever of the two the caller supplied and omit the
-  other with `put_unless_nil/3`, which produced a request the schema does not describe; what
-  the venue actually does with a `size`-less edit was never measured and is not this
-  package's to guess. The alternative — reading the order first via `get_order/3` to fill in
-  the unchanged field — was rejected: the read and the edit are two round trips, and an order
-  that partially fills or is cancelled in between makes the "unchanged" value stale by the
-  time it is replayed as part of a request that claims to be unchanged. Refusing locally is
-  the fail-closed answer; `preview_replace/4` refuses the identical way.
+  **A change may name only one of `price` and `quantity`**, as `Core.Venue.replace_order/4`
+  requires. `EditOrderRequest` declares `order_id`, `price` *and* `size` all required
+  (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852) and the venue's reading of a
+  body without one is unmeasured, so the unchanged field is read from the order with
+  `get_order/3` and sent beside the new one. The read and the edit are two round trips: an
+  order that partially fills or is cancelled in between has a stale "unchanged" value, and
+  the venue's refusal of the edit is the backstop. A field the order does not state (a
+  market or quote-sized order has no limit price) is
+  `{:error, {:order_field_unavailable, field}}`; a failed read is returned as it came, with
+  nothing sent. `preview_replace/4` does the same.
 
   A `200` carrying `success: false` is a refusal, as everywhere else on this venue.
 
@@ -5418,9 +5423,10 @@ defmodule DpExchange.Coinbase.Rest do
   @spec replace_order(map(), String.t(), term(), keyword()) ::
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
   def replace_order(credentials, order_id, changes, opts) do
-    with {:ok, body} <- edit_body(order_id, changes),
+    with :ok <- validate_order_edit(order_id, changes),
          :ok <- OptionKeys.check(:replace_order, opts),
-         :ok <- validate_credentials(credentials) do
+         :ok <- validate_credentials(credentials),
+         {:ok, body} <- edit_body(credentials, order_id, changes, opts) do
       case post_once("/orders/edit", body, credentials, opts) do
         {:ok, %{body: response}} -> edit_result(response, order_id, credentials, opts)
         {:error, reason} -> write_error(reason, nil, nil)
@@ -5430,12 +5436,19 @@ defmodule DpExchange.Coinbase.Rest do
 
   @editable [:price, :quantity]
 
-  # The `/orders/edit` and `/orders/edit_preview` body, or the local refusal. The order id is
-  # checked here too: `nil` would send `"order_id": null` for an edit that names nothing.
-  defp edit_body(order_id, changes) do
-    with :ok <- edit_order_id(order_id),
-         :ok <- editable_changes(changes),
-         {:ok, amounts} <- normalise_amounts(@editable, changes) do
+  # The `/orders/edit` and `/orders/edit_preview` body. `EditOrderRequest` requires `order_id`,
+  # `price` AND `size` (at-spec.yaml:6809-6852), while `Core.Venue.replace_order/4` makes a
+  # change map partial by nature: a field it leaves out is not required, that is what makes it
+  # a change. The two are reconciled by READING the order and taking the unchanged field from
+  # it, never by sending a body the schema does not describe or guessing a value. The read and
+  # the edit are two requests, so an order that fills or is cancelled between them is edited
+  # with a stale unchanged field; the venue's own refusal is the backstop. A field the order
+  # does not state (a quote-sized or market order has no limit price) is
+  # `{:order_field_unavailable, field}`, and a failed read is returned as it came: nothing has
+  # been sent to change the order.
+  defp edit_body(credentials, order_id, changes, opts) do
+    with {:ok, amounts} <- normalise_edit_amounts(changes),
+         {:ok, amounts} <- complete_edit(amounts, credentials, order_id, opts) do
       {:ok,
        %{
          "order_id" => order_id,
@@ -5445,7 +5458,42 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  defp edit_order_id(order_id), do: validate_order_id(order_id)
+  defp complete_edit(amounts, credentials, order_id, opts) do
+    case @editable -- Map.keys(amounts) do
+      [] ->
+        {:ok, amounts}
+
+      missing ->
+        with {:ok, %Types.Order{} = order} <- get_order(credentials, order_id, opts) do
+          fill_from_order(amounts, order, missing)
+        end
+    end
+  end
+
+  defp fill_from_order(amounts, order, missing) do
+    Enum.reduce_while(missing, {:ok, amounts}, fn field, {:ok, acc} ->
+      case Map.get(order, field) do
+        %Decimal{} = value -> {:cont, {:ok, Map.put(acc, field, value)}}
+        _unstated -> {:halt, {:error, {:order_field_unavailable, field}}}
+      end
+    end)
+  end
+
+  # Each field present is judged by `place_order/3`'s rule for it and its tag, in
+  # `place_order/3`'s order (quantity, then price). A present `nil` is not "no change":
+  # `%{price: nil}` is `{:invalid_price, nil}`.
+  defp normalise_edit_amounts(changes) do
+    [:quantity, :price]
+    |> Enum.filter(&Map.has_key?(changes, &1))
+    |> Enum.reduce_while({:ok, %{}}, fn field, {:ok, acc} ->
+      value = Map.fetch!(changes, field)
+
+      case order_amount(value) do
+        %Decimal{} = amount -> {:cont, {:ok, Map.put(acc, field, amount)}}
+        nil -> {:halt, {:error, amount_error(field, value)}}
+      end
+    end)
+  end
 
   @doc """
   The order-id check `get_order/3`, `cancel_order/3` and `replace_order/4` run first, before
@@ -5461,33 +5509,19 @@ defmodule DpExchange.Coinbase.Rest do
 
   # `Map.keys/1` raised `BadMapError` for `nil` or a keyword list, in the caller's process.
   defp editable_changes(changes) when not is_map(changes),
-    do: {:error, {:invalid_order_changes, changes}}
+    do: {:error, {:invalid_order_request, changes}}
+
+  # A change that changes nothing is not a replace: the family tag (Core group 50), the value
+  # as given. Then the FIRST key the edit does not read, `place_order/3`'s tag for an unread
+  # request key. (These were `:no_order_changes`, `{:invalid_order_changes, v}` and
+  # `{:unsupported_order_edit, keys}`.)
+  defp editable_changes(changes) when map_size(changes) == 0,
+    do: {:error, {:invalid_order_request, changes}}
 
   defp editable_changes(changes) do
-    case Map.keys(changes) -- @editable do
-      [] -> editable_present(changes)
-      unsupported -> {:error, {:unsupported_order_edit, unsupported}}
-    end
-  end
-
-  # `EditOrderRequest` requires both `price` and `size` on every edit
-  # (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852). This used to accept either one
-  # alone and omit the other from the body — a shape the schema does not describe and this
-  # package never measured the venue's handling of. Refusing locally when only one is given is
-  # the fail-closed choice over guessing at the omitted field's meaning or reading the other
-  # value back from `get_order/3`, which would still be racing the order's live state.
-  #
-  # "Given" means non-nil. `Map.has_key?/2` counted `price: nil` as given, and
-  # `wire_number(nil)` then sent `"price": ""` for the venue to reject on a field it might
-  # not name.
-  defp editable_present(changes) do
-    has_price = Map.get(changes, :price) != nil
-    has_quantity = Map.get(changes, :quantity) != nil
-
-    cond do
-      has_price and has_quantity -> :ok
-      has_price or has_quantity -> {:error, :missing_required_edit_field}
-      true -> {:error, :no_order_changes}
+    case Enum.find(Map.keys(changes), &(&1 not in @editable)) do
+      nil -> :ok
+      key -> {:error, {:unsupported_order_field, key}}
     end
   end
 

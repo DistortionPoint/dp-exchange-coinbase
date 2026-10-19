@@ -34,10 +34,10 @@ defmodule DpExchange.Coinbase.DefaultArityTest do
       assert {:error, {:invalid_order_request, :bad}} = Coinbase.place_order(@credentials, :bad)
       assert {:error, {:invalid_order_request, :bad}} = Coinbase.preview_order(@credentials, :bad)
 
-      assert {:error, {:unsupported_order_edit, [:side]}} =
+      assert {:error, {:unsupported_order_field, :side}} =
                Coinbase.replace_order(@credentials, "abc", %{side: :sell})
 
-      assert {:error, {:unsupported_order_edit, [:side]}} =
+      assert {:error, {:unsupported_order_field, :side}} =
                Coinbase.preview_replace(@credentials, "abc", %{side: :sell})
 
       assert {:error, {:invalid_symbol, ""}} = Coinbase.close_position(@credentials, "")

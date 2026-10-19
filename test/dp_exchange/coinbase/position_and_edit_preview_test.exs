@@ -289,7 +289,7 @@ defmodule DpExchange.Coinbase.PositionAndEditPreviewTest do
     test "an edit the venue does not support is refused before the request" do
       exploding = fn _conn -> raise "must not ask the venue to price an edit it refuses" end
 
-      assert {:error, {:unsupported_order_edit, [:side]}} =
+      assert {:error, {:unsupported_order_field, :side}} =
                Rest.preview_replace(@credentials, "abc-123", %{side: :sell},
                  plug: exploding,
                  retry_attempts: 0
@@ -299,33 +299,61 @@ defmodule DpExchange.Coinbase.PositionAndEditPreviewTest do
     test "an empty change set is an error, not a preview of nothing" do
       exploding = fn _conn -> raise "must not price an edit with nothing in it" end
 
-      assert {:error, :no_order_changes} =
+      assert {:error, {:invalid_order_request, %{}}} =
                Rest.preview_replace(@credentials, "abc-123", %{},
                  plug: exploding,
                  retry_attempts: 0
                )
     end
 
-    test "only price, or only size, is refused locally rather than sent half-built" do
-      # EditOrderRequest requires both. Sending one and letting `put_unless_nil/3` drop the
-      # other used to produce a request the schema does not describe; what the venue does
-      # with it was never measured, so this refuses before the request leaves rather than
-      # guess. `get_order/3` could fill in the unchanged field, but that reads stale the
-      # moment the order fills or is cancelled between the read and the edit — see
-      # `replace_order/4`'s doc for the full reasoning, which this function shares.
-      exploding = fn _conn -> raise "must not price a half-built edit" end
+    test "only price, or only size, reads the order and prices the edit with its own other field" do
+      # EditOrderRequest requires both, and `Core.Venue.preview_replace/4` takes a partial
+      # change, so the unchanged field comes from the order (see `replace_order/4`'s doc).
+      me = self()
 
-      assert {:error, :missing_required_edit_field} =
+      order = %{
+        "order_id" => "abc-123",
+        "order_configuration" => %{
+          "limit_limit_gtc" => %{"base_size" => "0.75", "limit_price" => "40000"}
+        }
+      }
+
+      plug = fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:request, conn.request_path, raw})
+
+        body =
+          if conn.request_path =~ "edit_preview",
+            do: %{"errors" => [], "order_total" => "1"},
+            else: %{"order" => order}
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:ok, _preview} =
                Rest.preview_replace(@credentials, "abc-123", %{price: "41000"},
-                 plug: exploding,
+                 plug: plug,
                  retry_attempts: 0
                )
 
-      assert {:error, :missing_required_edit_field} =
+      assert_receive {:request, "/api/v3/brokerage/orders/edit_preview", raw}, 5_000
+
+      assert Jason.decode!(raw) == %{
+               "order_id" => "abc-123",
+               "price" => "41000",
+               "size" => "0.75"
+             }
+
+      assert {:ok, _preview} =
                Rest.preview_replace(@credentials, "abc-123", %{quantity: "0.5"},
-                 plug: exploding,
+                 plug: plug,
                  retry_attempts: 0
                )
+
+      assert_receive {:request, "/api/v3/brokerage/orders/edit_preview", raw}, 5_000
+      assert Jason.decode!(raw) == %{"order_id" => "abc-123", "price" => "40000", "size" => "0.5"}
     end
 
     test "an unreadable body is an error" do

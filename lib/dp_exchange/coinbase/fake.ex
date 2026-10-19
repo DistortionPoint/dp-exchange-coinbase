@@ -2350,19 +2350,17 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   @doc """
-  Edits a working order's price and size, both required as on the venue. An id this fake
-  never issued is `{:refused, :not_found}`. Needs a credential.
+  Edits a working order's price, size or both; a field left out stays the order's own. An id
+  this fake never issued is `{:refused, :not_found}`. Needs a credential.
 
   See `c:DpExchange.Core.Venue.replace_order/4`.
   """
   @impl true
   def replace_order(credentials, order_id, changes, opts \\ []) do
     with_injection(fn ->
-      # The fake enforces the venue's edit surface: price and size only, both required. A fake
-      # that accepted a side change, or only one of the two, would let a consumer's test pass
-      # on an edit the real venue refuses — `EditOrderRequest` declares order_id, price AND
-      # size all required (docs/reference/coinbase/openapi/at-spec.yaml:6809-6852), the same
-      # requirement `Rest.replace_order/4` enforces — and `Rest`'s own check is what runs.
+      # The fake enforces the venue's edit surface: price and size only, each judged as
+      # `place_order/3` judges it. A fake that accepted a side change would let a consumer's
+      # test pass on an edit the real venue refuses — and `Rest`'s own check is what runs.
       with :ok <- Rest.validate_order_edit(order_id, changes),
            :ok <- OptionKeys.check(:replace_order, opts),
            :ok <- Rest.validate_credentials(credentials) do
@@ -2373,28 +2371,44 @@ defmodule DpExchange.Coinbase.Fake do
         # side; the canned order otherwise.
         # An id the fake never issued is the venue's 404 on that read-back, so it is refused
         # here rather than answered with the canned order under an id nothing can read.
-        case find_order(order_id) do
-          {:ok, base} ->
-            edited = %{
-              base
-              | id: order_id,
-                price: cast_decimal(Map.get(changes, :price)),
-                quantity: cast_decimal(Map.get(changes, :quantity))
-            }
-
-            # Remembered, so `get_order/3` and `cancel_order/3` on the same id answer it.
-            {:ok, remember_order(edited)}
-
-          :error ->
-            {:refused, :not_found}
+        # A field the change leaves out stays the order's own, as the real path reads the
+        # order and sends that value beside the new one (a field the order does not state is
+        # `{:order_field_unavailable, field}` there too).
+        with {:ok, base} <- edit_base(order_id),
+             {:ok, price, quantity} <- edited_fields(changes, base) do
+          # Remembered, so `get_order/3` and `cancel_order/3` on the same id answer it.
+          {:ok, remember_order(%{base | id: order_id, price: price, quantity: quantity})}
         end
       end
     end)
   end
 
+  defp edit_base(order_id) do
+    case find_order(order_id) do
+      {:ok, base} -> {:ok, base}
+      :error -> {:refused, :not_found}
+    end
+  end
+
+  defp edited_fields(changes, base) do
+    with {:ok, price} <- edited_field(changes, :price, base.price),
+         {:ok, quantity} <- edited_field(changes, :quantity, base.quantity) do
+      {:ok, price, quantity}
+    end
+  end
+
+  # `Rest.validate_order_edit/2` has already passed, so a field present is castable.
+  defp edited_field(changes, field, fallback) do
+    cond do
+      Map.has_key?(changes, field) -> {:ok, cast_decimal(Map.fetch!(changes, field))}
+      is_nil(fallback) -> {:error, {:order_field_unavailable, field}}
+      true -> {:ok, fallback}
+    end
+  end
+
   @doc """
-  A fixed in-memory pricing of an edit, with the same price-and-size requirement as
-  `replace_order/4`. Nothing is changed.
+  A fixed in-memory pricing of an edit. A change naming one field reads the order for the
+  other, as `replace_order/4` does. Nothing is changed.
 
   See `c:DpExchange.Core.Venue.preview_replace/4`.
   """
@@ -2406,12 +2420,13 @@ defmodule DpExchange.Coinbase.Fake do
       # consumer's suite go green on a call that cannot be made.
       with :ok <- Rest.validate_order_edit(order_id, changes),
            :ok <- OptionKeys.check(:preview_replace, opts),
-           :ok <- Rest.validate_credentials(credentials) do
+           :ok <- Rest.validate_credentials(credentials),
+           {:ok, _price, quantity} <- preview_fields(order_id, changes) do
         {:ok,
          %{
            order_total: Decimal.new("20000.00"),
            commission_total: Decimal.new("10.00"),
-           base_size: cast_decimal(Map.get(changes, :quantity)),
+           base_size: quantity,
            quote_size: nil,
            best_bid: Decimal.new("39990"),
            best_ask: Decimal.new("40010"),
@@ -2422,6 +2437,16 @@ defmodule DpExchange.Coinbase.Fake do
          }}
       end
     end)
+  end
+
+  # A change naming both fields prices without a read, as the real path does; a partial one
+  # reads the order (an id this fake never issued is the venue's 404).
+  defp preview_fields(order_id, changes) do
+    if Map.has_key?(changes, :price) and Map.has_key?(changes, :quantity) do
+      {:ok, cast_decimal(changes.price), cast_decimal(changes.quantity)}
+    else
+      with {:ok, base} <- edit_base(order_id), do: edited_fields(changes, base)
+    end
   end
 
   @doc """

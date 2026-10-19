@@ -96,13 +96,13 @@ defmodule DpExchange.Coinbase.OrderSurfaceHardeningTest do
 
     test "replace_order and preview_replace refuse changes that are not a map" do
       for bad <- [nil, [price: 1], "x"] do
-        assert {:error, {:invalid_order_changes, ^bad}} =
+        assert {:error, {:invalid_order_request, ^bad}} =
                  Rest.replace_order(@credentials, "abc-123", bad, opts(never_sent()))
 
-        assert {:error, {:invalid_order_changes, ^bad}} =
+        assert {:error, {:invalid_order_request, ^bad}} =
                  Rest.preview_replace(@credentials, "abc-123", bad, opts(never_sent()))
 
-        assert {:error, {:invalid_order_changes, ^bad}} = Rest.validate_order_edit(bad)
+        assert {:error, {:invalid_order_request, ^bad}} = Rest.validate_order_edit(bad)
       end
     end
   end
