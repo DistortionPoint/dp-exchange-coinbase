@@ -23,6 +23,9 @@ defmodule DpExchange.CoinbaseContractTest do
     venue: DpExchange.Coinbase,
     fake: DpExchange.Coinbase.Fake,
     symbol_format: DpExchange.Coinbase.SymbolFormat,
+    # Conformance group 51: the tree, its feed, its ledger and a socket, started on loopback
+    # with a canary credential; none may show it in `:sys.get_status/2`.
+    process_probe: {DpExchange.Coinbase.ProcessProbe, :start},
     sample_pairs: ~w(BTC-USD ETH-USD BTC-USDC),
     # Conformance group 41 (family reasons, 2026-10-14): a well-formed symbol the fake does
     # not list, and a credentials map whose first value carries a trailing newline.

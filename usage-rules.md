@@ -89,7 +89,7 @@ of two ways, and which one it is depends on what the endpoint gives it:
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.111`.
+`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.114`.
 
 ```elixir
 # before
