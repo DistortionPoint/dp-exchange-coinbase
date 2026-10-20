@@ -94,8 +94,10 @@ defmodule DpExchange.Coinbase.OptionKeys do
   @summary_filters [:product_type, :contract_expiry_type, :product_venue]
   @from_to [:from, :to]
   @stake_keys [:idempotency_key, :extra, :metadata, :portfolio_id, :wallet_id]
-  @feed_route [:feed]
-  @subscriber [:to, :feed]
+  # `:name` is the tree's own name (`DpExchange.Coinbase.child_spec/1`'s), from which the feed's,
+  # the limiter's and the ledger's names are derived when they are not given.
+  @feed_route [:feed, :name]
+  @subscriber [:to, :feed, :name]
 
   # The calls that send no HTTP request. They allow their own keys and `:credentials`.
   @no_request [
@@ -232,10 +234,19 @@ defmodule DpExchange.Coinbase.OptionKeys do
   def allowed(function) when function in @sent_once,
     do:
       (Options.transport_options() -- (Keyword.keys(@not_read) ++ @retry_keys)) ++
-        own_keys(function)
+        own_keys(function) ++ tree_name(function)
 
   def allowed(function),
-    do: (Options.transport_options() -- Keyword.keys(@not_read)) ++ own_keys(function)
+    do:
+      (Options.transport_options() -- Keyword.keys(@not_read)) ++
+        own_keys(function) ++ tree_name(function)
+
+  # A request is metered in the limiter of the tree it names: `:name` derives it when `:limiter`
+  # is not given (`DpExchange.Coinbase.Supervisor.limiter_name/1`). `create_account/1` reads
+  # `:name` as the new portfolio's own name, so it cannot also name a tree and keeps `:limiter`.
+  defp tree_name(function) do
+    if :name in own_keys(function), do: [], else: [:name]
+  end
 
   @doc """
   Checks `opts` against what `function` reads.

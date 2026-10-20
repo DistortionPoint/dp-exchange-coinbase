@@ -20,6 +20,89 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **A tree is now `FeedLedger`, rate limiter, `Feed` under `:rest_for_one`** (was the limiter
+  and the feed under `:one_for_one`). A new child, `DpExchange.Coinbase.FeedLedger`, holds
+  what consumers asked the feed for; see the first "Fixed" entry.
+- **A non-default atom `name:` derives the feed, limiter and ledger names**
+  (`Module.concat(name, Feed | RateLimiter | FeedLedger)`) when `:feed`, `:limiter` and
+  `:ledger` are not given, so two trees started with only distinct names no longer collide.
+  The default tree keeps `DpExchange.Coinbase.Feed` and `DpExchange.Coinbase.RateLimiter`; an
+  explicit option wins. The facade resolves the same names: `name:` is now an accepted key on
+  `subscribe/2`, `unsubscribe/2`, `update_symbols/2`, `subscribe_notices/1`, `coverage/1`,
+  `wanted/1`, `coverage_by_kind/1` and on every call that sends a request (metered in that
+  tree's limiter), `create_account/1` excepted, where `:name` is the portfolio's name.
+
+### Fixed
+
+- **A crashed `Feed` no longer loses every subscription silently.** A restart used the
+  start options, which never carried the symbols and subscribers added afterwards, so a
+  consumer that had called `subscribe/2` once stopped receiving data and was told nothing.
+  `Feed` now writes its wanted symbols, data subscribers and notice subscribers to the ledger
+  after every accepted change, and a restarted feed reads them back in `handle_continue/2`
+  (so `init/1` never blocks the supervisor on a socket connect), monitors the subscribers
+  still alive, subscribes the symbols again, and sends every subscriber a `:coverage_change`
+  notice, `details.reason: :feed_restarted`, with `details.symbols` and `details.symbol_count`.
+  Subscribers that died meanwhile, and symbols nobody is left to receive, are not restored. The
+  ledger holds no credentials. Tests: kill the feed, assert the same wanted set, the shard
+  subscribed again, the notice, and a delivery reaching the subscriber.
+- **Venue text quoted into an error is bounded.** `{:preview_rejected, errs}`,
+  `{:edit_preview_rejected, errors}`, `{:invalid_decimal, field, value}`,
+  `{:non_positive_price | :non_positive_quantity, ...}`, `{:unparseable_venue_timestamp, _}`,
+  the unknown side, position side, position quantity and conversion status errors, the
+  preview's `warning` and `preview_id`, and Prime's `{:wallet_asset_mismatch, _, held}` carried
+  whatever the venue sent, a sub-binary of the whole response. New `DpExchange.Coinbase.VenueText`
+  cuts text at 1,024 bytes with an `"… (N bytes)"` mark (as `Core.HttpClient` marks a cut
+  body), renders a large term as a bounded, marked string, and copies everything out of the
+  document. Short values are unchanged.
+- **`Socket.wait_to_reconnect/2` is a plain sleep.** It waited for an `{:EXIT, parent, _}` message
+  on the belief that `WebSockex` traps exits; nothing does, the message is never delivered and
+  the branch could not run. What ends a socket in its backoff is the exit signal itself,
+  which kills it mid-sleep. The dead branch, the `:parent` state key and the false comment are
+  gone, and `socket_backoff_parent_exit_test.exs` now asserts what happens: a `:shutdown`
+  signal ends the waiting process with that reason, and it does not trap exits.
+
+- **The JWT of an authenticated subscribe no longer reaches `[:websockex, :frame, :sent]`
+  telemetry handlers.** The vendored websockex put the whole sent frame in that event's
+  metadata, and the `level2`/`user` subscribe frame carries a signed bearer token (valid two
+  minutes), so any handler attached to the event, a catch-all logger included, received it.
+  The event now carries `{:text, "[redacted: N bytes]"}`: type and size, not payload.
+- **A socket that stops answers the sends still queued for it.** A queued `$websockex_send`
+  message is the frame itself, JWT included, and a crashing special process prints its mailbox
+  in the crash report; the sender was also left to its monitor. The vendored fork now replies
+  `{:error, %WebSockex.NotConnectedError{connection_state: :closing}}` to each on the way out.
+- **A feed that stops stops its sockets, and closes their links on the metrics channel.**
+  Shard sockets are linked children of `Feed` that do not trap exits, so a supervisor's
+  `:shutdown` ended them but `GenServer.stop/1` (reason `:normal`, which a link ignores) did
+  not: they stayed connected to the venue, reconnecting on every drop, delivering to a feed
+  that no longer existed. And none ran a disconnect callback, so a link gauge built on
+  `[:dp_exchange, :link, :up | :down]` read "up" for a venue whose feed was gone. `Feed` now
+  has `terminate/2`: each socket is stopped, and each not already reported down is closed once
+  with `[:dp_exchange, :link, :down]` (`reason` the bounded stop reason). No notice follows.
+- **Credentials that are not a map no longer leak through a `FunctionClauseError`.**
+  `Credentials.wrap("the-secret")` (or a keyword list, a tuple) had no clause, and OTP prints
+  the failed call's arguments: the init crash report of `Feed` and the `{:error, _}` its
+  `start_link/1` returned carried the value. It raises `ArgumentError` naming only the kind.
+- **A URL the socket cannot parse is not echoed.** `WebSockex.URLError` carries the URL whole,
+  userinfo and query included, and a failed open's reason goes into a log line and a notice to
+  every subscriber. `Socket.start_link/1` answers `{:error, {:invalid_url, :coinbase}}`.
+- **A streamed trade's `id` no longer keeps its frame alive.** `Jason.decode/1` returns the id
+  as a sub-binary of the whole frame, and the trade goes on to every subscriber; one that kept
+  it (a de-duplication set, a window of recent prints) kept the frame. The id is copied.
+
+### Documentation
+
+- `usage-rules.md`: the fork's two new changes (sent-frame telemetry, queued sends on stop),
+  `{:invalid_url, :coinbase}`, the `ArgumentError` for non-map credentials, and what stopping
+  the feed does to its sockets and links.
+- Audit record (tick AO, `level2` cost): the socket holds **no book**. A `level2` `update`
+  costs one pass over its own rows (two `Decimal.parse/1` per row, a `MapSet` of the frame's
+  distinct `event_time` strings parsed once each) and is passed on as an
+  `OrderBookDelta`; only a `snapshot` sorts, once, as it arrives. `Feed` holds only symbol
+  keys and timestamps, never a frame, and every venue string it keeps is a copy. Nothing in
+  `lib/` creates an atom from venue or caller text.
+
 ## [0.3.142] - 2026-10-19
 
 ### Dependencies

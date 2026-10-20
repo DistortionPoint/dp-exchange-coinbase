@@ -400,10 +400,6 @@ defmodule DpExchange.Coinbase.Socket do
   def start_link(opts) do
     state = %{
       subscriber: Keyword.fetch!(opts, :subscriber),
-      # The process that started this socket (`Feed`, or a test), for `wait_to_reconnect/2`:
-      # the link to it is how this socket learns it was stopped, and a backoff has to keep
-      # listening for that.
-      parent: self(),
       # Wrapped immediately — see `Credentials`'s moduledoc. This process holds the pair
       # for as long as the socket is up, and a WebSockex crash prints its state via the
       # same OTP crash report `Feed`'s does.
@@ -444,9 +440,17 @@ defmodule DpExchange.Coinbase.Socket do
     url = Config.opt(opts, :url, default_endpoint())
 
     with :ok <- check_transport(url, state.credentials) do
-      VendoredWebSockex.start_link(url, __MODULE__, state, opts)
+      url |> VendoredWebSockex.start_link(__MODULE__, state, opts) |> scrub_url_error()
     end
   end
+
+  # `WebSockex.URLError` carries the URL it refused, whole, and this package puts a failed
+  # open's reason into a log line and a notice sent to every subscriber (`Feed`). A `:url`
+  # (or the `:websocket_url` setting) can carry userinfo or a token in its query, which
+  # `check_transport/2` takes care not to echo for the same reason. The refusal names the
+  # venue only.
+  defp scrub_url_error({:error, %WebSockex.URLError{}}), do: {:error, {:invalid_url, :coinbase}}
+  defp scrub_url_error(result), do: result
 
   # **Credentials never travel over a plaintext socket.** `:url` (and the `:websocket_url`
   # application setting) is a test seam, but nothing stopped a consumer pointing it at
@@ -786,7 +790,7 @@ defmodule DpExchange.Coinbase.Socket do
 
     # Blocks THIS socket process only, and only while it has no connection to serve anyway —
     # the same trade `dp_exchange_schwab.Socket` already makes.
-    wait_to_reconnect(state, delay)
+    wait_to_reconnect(delay)
 
     # No maintained book to wipe — see the moduledoc's "A reconnect has nothing to
     # wipe" section. The gap this disconnect opens in the delta stream is real and is now
@@ -806,32 +810,16 @@ defmodule DpExchange.Coinbase.Socket do
     {:reconnect, Map.merge(state, %{connected_at: nil, short_sessions: short_sessions})}
   end
 
-  # The backoff wait, which still hears its parent stop it.
+  # The backoff wait is a plain sleep, and that is enough to be stoppable.
   #
-  # `WebSockex` traps exits and learns that its parent has gone (or that `Feed` stopped it)
-  # from an `{:EXIT, parent, reason}` message that only its own receive loops read. `Feed`
-  # opens one socket per shard as a linked child and stops it with `Process.exit(pid,
-  # :shutdown)` when `retire_shards/2` retires the shard (a reshard that shrinks the
-  # universe, `finalize_shard/4`, `maybe_finalize_vanished_shard/2`); a `Feed` restart
-  # orphans every shard's socket the same way. This wait used to be a bare `Process.sleep/1`
-  # of up to `@max_reconnect_delay_ms`, during which that message sat unread: a socket told
-  # to stop slept out the whole delay and then dialled the venue once more before it noticed,
-  # a stray connection from a socket nobody owns.
-  #
-  # Exiting with the parent's own reason is what `WebSockex` does when it reads the message
-  # itself (`terminate/4`). A state with no `:parent` (one a test built by hand) matches no
-  # exit and waits the full delay, exactly as the sleep did.
-  defp wait_to_reconnect(_state, 0), do: :ok
-
-  defp wait_to_reconnect(state, delay) do
-    parent = Map.get(state, :parent)
-
-    receive do
-      {:EXIT, ^parent, reason} when is_pid(parent) -> exit(reason)
-    after
-      delay -> :ok
-    end
-  end
+  # This used to `receive` an `{:EXIT, parent, reason}` message, on the belief that
+  # `WebSockex` traps exits. It does not: nothing in it or in this fork sets `trap_exit`, so
+  # that message is never delivered and the branch could not run. What does happen is that an
+  # exit signal from `Feed` (`Process.exit(pid, :shutdown)` in `retire_shards/2` and
+  # `Feed.terminate/2`, or the link when `Feed` crashes) ends this process at once, mid-sleep,
+  # without a message ever being read. A socket told to stop therefore does not dial the
+  # venue again.
+  defp wait_to_reconnect(delay), do: Process.sleep(delay)
 
   # A session ran since the last drop: `handle_connect/2` set `:connected_at` and no
   # `handle_disconnect/2` has cleared it. A state without the key is one no session ran on.
@@ -1235,7 +1223,10 @@ defmodule DpExchange.Coinbase.Socket do
 
   defp build_trade(_trade), do: {:error, :unexpected_payload}
 
-  defp required_trade_id(id) when is_binary(id) and id != "", do: {:ok, id}
+  # Copied: `Jason.decode/1` hands the id back as a sub-binary of the frame, and the trade is
+  # sent on to every subscriber, which may keep it (a de-duplication set keyed by `id`, a
+  # window of recent prints) for as long as it likes. A kept id would keep its whole frame.
+  defp required_trade_id(id) when is_binary(id) and id != "", do: {:ok, :binary.copy(id)}
   defp required_trade_id(_missing), do: {:error, {:missing_required_field, :id}}
 
   # Maker's side in, taker's side out; see the moduledoc.

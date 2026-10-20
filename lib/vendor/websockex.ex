@@ -94,7 +94,7 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
 
   ## What changed from upstream 0.5.1
 
-  **Exactly four things**, each marked `## VENDORED FIX` at its call site below:
+  **Exactly six things**, each marked `## VENDORED FIX` at its call site below:
 
   1. `websocket_loop/3` gains a clause for `{:error, %WebSockex.FrameError{}}`, routed
      through the *already-existing* `handle_close({:error, reason}, ...)` path that
@@ -126,6 +126,18 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
      here the chunks of an incomplete frame are held until the frame's own header says its
      last byte has arrived, then joined once. The bytes handed to the parser and their
      order are unchanged. Added 2026-10-14.
+  5. The `[:websockex, :frame, :sent]` telemetry event no longer carries the payload of a
+     text or binary frame (`telemetry_frame/1`). Upstream puts the whole frame in the event
+     metadata, and the frame this package sends on an authenticated subscribe carries a signed
+     JWT: any handler attached to that (public, unprefixed) event, such as a generic
+     "log every telemetry event" one, was handed a live bearer token. The payload is replaced
+     by a placeholder naming its size; the frame type is kept. Added 2026-10-20.
+  6. A process that terminates answers every send still queued in its mailbox
+     (`reject_pending_sends/0`) with `%WebSockex.NotConnectedError{connection_state: :closing}`,
+     as `close_loop/4` already does for one that arrives while closing. A queued
+     `$websockex_send` message is the frame itself, JWT included, and a crashing special
+     process prints its mailbox in the crash report; the frames were also left to the sender's
+     monitor instead of an answer. Added 2026-10-20.
 
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
@@ -1270,7 +1282,9 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
 
     case res do
       :ok ->
-        execute_telemetry([:websockex, :frame, :sent], state, %{frame: frame})
+        # ## VENDORED FIX (5) — the payload of a sent frame is not event metadata. See
+        # `telemetry_frame/1`.
+        execute_telemetry([:websockex, :frame, :sent], state, %{frame: telemetry_frame(frame)})
 
         :gen.reply(from, :ok)
         debug = Utils.sys_debug(debug, {:socket_out, :sync_send, frame}, state)
@@ -1286,6 +1300,14 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
         websocket_loop(parent, debug, state)
     end
   end
+
+  # ## VENDORED FIX (5) — see the moduledoc. A text or binary frame is reported by type and
+  # size only; the placeholder is a binary so a handler that matches `{:text, binary}` keeps
+  # matching. Control frames carry no secret and are reported as sent.
+  defp telemetry_frame({type, payload}) when type in [:text, :binary] and is_binary(payload),
+    do: {type, "[redacted: #{byte_size(payload)} bytes]"}
+
+  defp telemetry_frame(frame), do: frame
 
   defp send_close_frame(reason, conn) do
     with {:ok, binary_frame} <- build_close_frame(reason),
@@ -1464,6 +1486,8 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
   end
 
   defp do_terminate(reason, _parent, _debug, %{module: mod, module_state: mod_state}) do
+    # ## VENDORED FIX (6) — see the moduledoc.
+    reject_pending_sends()
     mod.terminate(reason, mod_state)
 
     case reason do
@@ -1475,6 +1499,18 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
 
       _ ->
         exit(reason)
+    end
+  end
+
+  # ## VENDORED FIX (6) — answers, then drops, every send still queued, so none is left in the
+  # mailbox a crash report prints and no sender waits on a process that has stopped reading.
+  defp reject_pending_sends do
+    receive do
+      {:"$websockex_send", from, _frame} ->
+        :gen.reply(from, {:error, %WebSockex.NotConnectedError{connection_state: :closing}})
+        reject_pending_sends()
+    after
+      0 -> :ok
     end
   end
 

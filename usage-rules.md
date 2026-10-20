@@ -158,12 +158,31 @@ missing key, or a blank or padded value does not count) and it runs at
 `authenticated_ceiling` instead, matching whichever request path `Rest` actually takes for
 this instance.
 
-Running two — two credentials, two scopes — needs distinct names:
+Running two — two credentials, two scopes — needs only distinct names:
 
 ```elixir
-[{DpExchange.Coinbase, name: :cb_a, feed: :cb_a_feed, limiter: :cb_a_limiter},
- {DpExchange.Coinbase, name: :cb_b, feed: :cb_b_feed, limiter: :cb_b_limiter}]
+[{DpExchange.Coinbase, name: :cb_a, credentials: creds_a},
+ {DpExchange.Coinbase, name: :cb_b, credentials: creds_b}]
 ```
+
+A non-default atom `name:` derives the feed (`Module.concat(name, Feed)`), the limiter
+(`...RateLimiter`) and the ledger (`...FeedLedger`); an explicit `:feed`, `:limiter` or
+`:ledger` wins, and the default tree (no name) keeps `DpExchange.Coinbase.Feed` and
+`DpExchange.Coinbase.RateLimiter`. The facade resolves the same names from `name:` in its own
+options: `subscribe/2`, `unsubscribe/2`, `update_symbols/2`, `subscribe_notices/1`,
+`coverage/1`, `wanted/1` and `coverage_by_kind/1` take `name: :cb_a`, and so does every call
+that sends a request (it is metered in `:cb_a`'s limiter). **`create_account/1` is the one
+exception: there `name:` is the new portfolio's own name, so pass `limiter:` to choose a
+tree.**
+
+**Venue text quoted into an error is bounded** (2026-10-20): `{:preview_rejected, errs}`,
+`{:edit_preview_rejected, errors}`, `{:invalid_decimal, field, value}`,
+`{:non_positive_price | :non_positive_quantity, field, value}`, `{:unparseable_venue_timestamp,
+value}`, `{:unknown_side | :unknown_position_side | :unknown_conversion_status, value}`,
+`{:invalid_position_quantity, value}` and Prime's `{:wallet_asset_mismatch, asked, held}`. Text
+past 1,024 bytes is cut and ends `"… (N bytes)"` with the full size; a larger non-text term is
+replaced by a bounded rendering with the same mark; anything shorter is returned unchanged,
+copied out of the response.
 
 ## A connect that never finishes ends at a deadline, and a malformed close frame is a reconnect
 
@@ -184,6 +203,14 @@ Both come from a private, patched fork of websockex 0.5.1's process loop,
   the whole accumulated buffer on every chunk, quadratic in the chunk count; the fork holds
   the chunks until the frame header's own length says the last byte is in. Same bytes, same
   order, same frames.
+- **A sent frame's payload is not telemetry metadata** (2026-10-20). Upstream puts the whole
+  frame in `[:websockex, :frame, :sent]`, and an authenticated subscribe's frame carries a
+  signed JWT; any handler on that event, a catch-all logger included, was handed a live bearer
+  token. The event now carries `{:text, "[redacted: N bytes]"}`: the type and the size, not
+  the payload. The event name is unchanged.
+- **A socket that stops answers the sends still queued for it** (2026-10-20) with
+  `%WebSockex.NotConnectedError{connection_state: :closing}`, so a queued frame (a JWT
+  included) is not left in the mailbox its crash report prints.
 
 **This package depends on `{:websockex, "== 0.5.1"}` exactly.** The fork calls that
 release's internals. If your application pins a different websockex version, dependency
@@ -210,15 +237,18 @@ without you calling `subscribe/2` again. A shard that crashes again within five 
 its last crash is reopened after a growing wait (1s, 2s, 4s, capped at 60s) rather than in
 a tight loop; a shard that stayed up longer starts again at "immediately".
 
-**What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
-the socket-crash path, or anything that kills the `Feed` pid directly.
-`DpExchange.Coinbase.Supervisor` restarts `Feed` under `:one_for_one`, but from the
-*static* `opts` your supervision tree started it with; every `subscribe/2`,
-`update_symbols/2` and `subscribe_notices/1` call you made afterward is gone; `coverage/1`
-reads empty until you call `subscribe/2` again. Nothing inside this package can replay
-those calls — it never held onto the functions or the process that made them. If your
-consumer needs to survive a `Feed` restart unattended, monitor the `Feed` pid (or the
-`DpExchange.Coinbase` pid it sits under) yourself and re-issue `subscribe/2` on `:DOWN`.
+**`Feed` itself crashing keeps your subscription** (2026-10-20). A bug outside the
+socket-crash path, or anything that kills the `Feed` pid directly, used to lose every
+`subscribe/2`, `update_symbols/2` and `subscribe_notices/1` call made since start, with no
+word to anyone. The tree now has a small ledger process (`DpExchange.Coinbase.FeedLedger`,
+started before the feed under `:rest_for_one`) holding the wanted symbols and the data and
+notice subscribers. A restarted feed reads it back after `init/1` returns, monitors the
+subscribers still alive, subscribes the symbols again and sends **every subscriber a
+`:coverage_change` notice with `details.reason: :feed_restarted`, `details.symbols` and
+`details.symbol_count`**: treat it as a gap, and re-read any book built from deltas. A
+subscriber that died meanwhile is not restored, and nor are symbols nobody is left to
+receive; a registered-name subscriber is kept. A crash of the ledger itself loses what it
+held and restarts the feed behind it, which starts empty. The ledger holds no credentials.
 
 **Your `api_key`/`api_secret` will not appear in the crash log.** `Feed` and `Socket`
 both hold your credential for as long as they run, and a crash of either logs that
@@ -416,7 +446,14 @@ The Fake emits no notices.
 
 **A credentialed socket pointed at a plaintext remote URL is refused as
 `{:error, {:insecure_url, :coinbase}}`** (it was `{:error, :insecure_websocket_url}`;
-breaking change of the returned reason). The URL is never echoed.
+breaking change of the returned reason). The URL is never echoed. Nor is one the socket cannot
+parse: that is `{:error, {:invalid_url, :coinbase}}` (it was websockex's `%WebSockex.URLError{}`,
+which carries the URL whole, userinfo and query included).
+
+**Credentials that are neither `nil` nor a map raise `ArgumentError` naming only the kind**
+(`credentials: "the-secret"`). It was a `FunctionClauseError`, and OTP prints the failed
+call's arguments, so the init crash report and the `{:error, _}` of a failed start carried the
+secret.
 
 **A malformed range is `{:error, {:invalid_range, range}}`, `range` being what you passed**
 (the keyword list given to `get_historical_prices/4`; `[start: s, end: e]` for
@@ -852,6 +889,13 @@ disconnect callback, so the feed emits the event for it (`provider: :coinbase`, 
 as bounded text), once per lost link. A socket that already reported its own drop and then
 crashed is not reported a second time. A link gauge built on `:link, :up` / `:down` therefore
 no longer stays "up" after a shard crash.
+
+**A feed that stops reports its open links closed, once each (2026-10-20), with the stop
+reason as `reason` (`":shutdown"`, `":normal"`), and stops its sockets.** The sockets are
+linked children of the feed and do not trap exits, so a `:shutdown` ended them but a
+`GenServer.stop/1` (reason `:normal`) did not: they stayed connected to the venue,
+delivering to nothing. A socket that had already reported its drop is not reported again. No
+`Core.Notice` follows; stopping the venue was your request, or your supervisor reports it.
 
 ### Notice `details.reason` is a stable atom; the text is `details.message`
 

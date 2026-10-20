@@ -72,7 +72,7 @@ defmodule DpExchange.Coinbase.Prime do
   is worse than a map a caller has to read.
   """
 
-  alias DpExchange.Coinbase.{IdempotencyKey, OptionKeys}
+  alias DpExchange.Coinbase.{IdempotencyKey, OptionKeys, VenueText}
   alias DpExchange.Core.{Config, HttpClient, Types}
 
   @base_url "https://api.prime.coinbase.com"
@@ -1020,7 +1020,7 @@ defmodule DpExchange.Coinbase.Prime do
       {:ok, %{"wallet" => %{"symbol" => held}}} when is_binary(held) and held != "" ->
         if String.upcase(held) == String.upcase(asset),
           do: :ok,
-          else: {:error, {:wallet_asset_mismatch, asset, held}}
+          else: {:error, {:wallet_asset_mismatch, asset, VenueText.bound(held)}}
 
       {:ok, _unreadable} ->
         {:error, {:wallet_asset_unverified, :unexpected_response_shape}}
@@ -1096,7 +1096,7 @@ defmodule DpExchange.Coinbase.Prime do
     opts
     |> Keyword.take(OptionKeys.forwarded())
     |> Keyword.put(:provider, :coinbase)
-    |> Keyword.put_new(:limiter, Config.opt(opts, :limiter, DpExchange.Coinbase.RateLimiter))
+    |> Keyword.put_new(:limiter, DpExchange.Coinbase.Supervisor.limiter_name(opts))
   end
 
   defp unwrap({:ok, %{status: status, body: body}}) when status in 200..299 and is_map(body),

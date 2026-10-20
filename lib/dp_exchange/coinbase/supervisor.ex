@@ -35,6 +35,17 @@ defmodule DpExchange.Coinbase.Supervisor do
   A consumer may still supply its own limiter through `Core.Config`'s
   `:rate_limit_module`, per process — this is a working default, not a lock.
 
+  ## Children, and what a restart keeps
+
+  A `FeedLedger`, the rate limiter and the `Feed`, started in that order under
+  `:rest_for_one`. The ledger holds what consumers asked the feed for (symbols and
+  subscribers), so a feed that crashes is restarted with that intent and tells each
+  subscriber so with a `:coverage_change` notice (`details.reason: :feed_restarted`).
+
+  Their names are `opts[:feed]`, `opts[:limiter]` and `opts[:ledger]`, else derived from a
+  non-default atom `opts[:name]` (`Module.concat(name, Feed)`, `RateLimiter`, `FeedLedger`),
+  else the defaults: two trees started with only distinct names do not collide.
+
   ## What is deliberately not here
 
   No aggregate supervisor over multiple venues, and no auto-start. A consumer puts
@@ -44,7 +55,7 @@ defmodule DpExchange.Coinbase.Supervisor do
 
   use Supervisor
 
-  alias DpExchange.Coinbase.{Credentials, Feed}
+  alias DpExchange.Coinbase.{Credentials, Feed, FeedLedger}
   alias DpExchange.Core.{Config, DefaultRateLimiter}
 
   @doc """
@@ -72,23 +83,75 @@ defmodule DpExchange.Coinbase.Supervisor do
     # — two credentials, two scopes — keeps them apart. Hardcoding either name means the
     # second instance collides with the first, which is a failure at start rather than in
     # production but is still a failure a consumer should not have to discover.
+    #
+    # The feed is handed the limiter's and the ledger's names explicitly: its own `:name` is
+    # the feed's, and names derived from that would be the wrong ones.
+    feed_opts =
+      opts
+      |> Keyword.put(:name, feed_name(opts))
+      |> Keyword.put(:limiter, limiter_name(opts))
+      |> Keyword.put(:ledger, ledger_name(opts))
+
     children = [
+      {FeedLedger, name: ledger_name(opts)},
       {DefaultRateLimiter, name: limiter_name(opts), limits: limits(opts)},
-      {Feed, Keyword.put(opts, :name, feed_name(opts))}
+      {Feed, feed_opts}
     ]
 
-    # `:one_for_one` — the feed losing its socket is not a reason to reset the rate
-    # limiter, and resetting it would hand back budget the venue has already been spent.
-    Supervisor.init(children, strategy: :one_for_one)
+    # `:rest_for_one`, in that order. The ledger holds what consumers asked the feed for, so
+    # it starts first and a crash of the feed restarts only the feed, which reads the ledger
+    # back and subscribes again. A crash of the limiter restarts the feed behind it (the feed
+    # restores itself the same way), never the ledger before it; a crash of the ledger
+    # restarts both, and the feed then starts from nothing rather than from a stale picture.
+    # The rate limiter is not reset by a feed that lost its socket, and resetting it would hand
+    # back budget the venue has already been spent.
+    Supervisor.init(children, strategy: :rest_for_one)
   end
 
-  @doc "The limiter this venue meters against, for `Core.HttpClient`'s `:limiter` option."
-  @spec limiter_name(keyword()) :: atom()
-  def limiter_name(opts), do: Config.opt(opts, :limiter, DpExchange.Coinbase.RateLimiter)
+  @doc """
+  The limiter this venue meters against, for `Core.HttpClient`'s `:limiter` option.
 
-  @doc "This venue's feed process."
-  @spec feed_name(keyword()) :: atom()
-  def feed_name(opts), do: Config.opt(opts, :feed, Feed)
+  `opts[:limiter]` when given; else `Module.concat(name, RateLimiter)` when the tree is
+  started with a non-default atom `opts[:name]`; else `DpExchange.Coinbase.RateLimiter`.
+  """
+  @spec limiter_name(keyword()) :: atom()
+  def limiter_name(opts),
+    do: Config.opt(opts, :limiter, derived(opts, "RateLimiter", default_limiter()))
+
+  @doc """
+  This venue's feed process: `opts[:feed]`, else `Module.concat(name, Feed)` for a
+  non-default atom `opts[:name]`, else `DpExchange.Coinbase.Feed`.
+  """
+  @spec feed_name(keyword()) :: GenServer.server()
+  def feed_name(opts), do: Config.opt(opts, :feed, derived(opts, "Feed", Feed))
+
+  @doc """
+  This venue's ledger of what the feed was asked for: `opts[:ledger]`, else
+  `Module.concat(name, FeedLedger)` for a non-default atom `opts[:name]`, else
+  `DpExchange.Coinbase.FeedLedger`.
+  """
+  @spec ledger_name(keyword()) :: atom()
+  def ledger_name(opts), do: Config.opt(opts, :ledger, derived(opts, "FeedLedger", FeedLedger))
+
+  defp default_limiter, do: DpExchange.Coinbase.RateLimiter
+
+  # Atoms that name no tree: absent, and the two names the default tree already has.
+  @default_names [nil, true, false, __MODULE__, DpExchange.Coinbase]
+
+  # Two trees in one VM started with only distinct names must not collide on the feed, the
+  # limiter or the ledger. The default tree (no name, or the module's own) keeps the names
+  # it always had, and an explicit option wins over a derived name. Only an atom derives:
+  # `{:global, _}`, `{:via, ...}` and the portfolio name `create_account/1` reads from `:name`
+  # (a string) do not.
+  defp derived(opts, suffix, default) do
+    case Config.opt(opts, :name, nil) do
+      name when is_atom(name) and name not in @default_names ->
+        Module.concat(name, suffix)
+
+      _default_or_not_an_atom ->
+        default
+    end
+  end
 
   # Straight from the declaration. If a ceiling changes, it changes in one place.
   #

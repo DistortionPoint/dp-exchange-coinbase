@@ -88,6 +88,24 @@ defmodule DpExchange.Coinbase.Credentials do
   def wrap(credentials) when credentials == %{}, do: nil
   def wrap(credentials) when is_map(credentials), do: struct(__MODULE__, credentials)
 
+  # **A value that is not a map is refused without being printed.** This had no such clause, so
+  # a secret handed over as a bare string or a keyword list (`credentials: "the-secret"`) raised
+  # `FunctionClauseError`, and OTP prints the failed call's arguments in the stack trace: the
+  # init crash report of `Feed` and the error `start_link/1` returned carried the value. The
+  # message names only the kind.
+  def wrap(other) do
+    raise ArgumentError,
+          "credentials must be a map with :api_key and :api_secret, or nil; got a " <>
+            "#{kind(other)}"
+  end
+
+  defp kind(value) when is_binary(value), do: "string"
+  defp kind(value) when is_list(value), do: "list"
+  defp kind(value) when is_tuple(value), do: "tuple"
+  defp kind(value) when is_number(value), do: "number"
+  defp kind(value) when is_atom(value), do: "atom"
+  defp kind(_other), do: "term"
+
   @doc """
   Wraps the `:credentials` entry of an options keyword list, IN PLACE and only when that
   key is actually present.

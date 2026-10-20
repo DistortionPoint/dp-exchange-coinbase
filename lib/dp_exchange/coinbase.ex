@@ -59,7 +59,7 @@ defmodule DpExchange.Coinbase do
     SymbolFormat
   }
 
-  alias DpExchange.Core.{Capabilities, Config, Venue}
+  alias DpExchange.Core.{Capabilities, Venue}
 
   # The venue serves none of these. **That is a claim about Coinbase, not about how far
   # this package got** — and the two are worth telling apart, because both answer a caller
@@ -787,7 +787,10 @@ defmodule DpExchange.Coinbase do
   # Options that are not a list fall to the default here so the call that can refuse
   # (`subscribe/2`, `update_symbols/2`, `subscribe_notices/1`) reaches `Feed`'s own
   # `{:invalid_options, v}`; `Config.opt/3` raised `FunctionClauseError` on them.
-  defp feed(opts) when is_list(opts), do: Config.opt(opts, :feed, Feed)
+  #
+  # `opts[:feed]`, else the name derived from `opts[:name]` (the tree's own, as given to
+  # `child_spec/1`), else the default — `Supervisor.feed_name/1`.
+  defp feed(opts) when is_list(opts), do: Supervisor.feed_name(opts)
   defp feed(_not_a_list), do: Feed
 
   # A pid, a registered name, `{:global, _}` or `{:via, _, _}`. `Process.alive?/1` takes only

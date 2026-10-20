@@ -1212,7 +1212,7 @@ defmodule DpExchange.Coinbase.Feed do
 
   use GenServer
 
-  alias DpExchange.Coinbase.{Credentials, OptionKeys, Rest, Socket}
+  alias DpExchange.Coinbase.{Credentials, FeedLedger, OptionKeys, Rest, Socket}
   alias DpExchange.Core.{Capabilities, Config, Fanout, Notice, Telemetry, Types}
 
   require Logger
@@ -2046,8 +2046,94 @@ defmodule DpExchange.Coinbase.Feed do
        # moduledoc's "a late notice subscriber has to be able to hear it" section) can be
        # replayed the same notice a subscriber present at the time already received.
        alias_map_failure_reason: nil,
-       alias_map_source: alias_map_source
-     }}
+       alias_map_source: alias_map_source,
+       # The `FeedLedger` this feed writes what it was asked for to, and reads back after a
+       # restart (`handle_continue(:restore, _)`), or `nil` for a feed started without one.
+       ledger: Keyword.get(opts, :ledger)
+     }, {:continue, :restore}}
+  end
+
+  # **A restarted feed picks its intent back up.** A supervisor restarts a crashed feed from
+  # its start options, which never carry what consumers asked for afterwards, so every symbol
+  # and subscriber used to vanish and a consumer that had called `subscribe/2` once silently
+  # stopped receiving data. The ledger (see `DpExchange.Coinbase.FeedLedger`) kept it; this
+  # reads it back after `init/1` has returned, so the supervisor is not held up behind a
+  # socket connect, re-monitors the subscribers still alive, subscribes the symbols again and
+  # tells every subscriber, as a `:coverage_change` notice, that it did.
+  #
+  # Data subscribers gone means nobody is left to deliver to, which `release_if_abandoned/2`
+  # would have concluded one death at a time: the symbols are not restored for an audience
+  # that no longer exists (a registered-name subscriber is never monitored and so is kept).
+  @impl true
+  def handle_continue(:restore, state) do
+    case FeedLedger.fetch(Map.get(state, :ledger)) do
+      %{wanted: wanted, subscribers: subscribers, notice_subscribers: notice_subscribers} ->
+        {:noreply, restore(state, wanted, live(subscribers), live(notice_subscribers))}
+
+      _nothing_held ->
+        {:noreply, state}
+    end
+  end
+
+  defp restore(state, _wanted, [], []), do: persist(state)
+
+  defp restore(state, wanted, subscribers, notice_subscribers) do
+    wanted = if subscribers == [], do: [], else: wanted
+
+    monitors =
+      Enum.reduce(subscribers ++ notice_subscribers, state.monitors, &Fanout.watch/2)
+
+    state =
+      %{
+        state
+        | wanted: MapSet.new(wanted),
+          subscribers: MapSet.new(subscribers),
+          notice_subscribers: MapSet.new(notice_subscribers),
+          monitors: monitors
+      }
+      |> maybe_schedule_alias_map_fetch()
+
+    {_result, state} = reshard(state)
+    announce_restore(state)
+    persist(state)
+  end
+
+  # A pid that is gone is nobody; a registered name outlives its holder and is kept.
+  defp live(subscribers) do
+    Enum.filter(subscribers, fn
+      pid when is_pid(pid) -> node(pid) != node() or Process.alive?(pid)
+      _name -> true
+    end)
+  end
+
+  defp announce_restore(state) do
+    symbols = state.wanted |> MapSet.to_list() |> Enum.sort()
+
+    notice =
+      Notice.new(:coverage_change, :coinbase,
+        severity: :warning,
+        message:
+          "the feed was restarted; #{length(symbols)} symbol(s) are being subscribed again, " <>
+            "so a book built from deltas should be re-read",
+        details: %{reason: :feed_restarted, symbol_count: length(symbols), symbols: symbols}
+      )
+
+    fan_out(
+      MapSet.union(state.subscribers, state.notice_subscribers),
+      {:dp_exchange, :coinbase, notice}
+    )
+  end
+
+  # Writes what consumers asked for to the ledger after every accepted change. A cast: a
+  # feed does not wait on, or fail with, its own bookkeeping. Returns the state.
+  defp persist(state) do
+    FeedLedger.put(Map.get(state, :ledger), %{
+      wanted: MapSet.to_list(state.wanted),
+      subscribers: MapSet.to_list(state.subscribers),
+      notice_subscribers: MapSet.to_list(state.notice_subscribers)
+    })
+
+    state
   end
 
   # The symbol checks in the three clauses below are DELIBERATE DEFENCE IN DEPTH. The public
@@ -2117,6 +2203,8 @@ defmodule DpExchange.Coinbase.Feed do
       | notice_subscribers: MapSet.put(state.notice_subscribers, subscriber),
         monitors: Fanout.watch(subscriber, state.monitors)
     }
+
+    state = persist(state)
 
     # (DpCryptoManagement's issue #26): the degraded-attribution notice fires once, when
     # the fetch first gives up, which is typically *before* a consumer following the
@@ -2233,7 +2321,7 @@ defmodule DpExchange.Coinbase.Feed do
         monitors: Fanout.forget(pid, state.monitors)
     }
 
-    {:noreply, release_if_abandoned(state, was_data_subscriber?)}
+    {:noreply, state |> persist() |> release_if_abandoned(was_data_subscriber?)}
   end
 
   @impl true
@@ -2594,6 +2682,41 @@ defmodule DpExchange.Coinbase.Feed do
 
   def handle_info(_other, state), do: {:noreply, state}
 
+  # **A feed that stops takes its sockets with it, and says so on the metrics channel.**
+  #
+  # Every shard socket is a linked child of this process, and a socket does not trap exits, so
+  # an exit signal with any reason but `:normal` ends it: a supervisor's `:shutdown` and a crash
+  # of this process did. `:normal` is the case that did not. `GenServer.stop/1`'s default reason
+  # is `:normal`, a link ignores a `:normal` exit, and the sockets then lived on: connected to
+  # the venue, reconnecting on every drop, delivering to a feed that no longer existed, with
+  # nothing left that could retire them. They are stopped here, whatever the reason.
+  #
+  # And none of them ran a `handle_disconnect/2`, so the metrics channel never saw their links
+  # close: a consumer's link gauge read "up" for a venue whose feed was gone. A `:link_down`
+  # closes a `:link_up` (the pairing `retire_shards/2` and `isolate_crashed_shard/5` already
+  # keep), so each socket not already reported down is closed once. No notice follows, as for a
+  # retired shard: the consumer asked for the stop, or the supervisor reports the crash.
+  @impl true
+  def terminate(reason, state) do
+    sockets = shard_sockets(state)
+
+    Enum.each(sockets, &Process.exit(&1, :shutdown))
+
+    sockets
+    |> Enum.reject(&MapSet.member?(state.down_links, &1))
+    |> Enum.each(fn _socket -> Telemetry.link_down(:coinbase, quoted(reason)) end)
+
+    :ok
+  end
+
+  defp shard_sockets(state) do
+    state.shards
+    |> Map.values()
+    |> Enum.map(& &1.socket)
+    |> Enum.filter(&is_pid/1)
+    |> Enum.uniq()
+  end
+
   # --- internal ------------------------------------------------------------
 
   # **A deferred `:channel_reconcile` is a snapshot, and is not trusted when it fires** — the
@@ -2790,6 +2913,7 @@ defmodule DpExchange.Coinbase.Feed do
           wanted: wanted
       }
       |> maybe_schedule_alias_map_fetch()
+      |> persist()
 
     {result, state} = reshard(state)
     {:reply, result, state}
@@ -2797,7 +2921,10 @@ defmodule DpExchange.Coinbase.Feed do
 
   defp unsubscribe_symbols(symbols, state) do
     wanted = MapSet.difference(state.wanted, MapSet.new(symbols))
-    state = %{state | wanted: wanted, delivering: Map.drop(state.delivering, symbols)}
+
+    state =
+      persist(%{state | wanted: wanted, delivering: Map.drop(state.delivering, symbols)})
+
     {result, state} = reshard(state)
     {:reply, result, state}
   end
@@ -2821,6 +2948,7 @@ defmodule DpExchange.Coinbase.Feed do
     state =
       %{state | wanted: wanted, delivering: Map.take(state.delivering, symbols)}
       |> maybe_schedule_alias_map_fetch()
+      |> persist()
 
     {result, state} = reshard(state)
     {:reply, result, state}

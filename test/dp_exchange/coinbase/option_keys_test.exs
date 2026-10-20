@@ -161,7 +161,10 @@ defmodule DpExchange.Coinbase.OptionKeysTest do
 
       assert :limit in OptionKeys.own_keys(:get_orders)
       refute :limit in OptionKeys.own_keys(:get_price)
-      assert OptionKeys.own_keys(:update_symbols) == [:feed]
+      assert OptionKeys.own_keys(:update_symbols) == [:feed, :name]
+      assert :name in OptionKeys.allowed(:get_balances)
+      # `create_account/1` reads `:name` as the portfolio's name, once.
+      assert Enum.count(OptionKeys.allowed(:create_account), &(&1 == :name)) == 1
       refute :url in OptionKeys.allowed(:coverage)
     end
 

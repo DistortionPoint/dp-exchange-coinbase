@@ -39,7 +39,7 @@ defmodule DpExchange.Coinbase.Rest do
   live one.
   """
 
-  alias DpExchange.Coinbase.{Auth, IdempotencyKey, OptionKeys, SymbolFormat}
+  alias DpExchange.Coinbase.{Auth, IdempotencyKey, OptionKeys, SymbolFormat, VenueText}
   alias DpExchange.Core.{Config, HttpClient, Instrument, Timeframe, Types}
 
   require Logger
@@ -1337,7 +1337,7 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp required_conversion_status(value) do
     case conversion_status(value) do
-      nil -> {:error, {:unknown_conversion_status, value}}
+      nil -> {:error, {:unknown_conversion_status, VenueText.bound(value)}}
       status -> {:ok, status}
     end
   end
@@ -1570,7 +1570,7 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp position_side("LONG"), do: {:ok, :long}
   defp position_side("SHORT"), do: {:ok, :short}
-  defp position_side(other), do: {:error, {:unknown_position_side, other}}
+  defp position_side(other), do: {:error, {:unknown_position_side, VenueText.bound(other)}}
 
   defp position_quantity(raw) do
     case amount_value(raw) do
@@ -1578,11 +1578,11 @@ defmodule DpExchange.Coinbase.Rest do
         cond do
           flat?(quantity) -> {:ok, :flat}
           usable_positive?(quantity) -> {:ok, quantity}
-          true -> {:error, {:invalid_position_quantity, raw}}
+          true -> {:error, {:invalid_position_quantity, VenueText.bound(raw)}}
         end
 
       nil ->
-        {:error, {:invalid_position_quantity, raw}}
+        {:error, {:invalid_position_quantity, VenueText.bound(raw)}}
     end
   end
 
@@ -2812,8 +2812,9 @@ defmodule DpExchange.Coinbase.Rest do
       # A 4xx comes back intact rather than flattened into a message string, so
       # `classify/1` can match the status exactly instead of searching the body for it.
       |> Keyword.put(:raw_status, true)
-      # This venue's own limiter, configured from its own declared ceiling.
-      |> Keyword.put_new(:limiter, Config.opt(opts, :limiter, DpExchange.Coinbase.RateLimiter))
+      # This venue's own limiter, configured from its own declared ceiling: `:limiter`, else the
+      # one derived from `:name`, else the default (`Supervisor.limiter_name/1`).
+      |> Keyword.put_new(:limiter, DpExchange.Coinbase.Supervisor.limiter_name(opts))
 
     method
     |> HttpClient.request(url <> query(params), headers, nil, request_opts)
@@ -3690,7 +3691,7 @@ defmodule DpExchange.Coinbase.Rest do
     with {:ok, parsed} <- required_decimal(value, field) do
       if Decimal.positive?(parsed),
         do: {:ok, parsed},
-        else: {:error, {:non_positive_quantity, field, value}}
+        else: {:error, {:non_positive_quantity, field, VenueText.bound(value)}}
     end
   end
 
@@ -3721,7 +3722,7 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp optional_fee(value) do
     case decimal(value) do
-      nil -> {:error, {:invalid_decimal, :fee, value}}
+      nil -> {:error, {:invalid_decimal, :fee, VenueText.bound(value)}}
       fee -> {:ok, fee}
     end
   end
@@ -3770,7 +3771,7 @@ defmodule DpExchange.Coinbase.Rest do
   # legitimate: a fill that does not say which way it went cannot be reconciled at all.
   defp required_side(value) do
     case side_atom(value) do
-      nil -> {:error, {:unknown_side, value}}
+      nil -> {:error, {:unknown_side, VenueText.bound(value)}}
       side -> {:ok, side}
     end
   end
@@ -3779,7 +3780,7 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp required_decimal(value, field) do
     case decimal(value) do
-      nil -> {:error, {:invalid_decimal, field, value}}
+      nil -> {:error, {:invalid_decimal, field, VenueText.bound(value)}}
       parsed -> {:ok, parsed}
     end
   end
@@ -3792,7 +3793,7 @@ defmodule DpExchange.Coinbase.Rest do
     with {:ok, parsed} <- required_decimal(value, field) do
       if Decimal.positive?(parsed),
         do: {:ok, parsed},
-        else: {:error, {:non_positive_price, field, value}}
+        else: {:error, {:non_positive_price, field, VenueText.bound(value)}}
     end
   end
 
@@ -3816,7 +3817,8 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  defp parse_time(other), do: {:error, {:unparseable_venue_timestamp, other}}
+  defp parse_time(other),
+    do: {:error, {:unparseable_venue_timestamp, VenueText.bound(other)}}
 
   @doc """
   Places an order.
@@ -4712,7 +4714,7 @@ defmodule DpExchange.Coinbase.Rest do
       |> Keyword.take(OptionKeys.forwarded())
       |> Keyword.put(:provider, :coinbase)
       |> Keyword.put(:raw_status, true)
-      |> Keyword.put_new(:limiter, Config.opt(opts, :limiter, DpExchange.Coinbase.RateLimiter))
+      |> Keyword.put_new(:limiter, DpExchange.Coinbase.Supervisor.limiter_name(opts))
 
     # `trade_incentive_metadata` is the caller's own term, sent as given, so it can be
     # something Jason has no encoding for; that was a `Protocol.UndefinedError` raised in the
@@ -5196,7 +5198,7 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp preview_result(%{"errs" => errs} = _response) when is_list(errs) and errs != [] do
-    {:refused, {:preview_rejected, errs}}
+    {:refused, {:preview_rejected, VenueText.bound(errs)}}
   end
 
   # `errs` is the venue's list of reasons, and `OrderPreviewResponse` requires it
@@ -5220,8 +5222,8 @@ defmodule DpExchange.Coinbase.Rest do
       slippage: decimal(response["slippage"]),
       # The venue's own words, unedited. A warning summarised here is a warning a caller
       # cannot act on.
-      warning: response["warning"],
-      preview_id: response["preview_id"]
+      warning: VenueText.bound(response["warning"]),
+      preview_id: VenueText.bound(response["preview_id"])
     }
   end
 
@@ -5256,7 +5258,7 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp edit_preview_result(%{"errors" => errors}) when is_list(errors) and errors != [] do
-    {:refused, {:edit_preview_rejected, errors}}
+    {:refused, {:edit_preview_rejected, VenueText.bound(errors)}}
   end
 
   # As `preview_result/1`: `PreviewEditOrderResponse` requires `errors` (at-spec.yaml:8916-8958),
