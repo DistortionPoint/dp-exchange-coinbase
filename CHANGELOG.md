@@ -20,6 +20,47 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A JWT minted on a host clock a few seconds ahead of the venue's was "not yet valid".**
+  `Auth.jwt/2` set `nbf` to the wall-clock second it was minted. `nbf` is now back-dated 5
+  seconds and `exp` is `nbf + 120`, so the window stays the documented two minutes and a clock
+  up to 5 seconds ahead still signs a usable token. The 5 seconds is this package's margin,
+  not a venue figure, and is not probed against a live key. `Auth.jwt/2` takes a `:now`
+  (unix seconds) option as its clock seam.
+- `usage-rules.md` no longer says a host clock "more than about two minutes" off produces a
+  `401`: the tolerated skew is asymmetric (about +5 s / -115 s), now stated as such.
+
+- **`get_historical_prices/4`: the 350-candle bound counts buckets by ceiling division.** The
+  span of the whole seconds sent was divided with `div/2` (floor), so a window of
+  `350 * width + (width - 1)` seconds passed the local check and was sent for the venue to
+  refuse (measured 2026-08-28: over 350 is refused, not truncated). It is now
+  `{:error, {:range_too_wide, requested: 351, max: 350}}` locally. Whether the venue counts a
+  non-aligned span the same way is unmeasured; the refusal fails closed.
+- **`get_trades/2`: `:since` is inclusive exactly.** It is sent as floored whole seconds, so
+  the venue could return a print up to a second before a sub-second `since`, which was
+  returned. It is filtered client-side now, as `:end` is and as the Fake already did.
+- **A GTD order's text `end_time` must be RFC3339 with a zone or offset.** Any non-blank text
+  (`"tomorrow"`, a zoneless time) was sent as given on a live order; it is now
+  `{:error, {:invalid_end_time, value}}` before anything is sent.
+- `get_server_time/1`'s docs (here and on the facade) state the asymmetric clock tolerance
+  instead of "more than two minutes".
+- `usage-rules.md`: the candle bucket rounding, the `end_time` rule, and that every
+  authenticated subscribe mints its own JWT.
+
+### Tests
+
+- `test_helper.exs` sets `assert_receive_timeout: 5_000` and `refute_receive_timeout: 500`:
+  every bare `assert_receive` had ExUnit's 100 ms window (a flake under `--cover` for a
+  message that is coming) and two bare `refute_receive :request_was_sent` guarded a negative
+  for 100 ms.
+- `rest_test.exs`: a candle window of `350 * width + (width - 1)` seconds (1m, 1h, 1d) and
+  `350 * 60 + 1` are refused with `requested: 351`; exactly `350 * 60` passes.
+- `order_book_test.exs`: a print before a sub-second `since` is dropped.
+- `place_order_test.exs`: a text `end_time` that is not RFC3339 with a zone is refused.
+- `jwt_freshness_test.exs`: every subscribe frame (`level2`, `user`) carries a token minted for
+  it (two subscribes never share one), valid when minted; `ticker` carries none.
+
 ## [0.3.143] - 2026-10-20
 
 ### Dependencies

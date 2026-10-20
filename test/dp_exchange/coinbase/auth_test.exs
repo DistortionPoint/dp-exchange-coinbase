@@ -48,6 +48,21 @@ defmodule DpExchange.Coinbase.AuthTest do
       assert exp - nbf == 120
     end
 
+    test "nbf is back-dated 5 s for clock skew and exp is 120 s after nbf" do
+      {:ok, token} = Auth.jwt(@credentials, now: 1_800_000_000)
+
+      assert %{"nbf" => 1_799_999_995, "exp" => 1_800_000_115} = claims_of(token)
+    end
+
+    test "the default clock is the OS wall clock, read when the token is minted" do
+      before_mint = System.os_time(:second)
+      {:ok, token} = Auth.jwt(@credentials)
+      after_mint = System.os_time(:second)
+
+      %{"nbf" => nbf} = claims_of(token)
+      assert nbf >= before_mint - 5 and nbf <= after_mint - 5
+    end
+
     test "uri is included only when given" do
       # The WebSocket token omits it — a socket is not one request — so defaulting the
       # claim to something plausible would produce a token that looks right and is

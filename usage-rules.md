@@ -303,6 +303,13 @@ This package refuses an over-wide range up front:
 Widening your window to "get more per call" gets you nothing, and nothing reads as *no
 data for this period*. Page it yourself.
 
+The bucket count is the whole seconds this package sends (`start` and `end` as UNIX seconds,
+floored), divided by the width and **rounded up**: a window that is not a whole number of
+buckets counts its partial one, so `350 * width + (width - 1)` seconds is
+`{:range_too_wide, requested: 351, max: 350}`. (It used to round down and send it, for the
+venue to refuse.) Whether the venue counts a non-aligned span the same way is unmeasured; the
+refusal fails closed.
+
 An empty or inverted window (`start` at or after `end`) is refused too, as
 `{:error, {:invalid_range, range}}`, `range` being the value you passed. The venue's answer
 to one is unmeasured, and an empty list would read as *no data*. So is a `range` that is not
@@ -398,9 +405,13 @@ carrying the first attempt's expired token.
 
 A `401` from the venue is a refusal, `{:refused, {:venue_error, 401, message}}`, answered after
 one attempt: this package does not retry it, because the same bytes cannot succeed. Two causes
-are worth ruling out before blaming the key: a host clock more than about two minutes from the
-venue's produces the same `401` for a good key, so compare `get_server_time/1` (public, unsigned)
-with your own clock. That cause is documentation-derived and has not been probed with a live key.
+are worth ruling out before blaming the key: a host clock skewed from the venue's produces the
+same `401` for a good key, so compare `get_server_time/1` (public, unsigned) with your own clock.
+The token's `nbf` is back-dated 5 seconds and its `exp` is 120 seconds after that, so a host clock
+up to 5 seconds ahead of the venue's, or up to about 115 seconds behind it, still signs a valid
+token; beyond either, the token is not yet valid or already expired. The 5 seconds is this
+package's margin; the rejection thresholds are reasoned from the claims and have not been probed
+with a live key.
 
 ## Signing failures stop here, rather than being sent unsigned
 
@@ -460,6 +471,14 @@ secret.
 `get_trade_history/2`'s bounds). It was `{:invalid_range, start: s, end: e}` with the window
 after defaults were applied; breaking change of the returned reason for an inverted or empty
 window on `get_historical_prices/4`.
+
+**Every authenticated subscribe carries a token minted for that frame.** `level2` (when you
+hold credentials) and `user` frames get a fresh Ed25519 JWT per subscribe, never a cached one:
+the periodic re-issue on a connection that has been up for hours, a reconnect's re-issue, a
+retry after a timed-out send and each shard's own subscribe all mint their own. The feed holds
+your credentials, never a token. A frame queued behind a reconnecting socket's backoff is
+answered `NotConnectedError` when the socket starts opening its next connection rather than
+delivered later, so a token minted before an outage is not sent after it.
 
 Public channels carry no token. Attaching one is actively harmful: Coinbase answers a
 bogus token with an authentication failure, which is how a book channel once produced
@@ -1114,7 +1133,9 @@ no such field are
 `{:error, {:unexpected_field, key}}` (they were silently dropped, or for `post_only` and
 `end_time` refused as `{:unsupported_order_field, key, {type, tif}}`). A GTD order needs
 `:end_time` (`{:missing_field, :end_time}`, checked with the time in force, before sizing and
-every price field; an unreadable one is `{:invalid_end_time, v}`). A missing limit price is
+every price field; an unreadable one is `{:invalid_end_time, v}`: a `DateTime`, or text that
+is RFC3339 **with a zone or offset** such as `"2026-09-01T00:00:00Z"`; `"tomorrow"`, a blank
+string and a zoneless time are refused rather than sent). A missing limit price is
 `{:missing_field, :price}` and a missing stop price `{:missing_field, :stop_price}` (were
 `:missing_limit_price` and `:missing_stop_price`). An absent `:symbol` is
 `{:invalid_symbol, nil}` (it was `{:missing_field, :symbol}`). `post_only` is sent on the

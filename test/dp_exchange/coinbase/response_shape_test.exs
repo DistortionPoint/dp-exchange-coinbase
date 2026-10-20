@@ -39,11 +39,10 @@ defmodule DpExchange.Coinbase.ResponseShapeTest do
   defp base(body) do
     [
       plug: answering(body),
+      # Only keys Coinbase reads: an account key from another venue is an unknown option,
+      # and that refusal used to satisfy the old any-error assertion below.
       retry_attempts: 0,
-      credentials: @credentials,
-      account_id: "acct",
-      account_number: "acct",
-      account_hash: "acct"
+      credentials: @credentials
     ]
   end
 
@@ -80,7 +79,10 @@ defmodule DpExchange.Coinbase.ResponseShapeTest do
           {"get_historical_prices/4",
            fn -> v.get_historical_prices("BTC-USD", "1h", [], base(body)) end}
         ] do
-      assert {:error, _reason} = answers_without_raising(label, call)
+      # Not any error: a credential or transport error would also be "not a raise" while
+      # leaving the null-list guard untested.
+      assert {:error, :unexpected_response_shape} == answers_without_raising(label, call),
+             label
     end
   end
 

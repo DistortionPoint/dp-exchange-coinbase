@@ -405,7 +405,8 @@ defmodule DpExchange.Coinbase.FeedTest do
     test "a deferred gap re-issue for a shard that is gone does nothing" do
       feed = start_feed()
       send(feed, {:gap_resubscribe_due, {"level2", 7}})
-      assert %{gap_resubscribe_due: %{}} = :sys.get_state(feed)
+      # `%{}` as a PATTERN matches every map; equality is what says no timer was armed.
+      assert :sys.get_state(feed).gap_resubscribe_due == %{}
       assert Process.alive?(feed)
     end
 
@@ -888,12 +889,14 @@ defmodule DpExchange.Coinbase.FeedTest do
   describe "delivery" do
     test "quotes reach the subscribing process" do
       feed = start_feed()
-      Feed.subscribe_notices(feed, to: self())
+      assert :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
 
-      # A subscriber is registered by `subscribe/3`; simulate one having been registered
-      # by sending through the feed's own inbound path.
+      # Through the feed's own inbound path, as the socket sends it. Coverage alone would
+      # say "arrived at the feed", not "reached the subscriber"; the message here is the
+      # claim, so a fan-out that skipped data subscribers fails this.
       send(feed, {:dp_exchange, :coinbase, quote_for("BTC-USD")})
 
+      assert_receive {:dp_exchange, :coinbase, %Types.Quote{symbol: "BTC-USD"}}, 5_000
       assert %{"BTC-USD" => :stream} = Feed.coverage(feed)
     end
 
@@ -1146,10 +1149,33 @@ defmodule DpExchange.Coinbase.FeedTest do
     end
 
     test "update_symbols sends both the removal and the addition" do
-      {feed, _socket} = start_with_socket()
+      # A socket that answers `:ok` and reports each frame, so the test sees what was SENT. The
+      # rejecting double only proved the feed survived a failed send, which holds whether or
+      # not it sent the removal and the addition at all.
+      socket = recording_socket(:ticker)
 
-      Feed.subscribe(feed, ~w(BTC-USD), to: self())
-      assert {:error, _reason} = Feed.update_symbols(feed, ~w(ETH-USD))
+      feed =
+        start_supervised!(
+          {Feed,
+           name: :"feed_#{System.unique_integer([:positive])}",
+           socket: socket,
+           channels: [:quotes],
+           alias_map_source: fn -> {:ok, %{}} end}
+        )
+
+      assert :ok = Feed.subscribe(feed, ~w(BTC-USD), to: self())
+
+      assert_receive {:frame, :ticker, %{"type" => "subscribe", "product_ids" => ["BTC-USD"]}},
+                     5_000
+
+      assert :ok = Feed.update_symbols(feed, ~w(ETH-USD))
+
+      assert_receive {:frame, :ticker, %{"type" => "unsubscribe", "product_ids" => ["BTC-USD"]}},
+                     5_000
+
+      assert_receive {:frame, :ticker, %{"type" => "subscribe", "product_ids" => ["ETH-USD"]}},
+                     5_000
+
       assert Process.alive?(feed)
     end
 

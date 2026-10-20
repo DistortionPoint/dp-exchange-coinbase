@@ -42,7 +42,9 @@ defmodule DpExchange.Coinbase.DeprecatedEndpointsTest do
         in_heredoc? and String.contains?(line, ~s(""")) -> {acc, false}
         in_heredoc? -> {acc, true}
         String.contains?(line, ~s(""")) -> {acc, true}
-        true -> {[String.replace(line, ~r/#.*$/, "") | acc], false}
+        # A `#` that opens an interpolation (`"#{base}/intx/..."`) is code, not a comment;
+        # stripping from it would hide an endpoint built right after an interpolation.
+        true -> {[String.replace(line, ~r/#(?!\{).*$/, "") | acc], false}
       end
     end)
     |> elem(0)

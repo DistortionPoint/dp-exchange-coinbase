@@ -347,11 +347,13 @@ defmodule DpExchange.Coinbase.ConvertTest do
         |> Plug.Conn.resp(500, Jason.encode!(%{"error" => "nope"}))
       end
 
-      assert {:error, _reason} =
+      assert {:error, {:exchange_error, :coinbase, text}} =
                Rest.quote_conversion(@credentials, "USD", "USDC", Decimal.new("1"),
                  plug: plug,
                  retry_attempts: 0
                )
+
+      assert text =~ "500"
     end
   end
 

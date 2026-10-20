@@ -44,6 +44,10 @@ defmodule DpExchange.Coinbase.HotPathRetentionTest do
 
   describe "Socket keeps no reference into a large frame" do
     test "a fault subject remembered in reported_faults does not pin its frame" do
+      # 100 bytes: OTP 27+ copies a slice shorter than 64 bytes on its own, so a short subject
+      # would read as detached even if `Socket` stopped calling `:binary.copy/1` on it.
+      long_product = "BTC-USD-" <> String.duplicate("X", 92)
+
       payload = %{
         "channel" => "market_trades",
         "sequence_num" => 1,
@@ -51,7 +55,7 @@ defmodule DpExchange.Coinbase.HotPathRetentionTest do
           %{
             "type" => "update",
             "trades" => [
-              %{"product_id" => "BTC-USD", "trade_id" => nil, "padding" => @padding}
+              %{"product_id" => long_product, "trade_id" => nil, "padding" => @padding}
             ]
           }
         ]
@@ -60,14 +64,17 @@ defmodule DpExchange.Coinbase.HotPathRetentionTest do
       assert {:ok, state} = frame(payload, socket_state())
 
       assert [{:market_trades, subject, _kind}] = MapSet.to_list(state.reported_faults)
-      assert subject == "BTC-USD"
+      assert subject == long_product
       assert retained_bytes(subject) < 1_000
 
       assert_received {:dp_exchange, :coinbase, %Notice{details: %{payload: noticed}}}
       assert retained_bytes(noticed) < 1_000
     end
 
-    test "an unsubscribed channel name remembered in reported_faults does not pin its frame" do
+    # Not a retention test: the venue's channel names are at most 23 bytes, and OTP 27+
+    # copies any slice under 64 bytes, so no channel name can pin its frame. What this pins
+    # is that the fault is remembered once, under the name the venue sent.
+    test "an unsubscribed channel is remembered in reported_faults by its name" do
       payload = %{
         "channel" => "status",
         "sequence_num" => 1,
@@ -80,7 +87,6 @@ defmodule DpExchange.Coinbase.HotPathRetentionTest do
                MapSet.to_list(state.reported_faults)
 
       assert channel == "status"
-      assert retained_bytes(channel) < 1_000
     end
 
     test "a venue error text quoted into a notice does not pin its frame" do

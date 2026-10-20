@@ -315,10 +315,17 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       # sleep, is what actually proves the fetch completed exactly once.
       wait_until(fn -> :counters.get(counter, 1) == 1 end)
 
-      # None of the raw `send/2` deliveries below go through `subscribe/3` or
-      # `update_symbols/2`, so nothing here can schedule a second fetch — no further
-      # synchronisation is needed before the final assertion.
+      # The first fetch must have been fully handled, or its own in-flight guard would mask a
+      # fetch started by a delivered frame.
+      wait_until(fn -> :sys.get_state(feed).alias_map_status == :ok end)
+
       for _i <- 1..5, do: send(feed, {:dp_exchange, :coinbase, quote_for("XLM-USD")})
+
+      # Barrier: the feed has handled all five frames, so a fetch they started is either
+      # counted already or still in flight (`alias_map_fetch` set) — wait that out before
+      # reading the counter, so a per-frame fetch makes the count exceed 1.
+      :sys.get_state(feed)
+      wait_until(fn -> :sys.get_state(feed).alias_map_fetch == nil end)
 
       assert :counters.get(counter, 1) == 1
     end
@@ -378,7 +385,7 @@ defmodule DpExchange.Coinbase.AliasAttributionTest do
       # ~200ms the exhausted bucket needs to refill and the identical fetch then
       # succeeds — proving the option actually reached the request, not merely that it
       # survived being typed into an allowlist.
-      wait_until(fn -> :sys.get_state(feed).alias_map_status != :pending end)
+      wait_until(fn -> :sys.get_state(feed).alias_map_status not in [:unfetched, :pending] end)
 
       assert :sys.get_state(feed).alias_map_status == :ok
     end

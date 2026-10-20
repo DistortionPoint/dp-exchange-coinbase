@@ -379,6 +379,71 @@ defmodule DpExchange.Coinbase.RestTest do
                )
     end
 
+    test "a window that is not whole buckets counts the partial one: 350 * width + (width - 1)" do
+      # Flooring made this 350 and sent it; the venue refuses a window over 350 buckets, and
+      # the partial bucket is one. Ceiling division makes it 351, refused locally.
+      finish = ~U[2026-08-28 12:00:00Z]
+
+      for {timeframe, width} <- [{"1m", 60}, {"1h", 3_600}, {"1d", 86_400}] do
+        start = DateTime.add(finish, -(350 * width + (width - 1)), :second)
+
+        assert {:error, {:range_too_wide, requested: 351, max: 350}} =
+                 Rest.get_historical_prices(
+                   "BTC-USD",
+                   timeframe,
+                   [start: start, end: finish],
+                   plug: fn _conn -> flunk("an over-wide window must not be sent") end
+                 )
+
+        assert {:error, {:range_too_wide, requested: 351, max: 350}} =
+                 Rest.validate_candle_request(timeframe, [start: start, end: finish], [])
+      end
+    end
+
+    test "350 * width + 1 second is also 351 buckets, and exactly 350 * width is 350" do
+      finish = ~U[2026-08-28 12:00:00Z]
+
+      assert {:error, {:range_too_wide, requested: 351, max: 350}} =
+               Rest.validate_candle_request(
+                 "1m",
+                 [start: DateTime.add(finish, -(350 * 60 + 1), :second), end: finish],
+                 []
+               )
+
+      assert :ok =
+               Rest.validate_candle_request(
+                 "1m",
+                 [start: DateTime.add(finish, -(350 * 60), :second), end: finish],
+                 []
+               )
+    end
+
+    test "an explicit window goes to the venue as whole UNIX SECONDS, floored, not ms or RFC3339" do
+      # docs/reference/coinbase/candles.md: `start`/`end` are seconds as strings. A bound in
+      # milliseconds, microseconds or ISO8601 would be a window the venue reads as the year
+      # ~58000 or refuses. The sub-second part of a bound is dropped, never rounded up.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, URI.decode_query(conn.query_string)})
+        responding(@candles).(conn)
+      end
+
+      start = DateTime.add(DateTime.from_unix!(1_787_900_400), 900, :millisecond)
+      finish = DateTime.add(DateTime.from_unix!(1_787_904_000), 100, :millisecond)
+
+      assert {:ok, _bars} =
+               Rest.get_historical_prices("BTC-USD", "1m", [start: start, end: finish],
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}, 5_000
+      assert query["start"] == "1787900400"
+      assert query["end"] == "1787904000"
+      assert query["granularity"] == "ONE_MINUTE"
+    end
+
     defp bar_at(unix, close \\ "1.5") do
       %{
         "start" => to_string(unix),
@@ -796,8 +861,18 @@ defmodule DpExchange.Coinbase.RestTest do
     end
 
     test "reads the same public path get_symbols/1 does, with no credential" do
-      assert {:ok, %{}} =
-               Rest.get_alias_map(plug: responding(%{"products" => []}), retry_attempts: 0)
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path, Plug.Conn.get_req_header(conn, "authorization")})
+        responding(%{"products" => []}).(conn)
+      end
+
+      assert {:ok, %{}} = Rest.get_alias_map(plug: plug, retry_attempts: 0)
+
+      assert_receive {:path, path, auth}
+      assert path =~ "/market/products"
+      assert auth == []
     end
   end
 

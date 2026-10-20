@@ -1556,8 +1556,9 @@ defmodule DpExchange.Coinbase do
   The venue's own clock. **Public.**
 
   See `DpExchange.Coinbase.Rest.get_server_time/1`. Worth reading because this venue's JWT
-  window is two minutes: a host clock further out than that produces authentication failures
-  that look like a credential problem.
+  window is two minutes (`nbf` back-dated 5 s): a host clock more than about 5 s ahead of or
+  115 s behind the venue's produces authentication failures that look like a credential
+  problem (reasoned from the claims, not probed with a live key).
   """
   @spec get_server_time(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_server_time(opts \\ []), do: Rest.get_server_time(opts)

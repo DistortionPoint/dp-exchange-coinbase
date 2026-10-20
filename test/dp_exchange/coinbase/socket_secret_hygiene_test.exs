@@ -79,7 +79,7 @@ defmodule DpExchange.Coinbase.SocketSecretHygieneTest do
       send(socket, {:silence_check, trigger})
       frame = {:text, "eyJ-queued-frame"}
       sender = Task.async(fn -> FrameSender.send(socket, frame, "test") end)
-      wait_for_queue(socket, 2)
+      wait_for_queued_send(socket)
       :ok = :sys.resume(socket)
 
       assert {:error, %WebSockex.NotConnectedError{connection_state: :closing}} =
@@ -188,19 +188,21 @@ defmodule DpExchange.Coinbase.SocketSecretHygieneTest do
     on_exit(fn -> :telemetry.detach(id) end)
   end
 
-  defp wait_for_queue(socket, count, waited \\ 0) do
-    {:message_queue_len, queued} = Process.info(socket, :message_queue_len)
+  # Polls the suspended socket's mailbox until the frame itself is in it. Counting messages
+  # would pass on any two messages, including a stray one that is not the send under test.
+  defp wait_for_queued_send(socket, waited \\ 0) do
+    {:messages, messages} = Process.info(socket, :messages)
 
     cond do
-      queued >= count ->
+      Enum.any?(messages, &match?({:"$websockex_send", _from, _frame}, &1)) ->
         :ok
 
       waited >= 5_000 ->
-        flunk("the socket's mailbox held #{queued} messages after #{waited}ms, wanted #{count}")
+        flunk("the socket's mailbox held no queued send after #{waited}ms")
 
       true ->
         Process.sleep(5)
-        wait_for_queue(socket, count, waited + 5)
+        wait_for_queued_send(socket, waited + 5)
     end
   end
 

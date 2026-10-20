@@ -130,7 +130,10 @@ defmodule DpExchange.Coinbase.MarketTradesTest do
           {"a missing size", %{"size" => nil}},
           {"an infinite size", %{"size" => "Infinity"}},
           {"a missing time", %{"time" => nil}},
-          {"an unparseable time", %{"time" => "yesterday"}}
+          {"an unparseable time", %{"time" => "yesterday"}},
+          {"a time with no zone, which would be guessed as UTC",
+           %{"time" => "2026-10-02T14:54:03.341087"}},
+          {"an epoch number where an ISO time belongs", %{"time" => 1_790_000_000}}
         ] do
       test "#{label} is reported and not delivered" do
         assert {:ok, _state} = frame(envelope([trade(unquote(Macro.escape(overrides)))]))
@@ -140,6 +143,14 @@ defmodule DpExchange.Coinbase.MarketTradesTest do
         assert notice.details.payload == "BTC-USD"
         refute_received {:dp_exchange, :coinbase, %Types.Trade{}}
       end
+    end
+
+    test "a time with an offset is delivered as the same instant in UTC, not relabelled" do
+      assert {:ok, _state} =
+               frame(envelope([trade(%{"time" => "2026-10-02T16:54:03.341087+02:00"})]))
+
+      assert_received {:dp_exchange, :coinbase, %Types.Trade{} = delivered}
+      assert delivered.timestamp == ~U[2026-10-02 14:54:03.341087Z]
     end
 
     test "one bad trade does not cost the good trade beside it" do

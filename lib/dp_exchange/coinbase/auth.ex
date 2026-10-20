@@ -21,6 +21,11 @@ defmodule DpExchange.Coinbase.Auth do
   used by both paths.
   """
 
+  # Seconds `nbf` is back-dated. This package's own margin (not a venue figure): the
+  # documentation samples use `nbf = now`, which is not yet valid on a client clock ahead of
+  # the venue's. Reasoned from the claim's meaning, not probed (tier 3 needs a live key).
+  @clock_skew_s 5
+
   @doc """
   Builds authentication headers for a REST call.
 
@@ -82,6 +87,15 @@ defmodule DpExchange.Coinbase.Auth do
   Scopes the token to one REST call. **The WebSocket token omits it** — a socket is not one
   request — so the claim is included only when given rather than defaulted to something
   plausible. Defaulting it would produce a token that looks right and is rejected.
+
+  ## Clock skew
+
+  `nbf` is `now - 5` and `exp` is `nbf + 120`, from the OS wall clock (a JWT carries
+  calendar time, so a monotonic clock cannot stand in). A local clock up to five seconds
+  ahead of the venue's still yields a valid token; the 120 s window is unchanged. The five
+  seconds is this package's margin, not a venue figure. `opts[:now]` (unix seconds) is the
+  test seam. A token is minted at the moment it is used: per HTTP attempt (re-signed
+  after a blocking limiter wait), and per subscribe frame in `Socket.subscription_frame/3`, never reused.
 
   ## The two-minute expiry is deliberate
 
@@ -174,7 +188,12 @@ defmodule DpExchange.Coinbase.Auth do
   defp pem?(_secret), do: false
 
   defp sign_jwt(api_key, api_secret, opts) do
-    now = DateTime.utc_now() |> DateTime.to_unix(:second)
+    # `nbf` is back-dated by `@clock_skew_s` so a local wall clock a few seconds AHEAD of the
+    # venue's does not mint a token that is "not yet valid" when it arrives; `exp` stays
+    # exactly 120 s after `nbf`, so the window is the documented one and a clock behind the
+    # venue's only shortens it. `:now` (unix seconds) is the clock seam for tests.
+    now = Keyword.get_lazy(opts, :now, fn -> System.os_time(:second) end)
+    nbf = now - @clock_skew_s
     nonce = 16 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
 
     header =
@@ -186,9 +205,9 @@ defmodule DpExchange.Coinbase.Auth do
       %{
         "sub" => api_key,
         "iss" => "cdp",
-        "nbf" => now,
+        "nbf" => nbf,
         # 120s — Coinbase's own documented default, see this function's own @doc.
-        "exp" => now + 120
+        "exp" => nbf + 120
       }
       |> maybe_put_uri(Keyword.get(opts, :uri))
       |> Jason.encode!()

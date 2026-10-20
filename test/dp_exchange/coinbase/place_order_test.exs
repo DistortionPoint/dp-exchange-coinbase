@@ -374,6 +374,13 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                place(Map.merge(market, %{quantity: "1", quote_size: "10"}), never_sent())
     end
 
+    test "a text end_time that is not RFC3339 with a zone is refused, never sent" do
+      for bad <- ["tomorrow", "  ", "2026-09-01T00:00:00", "2026-09-01"] do
+        assert {:error, {:invalid_end_time, ^bad}} =
+                 place(limit_request(%{time_in_force: :gtd, end_time: bad}), never_sent())
+      end
+    end
+
     test "an end_time that is neither text nor a DateTime is refused" do
       assert {:error, {:invalid_end_time, 5}} =
                place(limit_request(%{time_in_force: :gtd, end_time: 5}), never_sent())
@@ -1475,8 +1482,18 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
     end
 
     test "a 5xx on the edit is unconfirmed (sent once)" do
+      counter = :counters.new(1, [])
+
+      plug = fn conn ->
+        :counters.add(counter, 1, 1)
+        responding(%{"message" => "down"}, 503).(conn)
+      end
+
       assert {:error, {:order_unconfirmed, nil, {:exchange_error, :coinbase, _text}}} =
-               replace(responding(%{"message" => "down"}, 503))
+               replace(plug)
+
+      # An edit has no idempotency key: a retry would be a second edit, so it is sent once.
+      assert :counters.get(counter, 1) == 1
     end
 
     test "an accepted edit whose read-back fails is replace_accepted_unread" do

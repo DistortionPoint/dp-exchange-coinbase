@@ -165,12 +165,17 @@ defmodule DpExchange.Coinbase.SupervisorTest do
       a = start_venue()
       b = start_venue()
 
-      # Spend a's budget entirely.
-      for _i <- 1..3,
-          do: DefaultRateLimiter.acquire(:coinbase, 1, limiter: a[:limiter], timeout: 0)
+      # Spend a's budget until it refuses. Draining a fixed count raced the refill: a slow
+      # scheduler could top the bucket up between the spends and the refused acquire.
+      refusal =
+        Enum.find_value(1..1_000, fn _i ->
+          case DefaultRateLimiter.acquire(:coinbase, 1, limiter: a[:limiter], timeout: 0) do
+            :ok -> nil
+            refused -> refused
+          end
+        end)
 
-      assert {:error, :rate_limit_timeout} =
-               DefaultRateLimiter.acquire(:coinbase, 1, limiter: a[:limiter], timeout: 0)
+      assert refusal == {:error, :rate_limit_timeout}
 
       # b is untouched. A shared bucket would have made one consumer's traffic throttle
       # another's.

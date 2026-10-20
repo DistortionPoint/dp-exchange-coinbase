@@ -359,7 +359,7 @@ defmodule DpExchange.Coinbase.PositionAndEditPreviewTest do
     test "an unreadable body is an error" do
       plug = fn conn -> Plug.Conn.resp(conn, 200, "not json") end
 
-      assert {:error, _reason} =
+      assert {:error, :unexpected_response_shape} =
                Rest.preview_replace(
                  @credentials,
                  "abc-123",

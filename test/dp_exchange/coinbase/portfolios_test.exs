@@ -286,11 +286,22 @@ defmodule DpExchange.Coinbase.PortfoliosTest do
       opts = [plug: plug]
       retried = opts ++ [retry_attempts: 0]
 
-      assert {:error, _reason} = Rest.list_portfolios(@credentials, retried)
-      assert {:error, _reason} = Rest.get_portfolio_breakdown(@credentials, "pf-1", retried)
-      assert {:error, _reason} = Rest.create_portfolio(@credentials, [name: "X"] ++ opts)
-      assert {:error, _reason} = Rest.rename_portfolio(@credentials, "pf-1", "X", retried)
-      assert {:error, _reason} = Rest.delete_portfolio(@credentials, "pf-1", opts)
+      # Reads carry the venue's own error; writes that may have been accepted are
+      # `:write_unconfirmed`. A bare `{:error, _}` would also pass for a local refusal.
+      assert {:error, {:exchange_error, :coinbase, _text}} =
+               Rest.list_portfolios(@credentials, retried)
+
+      assert {:error, {:exchange_error, :coinbase, _text}} =
+               Rest.get_portfolio_breakdown(@credentials, "pf-1", retried)
+
+      assert {:error, {:write_unconfirmed, nil, {:exchange_error, :coinbase, _text}}} =
+               Rest.create_portfolio(@credentials, [name: "X"] ++ opts)
+
+      assert {:error, {:write_unconfirmed, nil, {:exchange_error, :coinbase, _text}}} =
+               Rest.rename_portfolio(@credentials, "pf-1", "X", retried)
+
+      assert {:error, {:write_unconfirmed, "pf-1", {:exchange_error, :coinbase, _text}}} =
+               Rest.delete_portfolio(@credentials, "pf-1", opts)
     end
   end
 

@@ -108,7 +108,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
           {Feed,
            name: :"feed_#{System.unique_integer([:positive])}",
            url: "ws://127.0.0.1:1/nowhere",
-           shard_spacing_ms: @test_shard_spacing_ms,
+           shard_spacing_ms: @test_shard_spacing_ms_precise,
            alias_map_source: fn -> {:ok, %{}} end}
         )
 
@@ -116,6 +116,11 @@ defmodule DpExchange.Coinbase.ShardingTest do
       before = System.monotonic_time(:millisecond)
       assert {:error, _reason} = Feed.subscribe(feed, symbols, to: self())
 
+      # The wide spacing is deliberate: at 30ms the thresholds below sat 15ms apart, a gap
+      # that a connect attempt's own latency fills, so the regression (every shard at ONE
+      # tick) could still clear the shard-2 bound. At 200ms the regression lands near 200ms
+      # and the bound is 300ms.
+      #
       # Shard 1 fails roughly one `shard_spacing_ms` out, shard 2 roughly two out — proof
       # every shard past the first got its own tick rather than all of them bursting
       # together (DpCryptoManagement's issue #20). `@test_shard_spacing_ms` stands in for
@@ -141,13 +146,14 @@ defmodule DpExchange.Coinbase.ShardingTest do
                       %Notice{kind: :coverage_change, details: %{shard: 1}}},
                      5_000
 
-      assert System.monotonic_time(:millisecond) - before >= 0.5 * @test_shard_spacing_ms
+      assert System.monotonic_time(:millisecond) - before >= 0.5 * @test_shard_spacing_ms_precise
 
       assert_receive {:dp_exchange, :coinbase,
                       %Notice{kind: :coverage_change, details: %{shard: 2}}},
                      5_000
 
-      assert System.monotonic_time(:millisecond) - before >= 1.5 * @test_shard_spacing_ms
+      assert System.monotonic_time(:millisecond) - before >=
+               1.5 * @test_shard_spacing_ms_precise
 
       assert Process.alive?(feed)
     end
@@ -810,9 +816,16 @@ defmodule DpExchange.Coinbase.ShardingTest do
       # and is answered only once that handler has returned — no sleep needed to know the
       # tick itself has run. `retry_missing_shards/1` schedules nothing further for shard 0
       # (it is not missing), so there is no later async mutation to race either.
-      assert :sys.get_state(feed).shards == %{
+      state = :sys.get_state(feed)
+
+      assert state.shards == %{
                {"ticker", 0} => %{socket: existing_socket, symbols: ["BTC-USD"]}
              }
+
+      # The shards map alone cannot tell: a redundant open for the SAME key, socket and
+      # symbols would leave it equal. The deferred open is what a retry leaves behind, so the
+      # open shard's key must have none. (`level2` has no shard here and does get one.)
+      refute Map.has_key?(state.pending_opens, {"ticker", 0})
     end
 
     test "a :channel_subscribe message against a dead socket is skipped rather than raising" do
@@ -826,12 +839,20 @@ defmodule DpExchange.Coinbase.ShardingTest do
     end
 
     test "a :channel_subscribe failure is logged, not crashed on" do
+      # The socket must actually FAIL the send: `fake_socket/0` answers `:ok`, which made this
+      # a test of a success that was named for a failure and could not reach the logging path.
       feed = start_feed()
-      socket = fake_socket()
+      counter = :counters.new(1, [])
+      socket = always_fails_socket(counter)
 
-      send(feed, {:channel_subscribe, socket, "ticker", ["BTC-USD"], nil})
-      :sys.get_state(feed)
+      log =
+        capture_log(fn ->
+          send(feed, {:channel_subscribe, socket, "ticker", ["BTC-USD"], nil})
+          :sys.get_state(feed)
+        end)
 
+      assert :counters.get(counter, 1) >= 1
+      assert log =~ ~r/ticker subscribe for 1 symbol\(s\) failed \(/
       assert Process.alive?(feed)
     end
 

@@ -840,8 +840,9 @@ defmodule DpExchange.Coinbase.Rest do
   The venue's own clock — `GET /brokerage/time`.
 
   **Public**, and the reason it is worth reading: this venue signs requests with a JWT whose
-  window is two minutes, so a host clock more than that out of step produces authentication
-  failures that look like a credential problem. Comparing this to the local clock is how a
+  window is two minutes (`nbf` back-dated 5 s), so a host clock more than about 5 s ahead of
+  or 115 s behind the venue's produces authentication failures that look like a credential
+  problem (reasoned from the claims, not probed with a live key). Comparing this to the local clock is how a
   reader tells the two apart.
 
   Returns the venue's own map with `iso` and `epochSeconds`/`epochMillis`. It is **not**
@@ -2456,7 +2457,9 @@ defmodule DpExchange.Coinbase.Rest do
   `:include_partial` (`{:invalid_option, key, value}`), and a `range` that is a keyword list
   of `DateTime` bounds forming a non-empty window (`{:invalid_range, range}`, the `range`
   exactly as passed) of at most
-  `max_candles/0` candles (`{:range_too_wide, requested: n, max: m}`).
+  `max_candles/0` candles (`{:range_too_wide, requested: n, max: m}`). The count is the
+  whole seconds sent divided by the width, **rounded up**: a window that is not a whole number
+  of buckets counts the partial one, so `350 * width + 1` seconds is 351 and refused.
   """
   @spec validate_candle_request(String.t(), keyword(), keyword()) :: :ok | {:error, term()}
   def validate_candle_request(timeframe, range, opts) do
@@ -2717,8 +2720,13 @@ defmodule DpExchange.Coinbase.Rest do
   defp default_start(_not_a_datetime, _width), do: nil
 
   defp candle_span(start, finish, width, enum, range) do
-    span = DateTime.diff(finish, start, :second)
-    requested = div(span, width)
+    # The span of the whole seconds actually SENT (`start`/`end` below), not of the caller's
+    # sub-second bounds.
+    span = DateTime.to_unix(finish) - DateTime.to_unix(start)
+    # Ceiling division: a span that is not a whole number of buckets still touches the
+    # partial one, and the venue refuses (not truncates) a window over its maximum. Flooring
+    # let `350 * width + (width - 1)` seconds through to a likely INVALID_ARGUMENT.
+    requested = div(span + width - 1, width)
 
     cond do
       # An empty or inverted window is not a request for "no candles": the venue's answer to
@@ -3042,7 +3050,7 @@ defmodule DpExchange.Coinbase.Rest do
         # `limit` are unmeasured, so such a reply is refused rather than returned short.
         if since != nil and length(trades) >= limit,
           do: {:error, :history_truncated},
-          else: decode_trades(trades, symbol, finish)
+          else: decode_trades(trades, symbol, since, finish)
 
       {:ok, _unexpected} ->
         {:error, :unexpected_response_shape}
@@ -3063,7 +3071,15 @@ defmodule DpExchange.Coinbase.Rest do
   def trades_before(trades, %DateTime{} = finish),
     do: Enum.filter(trades, &(DateTime.compare(&1.timestamp, finish) == :lt))
 
-  defp decode_trades(trades, symbol, finish) do
+  # `since` is sent as whole UNIX seconds (`DateTime.to_unix/1` floors), so a print up to a
+  # second BEFORE a sub-second `since` can come back; the bound is inclusive (MD4) and is applied
+  # here exactly, as `:end` is, and as `DpExchange.Coinbase.Fake` applies it.
+  defp trades_since(trades, nil), do: trades
+
+  defp trades_since(trades, %DateTime{} = since),
+    do: Enum.filter(trades, &(DateTime.compare(&1.timestamp, since) != :lt))
+
+  defp decode_trades(trades, symbol, since, finish) do
     trades
     |> Enum.reduce_while({:ok, []}, fn trade, {:ok, acc} ->
       case to_trade(trade, symbol) do
@@ -3080,7 +3096,7 @@ defmodule DpExchange.Coinbase.Rest do
         # twice, and one deduplicating on `id` keeps an arbitrary copy. Refused, not merged.
         if unique_by?(ordered, & &1.id) do
           sorted = Enum.sort_by(ordered, & &1.timestamp, DateTime)
-          {:ok, trades_before(sorted, finish)}
+          {:ok, sorted |> trades_since(since) |> trades_before(finish)}
         else
           {:error, :unexpected_response_shape}
         end
@@ -4199,8 +4215,15 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp valid_end_time(%DateTime{}), do: :ok
 
+  # A string is sent as given, so it must already be the RFC3339 the venue reads: with a zone
+  # or offset (`DateTime.from_iso8601/1` refuses one without, `:missing_offset`). A word such
+  # as "tomorrow" or a zoneless time (which the venue would read in a zone of its choosing) is
+  # refused here, before a live order carrying it is sent.
   defp valid_end_time(value) when is_binary(value) do
-    if String.trim(value) == "", do: {:error, {:invalid_end_time, value}}, else: :ok
+    case DateTime.from_iso8601(value) do
+      {:ok, _at, _offset} -> :ok
+      {:error, _reason} -> {:error, {:invalid_end_time, value}}
+    end
   end
 
   defp valid_end_time(value), do: {:error, {:invalid_end_time, value}}

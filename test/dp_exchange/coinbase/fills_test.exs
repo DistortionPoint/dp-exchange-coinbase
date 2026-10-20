@@ -297,8 +297,10 @@ defmodule DpExchange.Coinbase.FillsTest do
       assert_receive {:query, query}
       assert query =~ "order_ids=abc"
       assert query =~ "product_ids=BTC-USD"
-      assert query =~ "start_sequence_timestamp"
       assert query =~ "limit=100"
+
+      # Fills take RFC3339 here (unlike candles' UNIX seconds): the unit is the claim.
+      assert URI.decode_query(query)["start_sequence_timestamp"] == "2026-08-01T00:00:00Z"
     end
 
     test "it follows the cursor to the end" do

@@ -57,6 +57,8 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
     end
   end
 
+  defp never_sent, do: fn _conn -> raise "the venue must not be called" end
+
   describe "list_payment_methods/2" do
     test "returns the venue's own rows, flags and all" do
       body = %{
@@ -152,23 +154,29 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
     end
 
     test "a missing source is refused before a request is made" do
-      # No plug at all: if this reached HTTP the test would fail on the connection rather
-      # than the guard, which is the point.
+      # A plug that raises: a regression that reached HTTP fails the test, and never opens a
+      # real connection to the venue.
       assert {:error, :missing_portfolio} =
-               Rest.transfer_internal(@credentials, "USD", Decimal.new("1"), to: "dst-uuid")
+               Rest.transfer_internal(@credentials, "USD", Decimal.new("1"),
+                 to: "dst-uuid",
+                 plug: never_sent()
+               )
     end
 
     test "a missing destination is refused too" do
       assert {:error, :missing_portfolio} =
-               Rest.transfer_internal(@credentials, "USD", Decimal.new("1"), from: "src-uuid")
+               Rest.transfer_internal(@credentials, "USD", Decimal.new("1"),
+                 from: "src-uuid",
+                 plug: never_sent()
+               )
     end
 
     test "the same portfolio on both sides moves nothing and is refused before a request" do
-      # No plug: reaching HTTP would fail the test on the connection, not on the guard.
       assert {:error, {:invalid_transfer, :same_account}} =
                Rest.transfer_internal(@credentials, "USD", Decimal.new("1"),
                  from: "same-uuid",
-                 to: "same-uuid"
+                 to: "same-uuid",
+                 plug: never_sent()
                )
 
       assert {:error, {:invalid_transfer, :same_account}} =
@@ -328,7 +336,7 @@ defmodule DpExchange.Coinbase.MoneySurfaceTest do
     end
 
     test "a 500 on the listing is an error, because retrying can help" do
-      assert {:error, _reason} =
+      assert {:error, {:exchange_error, :coinbase, _message}} =
                Rest.list_payment_methods(@credentials, plug: failing(500), retry_attempts: 0)
     end
 

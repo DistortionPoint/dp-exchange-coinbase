@@ -1,6 +1,12 @@
 # Tier 2 hits Coinbase's live public API. Excluded by default and run by hand: a venue
 # that sees a package polling it on a timer will rate-limit or block.
-ExUnit.start(exclude: [:tier2])
+#
+# Receive margins. ExUnit's default `assert_receive`/`refute_receive` window is 100 ms, which a
+# loaded full-suite run (`mix test --cover`) can miss for a message that IS coming (a flake),
+# and which is too short to mean anything for a negative. A bare `assert_receive` now waits up
+# to 5 s (it returns the moment the message arrives, so a passing test costs nothing), and a
+# bare `refute_receive` watches for 500 ms. A test that names its own window keeps it.
+ExUnit.start(exclude: [:tier2], assert_receive_timeout: 5_000, refute_receive_timeout: 500)
 
 # **Tier 1 never reaches a venue, and this makes that a fact rather than a convention.** A
 # request that brings no `:plug` of its own gets this one, which refuses it and names the

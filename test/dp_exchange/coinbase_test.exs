@@ -98,6 +98,36 @@ defmodule DpExchange.CoinbaseTest do
       assert caps.measured_against =~ "measured live"
       assert caps.measured_against =~ "NOT measured"
       assert caps.measured_against =~ "has_staking is NOT measured live"
+
+      # Each dated claim keeps its date and its target: a label that loses its "when" or its
+      # "against what" is the unlabelled number this declaration exists to avoid.
+      assert caps.measured_against =~ "api.coinbase.com/api/v3/brokerage, 2026-08-28"
+      assert caps.measured_against =~ "fetched and searched 2026-09-09"
+      assert caps.measured_against =~ "inherited from the prior adapter"
+      assert caps.measured_against =~ "read from documentation, not probed"
+      assert caps.measured_against =~ "wss://advanced-trade-ws.coinbase.com"
+      assert caps.measured_against =~ "2026-10-02"
+      assert caps.measured_against =~ "per-socket product ceiling was not probed"
+    end
+
+    test "the live-measured values are pinned, and the inherited ceilings are the ones " <>
+           "labelled NOT measured" do
+      caps = Coinbase.capabilities()
+
+      # Measured 2026-08-28 against the live venue (see `measured_against`): nine widths and
+      # no 12h, and 350 candles per request.
+      assert caps.historical_timeframes == ~w(1m 5m 15m 30m 1h 2h 4h 6h 1d)
+      assert caps.max_candles_per_request == 350
+
+      # Not measured: inherited from the prior adapter, and `measured_against` says so.
+      assert caps.public_ceiling == %{limit: 3, per_ms: 1_000}
+      assert caps.authenticated_ceiling == %{limit: 10, per_ms: 1_000}
+      assert caps.measured_against =~ "ceilings NOT measured"
+
+      # Read from the venue's published endpoint list, never probed with a write.
+      assert caps.supports_order_preview == true
+      assert caps.supports_order_replace == true
+      assert caps.supported_instrument_types == [:spot, :future]
     end
 
     test "credentials buy a higher ceiling, and both are declared" do
@@ -332,7 +362,10 @@ defmodule DpExchange.CoinbaseTest do
 
       # The socket cannot connect, so subscribe reports the failure rather than claiming
       # a subscription that will never deliver.
-      assert {:error, _reason} = Coinbase.subscribe(~w(BTC-USD), call_opts)
+      # `:feed_not_started` would mean the call never reached the running feed, which is
+      # the wiring this test claims to check.
+      assert {:error, subscribe_reason} = Coinbase.subscribe(~w(BTC-USD), call_opts)
+      refute subscribe_reason == :feed_not_started
 
       # Coverage is observed, so nothing arrived and nothing is covered.
       assert Coinbase.coverage(call_opts) == %{}
@@ -343,7 +376,8 @@ defmodule DpExchange.CoinbaseTest do
 
       # A fresh symbol tries the connection again rather than giving up silently after
       # one failure — and reports the same real failure again, not a stale `:ok`.
-      assert {:error, _reason} = Coinbase.update_symbols(~w(ETH-USD), call_opts)
+      assert {:error, update_reason} = Coinbase.update_symbols(~w(ETH-USD), call_opts)
+      refute update_reason == :feed_not_started
 
       assert :ok = Coinbase.subscribe_notices(call_opts)
 

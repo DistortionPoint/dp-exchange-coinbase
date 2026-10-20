@@ -548,6 +548,28 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       assert only.id == "t-1"
     end
 
+    test "a print before a sub-second :since is dropped: the wire bound is floored seconds" do
+      # `since` goes to the venue as whole seconds (floored), so the venue may return a print
+      # from up to a second BEFORE it. The inclusive bound is applied exactly here (MD4).
+      rows = [
+        tape_row("t-before", "10", "2026-08-28T14:00:00.200000Z"),
+        tape_row("t-at", "10", "2026-08-28T14:00:00.500000Z"),
+        tape_row("t-after", "10", "2026-08-28T14:00:01Z")
+      ]
+
+      since = ~U[2026-08-28 14:00:00.500000Z]
+
+      assert {:ok, kept} =
+               Rest.get_trades("BTC-USD",
+                 limit: 10,
+                 since: since,
+                 plug: responding(%{"trades" => rows}),
+                 retry_attempts: 0
+               )
+
+      assert Enum.map(kept, & &1.id) == ["t-at", "t-after"]
+    end
+
     test "a trade price of zero or less refuses the reply (MD6)" do
       for bad <- ["0", "-1"] do
         body = %{"trades" => [tape_row("t-1", bad, "2026-08-28T14:53:45Z")]}
@@ -664,7 +686,8 @@ defmodule DpExchange.Coinbase.OrderBookTest do
       assert {:ok, [t]} =
                Rest.get_trades("BTC-USD", limit: 10, plug: responding(body), retry_attempts: 0)
 
-      refute t.broken
+      # `refute nil` passes too: a decoder that left `broken` unset would slip past it.
+      assert t.broken == false
     end
 
     test "the public path is used without a credential" do

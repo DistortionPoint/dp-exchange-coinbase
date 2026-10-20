@@ -113,7 +113,7 @@ defmodule DpExchange.Coinbase.DecoderEdgeCasesTest do
         {"absurd high", bar(1_700_000_000, %{"high" => "1e999999999"})},
         {"no start", Map.delete(bar(1_700_000_000), "start")},
         {"zero start", bar(0)},
-        {"millisecond start", bar(1_700_000_000_000_000_000)}
+        {"nanosecond start", bar(1_700_000_000_000_000_000)}
       ]
 
       for {label, row} <- broken do
@@ -121,6 +121,30 @@ defmodule DpExchange.Coinbase.DecoderEdgeCasesTest do
 
         assert {:error, _reason} = Rest.get_historical_prices("BTC-USD", "1m", [], opts(body)),
                "#{label} was accepted"
+      end
+    end
+
+    test "a start that is not epoch seconds is refused as undated, never read in another unit" do
+      # Seconds is the venue's unit; a millisecond or microsecond value is out of
+      # `DateTime.from_unix/1`'s range and must be refused by name, not raise and not be
+      # rescaled by magnitude. Zero and negative would otherwise quietly become 1970.
+      starts = [
+        1_700_000_000_000,
+        1_700_000_000_000_000,
+        "1700000000000",
+        0,
+        -1,
+        "-1700000000",
+        "1700000000.5",
+        "2023-11-14T22:13:20Z"
+      ]
+
+      for start <- starts do
+        body = %{"candles" => [Map.put(bar(1_700_000_000), "start", start)]}
+
+        assert {:error, :missing_venue_timestamp} ==
+                 Rest.get_historical_prices("BTC-USD", "1m", [], opts(body)),
+               "start #{inspect(start)} was not refused as undated"
       end
     end
 
@@ -423,10 +447,26 @@ defmodule DpExchange.Coinbase.DecoderEdgeCasesTest do
     end
 
     test "no credential, and an empty one, take the public path on both sides" do
+      test_pid = self()
+
+      reporting = fn conn ->
+        auth = Plug.Conn.get_req_header(conn, "authorization")
+        send(test_pid, {:requested, conn.request_path, auth})
+        responding(%{"products" => []}).(conn)
+      end
+
       for creds <- [nil, %{}] do
         assert {:ok, _symbols} = Fake.get_symbols(credentials: creds)
         assert {:ok, _overview} = Fake.get_market_overview(credentials: creds)
         assert {:ok, _instruments} = Fake.list_instruments(credentials: creds)
+
+        # The real side: the public path, and no token on the wire.
+        assert {:ok, _real} =
+                 Rest.get_symbols(credentials: creds, plug: reporting, retry_attempts: 0)
+
+        assert_received {:requested, path, authorization}
+        assert String.ends_with?(path, "/market/products")
+        assert authorization == []
       end
 
       assert {:ok, _symbols} = Fake.get_symbols(credentials: @credentials)

@@ -476,21 +476,37 @@ defmodule DpExchange.Coinbase.FuturesTest do
     test "a 500 is an error on each of them, because retrying can help" do
       opts = [plug: failing(500), retry_attempts: 0]
 
-      assert {:error, _reason} = Rest.list_futures_positions(@credentials, opts)
-      assert {:error, _reason} = Rest.get_futures_balance_summary(@credentials, opts)
-      assert {:error, _reason} = Rest.list_futures_sweeps(@credentials, opts)
-      assert {:error, _reason} = Rest.schedule_futures_sweep(@credentials, plug: failing(500))
-      assert {:error, _reason} = Rest.cancel_futures_sweep(@credentials, plug: failing(500))
-      assert {:error, _reason} = Rest.get_intraday_margin_setting(@credentials, opts)
+      # A read that the venue failed is the venue's own error; a write that MAY have been
+      # accepted is `:write_unconfirmed`. A bare `{:error, _}` would also pass for a
+      # validation refusal that never sent anything, which is not what is claimed here.
 
-      assert {:error, _reason} =
+      assert {:error, {:exchange_error, :coinbase, _text}} =
+               Rest.list_futures_positions(@credentials, opts)
+
+      assert {:error, {:exchange_error, :coinbase, _text}} =
+               Rest.get_futures_balance_summary(@credentials, opts)
+
+      assert {:error, {:exchange_error, :coinbase, _text}} =
+               Rest.list_futures_sweeps(@credentials, opts)
+
+      assert {:error, {:write_unconfirmed, nil, {:exchange_error, :coinbase, _text}}} =
+               Rest.schedule_futures_sweep(@credentials, plug: failing(500))
+
+      assert {:error, {:write_unconfirmed, nil, {:exchange_error, :coinbase, _text}}} =
+               Rest.cancel_futures_sweep(@credentials, plug: failing(500))
+
+      assert {:error, {:exchange_error, :coinbase, _text}} =
+               Rest.get_intraday_margin_setting(@credentials, opts)
+
+      assert {:error, {:write_unconfirmed, nil, {:exchange_error, :coinbase, _text}}} =
                Rest.set_intraday_margin_setting(
                  @credentials,
                  "INTRADAY_MARGIN_SETTING_STANDARD",
                  opts
                )
 
-      assert {:error, _reason} = Rest.get_current_margin_window(@credentials, opts)
+      assert {:error, {:exchange_error, :coinbase, _text}} =
+               Rest.get_current_margin_window(@credentials, opts)
     end
 
     test "a sweep amount given as a plain string is passed through" do
