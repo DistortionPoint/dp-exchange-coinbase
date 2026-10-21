@@ -45,6 +45,10 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
   alias WebSockex.{Utils}
   @handshake_guid "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+  # ## VENDORED FIX (7) — the most one frame, or one fragmented message, may hold. 32 MiB: a
+  # `level2` snapshot of ~44,000 rows is a few megabytes. See the moduledoc.
+  @default_max_frame_bytes 33_554_432
+
   @moduledoc ~S"""
   A **vendored, patched fork of `websockex` 0.5.1**, private to this package — never
   `alias`ed or referenced as `WebSockex` from outside `DpExchange.Coinbase`, and not part
@@ -94,7 +98,7 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
 
   ## What changed from upstream 0.5.1
 
-  **Exactly six things**, each marked `## VENDORED FIX` at its call site below:
+  **Exactly seven things**, each marked `## VENDORED FIX` at its call site below:
 
   1. `websocket_loop/3` gains a clause for `{:error, %WebSockex.FrameError{}}`, routed
      through the *already-existing* `handle_close({:error, reason}, ...)` path that
@@ -138,6 +142,15 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
      `$websockex_send` message is the frame itself, JWT included, and a crashing special
      process prints its mailbox in the crash report; the frames were also left to the sender's
      monitor instead of an answer. Added 2026-10-20.
+  7. A frame, or a fragmented message, has a size bound (`:max_frame_bytes`, default 32 MiB).
+     Upstream trusts the length in a frame header: `buffer_chunks/2` holds every chunk until
+     the announced last byte arrives, so a header announcing 2^63 bytes held whatever followed
+     for as long as the peer cared to send, and `handle_fragment/4` joined continuation frames
+     without limit. A header announcing more than the bound, a buffer past it, or a fragmented
+     message past it is answered as RFC 6455 §7.4.1 provides for a message the endpoint cannot
+     process: a close frame with status 1009, through the ordinary `handle_close/4` path, so
+     `c:handle_disconnect/2` runs and a reconnect gets a fresh buffer. The held chunks are
+     released first. Added 2026-10-21.
 
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
@@ -334,6 +347,8 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
     and instead will invoke the `c:handle_disconnect/2` callback. This option
     only matters during process initialization. The `handle_disconnect`
     callback is always invoked if an established connection is lost.
+  - `:max_frame_bytes` - Vendored fix 7: the most bytes one frame or one fragmented message
+    may hold before the connection is closed with status 1009. Default 32 MiB.
   - `:debug` - Options to set the debug options for `:sys.handle_debug`.
   - `:name` - An atom that the registers the process with name locally.
     Can also be a `{:via, module, term}` or `{:global, term}` tuple.
@@ -343,6 +358,7 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
   @type option ::
           WebSockex.Conn.connection_option()
           | {:async, boolean}
+          | {:max_frame_bytes, pos_integer}
           | {:debug, debug_opts}
           | {:name, atom | {:global, term} | {:via, module, term}}
           | {:handle_initial_conn_failure, boolean}
@@ -836,7 +852,9 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
       pending: [],
       pending_size: 0,
       need: nil,
-      fragment: nil
+      fragment: nil,
+      # ## VENDORED FIX (7) — see `oversized?/1`.
+      max_frame_bytes: Keyword.get(opts, :max_frame_bytes, @default_max_frame_bytes)
     }
 
     handle_conn_failure = Keyword.get(opts, :handle_initial_conn_failure, false)
@@ -964,39 +982,64 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
         handle_close({:error, frame_error}, parent, debug, state)
 
       :incomplete ->
-        transport = state.conn.transport
-        socket = state.conn.socket
-
-        receive do
-          {:system, from, req} ->
-            state = Map.put(state, :connection_status, :connected)
-            :sys.handle_system_msg(req, from, parent, __MODULE__, debug, state)
-
-          {:"$websockex_cast", msg} ->
-            debug = Utils.sys_debug(debug, {:in, :cast, msg}, state)
-            common_handle({:handle_cast, msg}, parent, debug, state)
-
-          {:"$websockex_send", from, frame} ->
-            sync_send(frame, from, parent, debug, state)
-
-          {^transport, ^socket, message} ->
-            chunks = read_all_data(transport, socket, [message])
-            websocket_loop(parent, debug, buffer_chunks(state, chunks))
-
-          {:tcp_closed, ^socket} ->
-            handle_close({:remote, :closed}, parent, debug, state)
-
-          {:ssl_closed, ^socket} ->
-            handle_close({:remote, :closed}, parent, debug, state)
-
-          {:EXIT, ^parent, reason} ->
-            terminate(reason, parent, debug, state)
-
-          msg ->
-            debug = Utils.sys_debug(debug, {:in, :msg, msg}, state)
-            common_handle({:handle_info, msg}, parent, debug, state)
+        # ## VENDORED FIX (7) — the bound is checked on the frame still being read, which is
+        # all `state.buffer` holds here: `parse_frame/1` has just consumed every complete
+        # frame from it. A backlog of many small frames is therefore never mistaken for one
+        # large one, and a frame that never completes is closed on its header.
+        if oversized?(state) do
+          released = %{state | buffer: <<>>, pending: [], pending_size: 0, need: nil}
+          handle_close({:local, 1009, "frame too large"}, parent, debug, released)
+        else
+          receive_more(parent, debug, state)
         end
     end
+  end
+
+  defp receive_more(parent, debug, state) do
+    transport = state.conn.transport
+    socket = state.conn.socket
+
+    receive do
+      {:system, from, req} ->
+        state = Map.put(state, :connection_status, :connected)
+        :sys.handle_system_msg(req, from, parent, __MODULE__, debug, state)
+
+      {:"$websockex_cast", msg} ->
+        debug = Utils.sys_debug(debug, {:in, :cast, msg}, state)
+        common_handle({:handle_cast, msg}, parent, debug, state)
+
+      {:"$websockex_send", from, frame} ->
+        sync_send(frame, from, parent, debug, state)
+
+      {^transport, ^socket, message} ->
+        chunks = read_all_data(transport, socket, [message])
+        websocket_loop(parent, debug, buffer_chunks(state, chunks))
+
+      {:tcp_closed, ^socket} ->
+        handle_close({:remote, :closed}, parent, debug, state)
+
+      {:ssl_closed, ^socket} ->
+        handle_close({:remote, :closed}, parent, debug, state)
+
+      {:EXIT, ^parent, reason} ->
+        terminate(reason, parent, debug, state)
+
+      msg ->
+        debug = Utils.sys_debug(debug, {:in, :msg, msg}, state)
+        common_handle({:handle_info, msg}, parent, debug, state)
+    end
+  end
+
+  # ## VENDORED FIX (7) — whether the frame being read has announced, or already held, more
+  # than `state.max_frame_bytes`. `need` is the total the header at the head of the buffer
+  # announced (`nil` while none is on record); the buffer is checked as well, because a header
+  # `frame_need/1` cannot read is joined on every chunk.
+  defp oversized?(%{max_frame_bytes: limit, need: need, buffer: buffer}) do
+    # The first chunk of a frame is joined into an empty buffer before any header is on record,
+    # so `need` is still `nil` then; the header is read from the buffer instead.
+    announced = need || frame_need(buffer)
+
+    (is_integer(announced) and announced > limit) or byte_size(buffer) > limit
   end
 
   defp read_all_data(transport, socket, buffer) do
@@ -1116,6 +1159,17 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
 
   defp handle_frame(frame, parent, debug, state) do
     common_handle({:handle_frame, frame}, parent, debug, state)
+  end
+
+  # ## VENDORED FIX (7) — a fragmented message past the bound is closed, not joined.
+  defp handle_fragment(
+         {kind, next},
+         parent,
+         debug,
+         %{fragment: {_type, part}, max_frame_bytes: limit} = state
+       )
+       when kind in [:continuation, :finish] and byte_size(part) + byte_size(next) > limit do
+    handle_close({:local, 1009, "message too large"}, parent, debug, %{state | fragment: nil})
   end
 
   defp handle_fragment({:fragment, type, part}, parent, debug, %{fragment: nil} = state) do

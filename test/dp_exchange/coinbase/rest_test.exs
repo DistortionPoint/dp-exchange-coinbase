@@ -60,7 +60,7 @@ defmodule DpExchange.Coinbase.RestTest do
                Rest.get_price("BTC-USD", plug: responding(@ticker), retry_attempts: 0)
 
       assert Decimal.equal?(quote_struct.price, Decimal.new("79478.7"))
-      assert quote_struct.venue_time == ~U[2026-08-28 14:53:45.649112Z]
+      assert DateTime.compare(quote_struct.venue_time, ~U[2026-08-28 14:53:45.649112Z]) == :eq
       assert quote_struct.provider == :coinbase
       # The newest trade's own size: one print (dp-exchange-core issue #42).
       assert quote_struct.volume_window == :print
@@ -222,8 +222,8 @@ defmodule DpExchange.Coinbase.RestTest do
                  retry_attempts: 0
                )
 
-      assert first.opened_at == DateTime.from_unix!(1_787_928_660)
-      assert second.opened_at == DateTime.from_unix!(1_787_928_720)
+      assert DateTime.compare(first.opened_at, DateTime.from_unix!(1_787_928_660)) == :eq
+      assert DateTime.compare(second.opened_at, DateTime.from_unix!(1_787_928_720)) == :eq
       assert DpExchange.Core.Timeframe.aligned?(first.opened_at, "1m")
     end
 
@@ -461,7 +461,7 @@ defmodule DpExchange.Coinbase.RestTest do
       opts = [plug: responding(body), retry_attempts: 0]
 
       assert {:ok, [closed]} = Rest.get_historical_prices("BTC-USD", "1d", [], opts)
-      assert closed.opened_at == DateTime.from_unix!(now - 2 * 86_400)
+      assert DateTime.compare(closed.opened_at, DateTime.from_unix!(now - 2 * 86_400)) == :eq
 
       assert {:ok, [_closed, forming]} =
                Rest.get_historical_prices(
@@ -471,7 +471,7 @@ defmodule DpExchange.Coinbase.RestTest do
                  Keyword.put(opts, :include_partial, true)
                )
 
-      assert forming.opened_at == DateTime.from_unix!(now - 30)
+      assert DateTime.compare(forming.opened_at, DateTime.from_unix!(now - 30)) == :eq
 
       assert {:ok, [_closed]} =
                Rest.get_historical_prices(
@@ -493,7 +493,7 @@ defmodule DpExchange.Coinbase.RestTest do
                  retry_attempts: 0
                )
 
-      assert newest_closed.opened_at == DateTime.from_unix!(now - 86_400)
+      assert DateTime.compare(newest_closed.opened_at, DateTime.from_unix!(now - 86_400)) == :eq
     end
 
     test "start is inclusive and end exclusive on opened_at, filtered client-side (MD2)" do
@@ -508,8 +508,8 @@ defmodule DpExchange.Coinbase.RestTest do
                  retry_attempts: 0
                )
 
-      assert first.opened_at == start
-      assert second.opened_at == DateTime.from_unix!(base + 60)
+      assert DateTime.compare(first.opened_at, start) == :eq
+      assert DateTime.compare(second.opened_at, DateTime.from_unix!(base + 60)) == :eq
 
       assert {:ok, [only]} =
                Rest.get_historical_prices(
@@ -520,7 +520,7 @@ defmodule DpExchange.Coinbase.RestTest do
                  retry_attempts: 0
                )
 
-      assert only.opened_at == DateTime.from_unix!(base + 60)
+      assert DateTime.compare(only.opened_at, DateTime.from_unix!(base + 60)) == :eq
     end
 
     test "limit is sent to the venue; anything else is refused, never ignored (MD4)" do

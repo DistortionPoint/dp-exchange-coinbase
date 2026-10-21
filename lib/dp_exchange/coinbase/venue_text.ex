@@ -33,8 +33,11 @@ defmodule DpExchange.Coinbase.VenueText do
   def bound(term) do
     size = :erlang.external_size(term)
 
+    # The round trip copies the term out of the document it was decoded from. The bytes are
+    # this function's own, so every atom in them exists already: `[:safe]` costs nothing and
+    # keeps Core conformance group 53 (no `binary_to_term` without it) true of this package.
     if size <= @max_term_bytes do
-      term |> :erlang.term_to_binary() |> :erlang.binary_to_term()
+      :erlang.binary_to_term(:erlang.term_to_binary(term), [:safe])
     else
       inspect(term, limit: 20, printable_limit: 256) <> "… (#{size} bytes)"
     end

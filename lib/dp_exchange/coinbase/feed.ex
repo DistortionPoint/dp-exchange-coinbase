@@ -1358,6 +1358,12 @@ defmodule DpExchange.Coinbase.Feed do
   # than leaning on the HTTP layer's.
   @alias_map_fetch_timeout_ms 30_000
 
+  # How many delivered names that are not in `wanted` this feed records as coverage, beyond
+  # the size of `wanted` itself. The venue lists well under a thousand SPOT products and an
+  # aliased one arrives under a name that IS wanted, so ordinary use never reaches it. See
+  # `handle_info({:dp_exchange, :coinbase, payload}, state)`.
+  @max_unwanted_delivering 1_024
+
   # Re-issue every shard's current subscriptions on this cadence, unconditionally — see
   # the moduledoc on reconnects.
   #
@@ -1716,6 +1722,46 @@ defmodule DpExchange.Coinbase.Feed do
     end
   end
 
+  # `alias_map_source` is called with no arguments inside a task. Anything else raised
+  # `BadFunctionError` there, was caught and reported as a failed catalogue fetch, and left
+  # attribution off with a notice that blamed the venue. It fails the start instead.
+  defp validate_alias_map_source!(source) when is_function(source, 0), do: source
+
+  defp validate_alias_map_source!(other) do
+    raise ArgumentError,
+          "alias_map_source must be a function of no arguments, got a #{term_kind(other)}"
+  end
+
+  # The socket dials `:url`. A `%URI{}` is accepted as `WebSockex` accepts one. Nothing else
+  # can be dialled, and it was found out when the first shard opened. The value is never
+  # echoed: a URL can carry userinfo or a token in its query.
+  defp validate_url!(nil), do: :ok
+  defp validate_url!(url) when is_binary(url), do: :ok
+  defp validate_url!(%URI{}), do: :ok
+
+  defp validate_url!(other) do
+    raise ArgumentError, "url must be a string or a %URI{}, got a #{term_kind(other)}"
+  end
+
+  # A pre-established connection is a process. Anything else was ignored by `get_socket/1`,
+  # which dialled the venue instead, so a test that passed a name opened a real connection.
+  defp validate_injected_socket!(nil), do: :ok
+  defp validate_injected_socket!(socket) when is_pid(socket), do: :ok
+
+  defp validate_injected_socket!(other) do
+    raise ArgumentError, "socket must be a pid, got a #{term_kind(other)}"
+  end
+
+  # The kind of a refused option value, never the value.
+  defp term_kind(value) when is_binary(value), do: "string"
+  defp term_kind(value) when is_list(value), do: "list"
+  defp term_kind(value) when is_tuple(value), do: "tuple"
+  defp term_kind(value) when is_map(value), do: "map"
+  defp term_kind(value) when is_number(value), do: "number"
+  defp term_kind(value) when is_atom(value), do: "atom"
+  defp term_kind(value) when is_function(value), do: "function of another arity"
+  defp term_kind(_value), do: "term"
+
   @doc """
   Starts the feed, registered under `opts[:name]` (default `DpExchange.Coinbase.Feed`).
 
@@ -1929,7 +1975,14 @@ defmodule DpExchange.Coinbase.Feed do
     # section. Production supplies none, so this default runs: the venue's own public
     # catalogue, reusing `Rest`'s existing products fetch rather than a second way to ask.
     alias_map_source =
-      Config.opt(opts, :alias_map_source, default_alias_map_source(opts, credentials))
+      opts
+      |> Config.opt(:alias_map_source, default_alias_map_source(opts, credentials))
+      |> validate_alias_map_source!()
+
+    # Checked here, not at the first socket open or the first fetch: a value that cannot work
+    # would otherwise start a feed that fails on its first subscribe, in `handle_call/3`.
+    validate_url!(Keyword.get(opts, :url))
+    validate_injected_socket!(Keyword.get(opts, :socket))
 
     {:ok,
      %{
@@ -1991,6 +2044,9 @@ defmodule DpExchange.Coinbase.Feed do
        # `coverage_by_kind/1` needs the kinds themselves, which is why this is a nested
        # map rather than the bare timestamp it used to be.
        delivering: %{},
+       # Whether the `:data_quality` notice for unwanted deliveries past the bound has been
+       # sent since `delivering` was last narrowed. See `note_unrecorded/2`.
+       unrecorded_noticed?: false,
        resubscribe_interval_ms: resubscribe_interval_ms,
        # See `@default_level2_pairs_per_socket` and the moduledoc's own section on this
        # option. Read once, here, already validated — `level2_shards/2` (via
@@ -2440,12 +2496,18 @@ defmodule DpExchange.Coinbase.Feed do
         deliver(acc, {:dp_exchange, :coinbase, with_symbol(payload, symbol)})
       end)
 
-    delivering =
-      Enum.reduce(targets, state.delivering, fn symbol, acc ->
-        Map.update(acc, symbol, %{kind => now}, &Map.put(&1, kind, now))
-      end)
+    # **A name nobody asked for is recorded only up to a bound.** `resolve_names/2` falls back
+    # to the venue's own id when the alias catalogue is not loaded, so a frame for a product
+    # outside `wanted` reached here and was recorded for good: only an unsubscribe of that very
+    # name, or an `update_symbols/2`, ever removed it (a reconnect narrows only the shard's own
+    # symbols). A venue naming endless distinct products therefore grew `delivering` without
+    # end, and `coverage/1` answered `:stream` for each. Wanted names are always recorded;
+    # beyond `@max_unwanted_delivering` others, an unwanted name is still delivered but not
+    # recorded, and one `:data_quality` notice per bound says so.
+    {delivering, unrecorded} =
+      Enum.reduce(targets, {state.delivering, []}, &record_delivery(&2, &1, kind, now, state))
 
-    {:noreply, %{state | delivering: delivering}}
+    {:noreply, note_unrecorded(%{state | delivering: delivering}, unrecorded)}
   end
 
   def handle_info(:fetch_alias_map, state) do
@@ -2923,7 +2985,12 @@ defmodule DpExchange.Coinbase.Feed do
     wanted = MapSet.difference(state.wanted, MapSet.new(symbols))
 
     state =
-      persist(%{state | wanted: wanted, delivering: Map.drop(state.delivering, symbols)})
+      persist(%{
+        state
+        | wanted: wanted,
+          delivering: Map.drop(state.delivering, symbols),
+          unrecorded_noticed?: false
+      })
 
     {result, state} = reshard(state)
     {:reply, result, state}
@@ -2946,7 +3013,12 @@ defmodule DpExchange.Coinbase.Feed do
     wanted = MapSet.new(symbols)
 
     state =
-      %{state | wanted: wanted, delivering: Map.take(state.delivering, symbols)}
+      %{
+        state
+        | wanted: wanted,
+          delivering: Map.take(state.delivering, symbols),
+          unrecorded_noticed?: false
+      }
       |> maybe_schedule_alias_map_fetch()
       |> persist()
 
@@ -3992,6 +4064,44 @@ defmodule DpExchange.Coinbase.Feed do
           end
       end
     end)
+  end
+
+  # One delivered name, recorded as coverage unless it is an unwanted one past the bound.
+  # `unrecorded` collects the names that were not, for `note_unrecorded/2`.
+  defp record_delivery({delivering, unrecorded}, symbol, kind, now, state) do
+    if recordable?(delivering, symbol, state.wanted) do
+      {Map.update(delivering, symbol, %{kind => now}, &Map.put(&1, kind, now)), unrecorded}
+    else
+      {delivering, [symbol | unrecorded]}
+    end
+  end
+
+  # A wanted name, or one already recorded, is always recordable. Any other is recordable
+  # while `delivering` holds fewer than `@max_unwanted_delivering` entries beyond the size of
+  # `wanted`, which bounds the unwanted entries without counting them on every frame.
+  defp recordable?(delivering, symbol, wanted) do
+    MapSet.member?(wanted, symbol) or Map.has_key?(delivering, symbol) or
+      map_size(delivering) < MapSet.size(wanted) + @max_unwanted_delivering
+  end
+
+  defp note_unrecorded(state, []), do: state
+
+  defp note_unrecorded(state, _unrecorded) do
+    if state.unrecorded_noticed? do
+      state
+    else
+      notice =
+        Notice.new(:data_quality, :coinbase,
+          severity: :warning,
+          message:
+            "the venue is delivering for more than #{@max_unwanted_delivering} products " <>
+              "nobody subscribed to; they are delivered but no longer recorded in coverage/1",
+          details: %{reason: :unwanted_delivery_unrecorded, limit: @max_unwanted_delivering}
+        )
+
+      fan_out(state.notice_subscribers, {:dp_exchange, :coinbase, notice})
+      %{state | unrecorded_noticed?: true}
+    end
   end
 
   # The one shard-level event this module could not report before: every other

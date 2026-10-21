@@ -184,9 +184,32 @@ past 1,024 bytes is cut and ends `"… (N bytes)"` with the full size; a larger 
 replaced by a bounded rendering with the same mark; anything shorter is returned unchanged,
 copied out of the response.
 
+**A start option the tree does not read is refused at start** (2026-10-21):
+`{:error, {:unknown_option, key}}`, and `{:error, {:invalid_options, opts}}` for options that
+are not a keyword list. A misspelt `shard_spacing:` used to be dropped and the tree ran with
+the default. The keys it reads are `:name`, `:feed`, `:limiter`, `:ledger`, `:credentials`,
+`:channels`, `:level2_pairs_per_socket`, `:shard_spacing_ms`, `:resubscribe_interval_ms`,
+`:subscribe_retry_delay_ms`, `:max_queue_len`, `:alias_map_source`,
+`:alias_map_retry_delay_ms`, `:alias_map_fetch_timeout_ms`, `:alias_map_refresh_ms`, `:url`
+and `:socket` (a pre-established connection, for a test), plus the transport keys the
+alias-catalogue fetch forwards to the HTTP client (`:plug`, `:timeout`, `:retry_attempts`,
+`:retry_delay`, `:weight`). A value that cannot work fails the start with an `ArgumentError`
+that names the option and never echoes the value: `:url` must be a string or a `%URI{}`,
+`:alias_map_source` a function of no arguments, `:socket` a pid.
+
+**A number from the venue, or an amount you pass, is bounded** (2026-10-21): at most 34
+significant digits and 64 places either side of the point, else it is unreadable
+(`{:invalid_decimal, field, value}` from a venue field, `{:invalid_quantity | :invalid_price |
+:invalid_amount, value}` from yours). The bound is this package's judgement, not a venue
+figure; the finest increment in the committed specs is `1e-8`. The price and size of an order
+are never rounded to a product's increment: they are sent exactly as given, in plain notation,
+and a venue refusal of an off-increment value is returned as the venue's own reason.
+`quantization/1` answers an increment or a maximum at or below zero as `nil`, and a minimum
+below zero as `nil`: "the venue did not say", never a divisor of zero.
+
 ## A connect that never finishes ends at a deadline, and a malformed close frame is a reconnect
 
-Two things this package's socket does that the `websockex` library it is built on does not.
+Things this package's socket does that the `websockex` library it is built on does not.
 Both come from a private, patched fork of websockex 0.5.1's process loop,
 ``DpExchange.Coinbase.Vendor.WebSockex``, carried from `dp_exchange_webull` on 2026-09-27.
 
@@ -203,6 +226,15 @@ Both come from a private, patched fork of websockex 0.5.1's process loop,
   the whole accumulated buffer on every chunk, quadratic in the chunk count; the fork holds
   the chunks until the frame header's own length says the last byte is in. Same bytes, same
   order, same frames.
+- **A frame has a size bound** (2026-10-21). The length a frame header announces is the
+  peer's word, and upstream held every chunk until that many bytes had arrived: a header
+  announcing 2^63 bytes held whatever followed for as long as the peer sent it, and
+  continuation frames were joined without limit. A frame, or a fragmented message, past
+  `:max_frame_bytes` (default 32 MiB; a `level2` snapshot is a few megabytes) is closed with
+  status 1009: an ordinary `:link_down` and reconnect, with the held chunks released first. A
+  burst of many small, whole frames is never mistaken for one large frame. `Feed` does not
+  forward `:max_frame_bytes`, so a consumer starting the venue through `DpExchange.Coinbase`
+  gets the default.
 - **A sent frame's payload is not telemetry metadata** (2026-10-20). Upstream puts the whole
   frame in `[:websockex, :frame, :sent]`, and an authenticated subscribe's frame carries a
   signed JWT; any handler on that event, a catch-all logger included, was handed a live bearer
@@ -520,6 +552,15 @@ guesses: frames deliver under whichever id the venue actually sent, and
 `subscribe_notices/1` receives one `:data_quality` notice saying attribution is
 degraded and why. There is no `-USDC`/`-USD` string-munging fallback — it would be wrong
 for any pair the venue does not actually alias.
+
+**`coverage/1` records a bounded number of names you did not subscribe** (2026-10-21). In
+that degraded state a frame for a product outside what you asked for is still delivered under
+the venue's id, and used to be recorded as covered for good. A name you subscribed is always
+recorded. Past 1,024 names you did not, a frame is delivered but not recorded, and
+`subscribe_notices/1` receives one `:data_quality` notice with `details.reason:
+:unwanted_delivery_unrecorded`. `update_symbols/2` and `unsubscribe/2` narrow the record and
+arm the notice again. A `:sequence_gap` notice's `details.symbols` is built from a per-connection
+set bounded the same way (1,024 products, one `details.reason: :delivering_set_full` notice).
 
 
 ### Choose your channels — `level2` is opt-out
@@ -1475,8 +1516,8 @@ None of these raises in your process, and the fake runs the same check in the sa
   `from`/`to` must be non-empty strings (`{:invalid_id, :from | :to, v}`);
   `opts[:from]`/`opts[:to]` on commit and read must both be non-empty strings
   (`{:error, :from_and_to_required}`), and on `transfer_internal/4` both portfolio uuids are
-  required (`{:error, :missing_portfolio}`). `transfer_internal/4` also needs a non-empty
-  asset (`{:invalid_asset, v}`), and the same portfolio on both sides moves nothing and is
+  required (`{:error, :missing_portfolio}`). `transfer_internal/4` also needs a non-blank
+  asset (`{:invalid_asset, v}`; `"  "` is blank), and the same portfolio on both sides moves nothing and is
   `{:error, {:invalid_transfer, :same_account}}`. The amount is a finite positive `Decimal`
   (a float, integer or string is `{:invalid_amount, v}`). The callback's two option lists are
   merged as `Keyword.merge(request_opts, opts)`, so the third argument (`opts`) wins over the

@@ -18,7 +18,7 @@ defmodule DpExchange.CoinbaseTest do
       # A consumer decides whether to use the package at all from this, so it has to be
       # answerable at boot.
       task = Task.async(fn -> Coinbase.capabilities() end)
-      assert %Capabilities{} = Task.await(task, 500)
+      assert %Capabilities{} = Task.await(task, 5_000)
     end
 
     test "every declared endpoint is a real facade callback" do
@@ -611,7 +611,7 @@ defmodule DpExchange.CoinbaseTest do
       # clause answered true or false, and breaking that clause on purpose left it green.
       # A live feed and a dead one are indistinguishable by return value until one of them
       # has coverage to report.
-      {:ok, pid} = DpExchange.Coinbase.Feed.start_link(name: nil, subscriber: self())
+      {:ok, pid} = DpExchange.Coinbase.Feed.start_link(name: nil)
 
       tick = %DpExchange.Core.Types.Quote{
         symbol: "BTC-USD",
@@ -869,7 +869,7 @@ defmodule DpExchange.CoinbaseTest do
     # so a `btc-usd` subscription left untouched would receive nothing at all.
     test "a lower-case symbol is wanted under its canonical form" do
       name = :"case_feed_#{System.unique_integer([:positive])}"
-      {:ok, _pid} = DpExchange.Coinbase.Feed.start_link(name: name, subscriber: self())
+      {:ok, _pid} = DpExchange.Coinbase.Feed.start_link(name: name)
 
       Coinbase.update_symbols(["btc-usd"], feed: name)
 

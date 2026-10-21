@@ -61,7 +61,7 @@ defmodule DpExchange.Coinbase.MarketTradesTest do
       assert Decimal.equal?(first.price, Decimal.new("85709"))
       assert Decimal.equal?(first.quantity, Decimal.new("0.000013"))
       # The trade's own `time`, not the envelope's send time.
-      assert first.timestamp == ~U[2026-10-02 14:54:03.336865Z]
+      assert DateTime.compare(first.timestamp, ~U[2026-10-02 14:54:03.336865Z]) == :eq
       assert first.provider == :coinbase
       assert first.broken == false
       assert second.id == "1101555350"
@@ -150,7 +150,7 @@ defmodule DpExchange.Coinbase.MarketTradesTest do
                frame(envelope([trade(%{"time" => "2026-10-02T16:54:03.341087+02:00"})]))
 
       assert_received {:dp_exchange, :coinbase, %Types.Trade{} = delivered}
-      assert delivered.timestamp == ~U[2026-10-02 14:54:03.341087Z]
+      assert DateTime.compare(delivered.timestamp, ~U[2026-10-02 14:54:03.341087Z]) == :eq
     end
 
     test "one bad trade does not cost the good trade beside it" do

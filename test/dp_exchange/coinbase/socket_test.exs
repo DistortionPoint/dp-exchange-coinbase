@@ -1466,7 +1466,7 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(multi_time)}, state())
 
       assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
-      assert book.venue_time == ~U[2026-08-28 14:53:47.000000Z]
+      assert DateTime.compare(book.venue_time, ~U[2026-08-28 14:53:47.000000Z]) == :eq
     end
 
     test "a large snapshot sharing a few timestamps still takes the newest, once each" do
@@ -1492,7 +1492,7 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(frame)}, state())
 
       assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
-      assert book.venue_time == ~U[2026-08-28 14:53:49.500000Z]
+      assert DateTime.compare(book.venue_time, ~U[2026-08-28 14:53:49.500000Z]) == :eq
       assert length(book.bids) == 6_000
       assert {top, _size} = hd(book.bids)
       assert Decimal.equal?(top, Decimal.new(6_000))
@@ -1529,7 +1529,7 @@ defmodule DpExchange.Coinbase.SocketTest do
       assert {:ok, _s} = Socket.handle_frame({:text, Jason.encode!(mixed)}, state())
 
       assert_received {:dp_exchange, :coinbase, %Types.OrderBook{} = book}
-      assert book.venue_time == ~U[2026-08-28 14:53:45.000000Z]
+      assert DateTime.compare(book.venue_time, ~U[2026-08-28 14:53:45.000000Z]) == :eq
     end
 
     test "no market state survives a frame — the socket's own state carries nothing " <>

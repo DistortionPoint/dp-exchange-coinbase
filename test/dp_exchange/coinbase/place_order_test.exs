@@ -433,7 +433,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                  retry_attempts: 0
                )
 
-      refute_receive :request_was_sent
+      refute_receive :request_was_sent, 500
     end
 
     test "credentials that cannot sign at all are refused by name" do
@@ -447,7 +447,7 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
       assert {:error, {:missing_credentials, :coinbase}} =
                Rest.place_order(%{}, limit_request(), plug: plug, retry_attempts: 0)
 
-      refute_receive :request_was_sent
+      refute_receive :request_was_sent, 500
     end
   end
 

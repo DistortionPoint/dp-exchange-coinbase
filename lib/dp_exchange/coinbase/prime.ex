@@ -72,7 +72,7 @@ defmodule DpExchange.Coinbase.Prime do
   is worse than a map a caller has to read.
   """
 
-  alias DpExchange.Coinbase.{IdempotencyKey, OptionKeys, VenueText}
+  alias DpExchange.Coinbase.{IdempotencyKey, OptionKeys, VenueNumber, VenueText}
   alias DpExchange.Core.{Config, HttpClient, Types}
 
   @base_url "https://api.prime.coinbase.com"
@@ -533,7 +533,7 @@ defmodule DpExchange.Coinbase.Prime do
   @doc """
   The positional checks of a staking write, which run before its options: `asset` a
   non-blank string (`{:invalid_asset, v}`), then `amount` a finite, positive `Decimal` within
-  64 places (`{:invalid_amount, v}`).
+  64 places either side of the point and 34 digits (`{:invalid_amount, v}`).
   """
   @spec validate_positional(term(), term()) :: :ok | {:error, term()}
   def validate_positional(asset, amount) do
@@ -603,10 +603,10 @@ defmodule DpExchange.Coinbase.Prime do
 
   defp valid_amount(amount), do: {:error, {:invalid_amount, amount}}
 
-  defp usable?(%Decimal{exp: exp}) when exp > 64 or exp < -64, do: false
-
+  # Finite, within `VenueNumber`'s bound (64 places either side of the point, 34 digits) and
+  # above zero. The digit half was missing: a `Decimal` of a million digits was sent whole.
   defp usable?(%Decimal{} = amount),
-    do: not Decimal.inf?(amount) and not Decimal.nan?(amount) and Decimal.positive?(amount)
+    do: VenueNumber.bounded?(amount) and Decimal.positive?(amount)
 
   # `claim_rewards/4`'s amount is optional (absent claims the maximum), but a PRESENT one is
   # held to the same rule as every other write here. A float or integer used to raise
@@ -660,7 +660,12 @@ defmodule DpExchange.Coinbase.Prime do
   # raised `Protocol.UndefinedError` in the caller's process for a tuple or map key.
   defp nameable_keys?(map), do: Enum.all?(Map.keys(map), &(is_atom(&1) or is_binary(&1)))
 
-  defp valid_asset(asset) when is_binary(asset) and asset != "", do: :ok
+  # Blank after trimming is no asset either: `"  "` was upper-cased and sent as the
+  # `currency_symbol`, although `validate_positional/2` documents a non-blank string.
+  defp valid_asset(asset) when is_binary(asset) do
+    if String.trim(asset) == "", do: {:error, {:invalid_asset, asset}}, else: :ok
+  end
+
   defp valid_asset(asset), do: {:error, {:invalid_asset, asset}}
 
   # **A portfolio or wallet id is a path segment, and a path segment is checked.** Both are
@@ -995,7 +1000,7 @@ defmodule DpExchange.Coinbase.Prime do
   defp bounded_reason(reason) when is_atom(reason), do: reason
 
   defp bounded_reason(reason) when is_binary(reason),
-    do: String.slice(reason, 0, @max_unconfirmed_text)
+    do: reason |> String.slice(0, @max_unconfirmed_text) |> :binary.copy()
 
   defp bounded_reason({:exchange_error, venue, message}) when is_atom(venue),
     do: {:exchange_error, venue, bounded_reason(message)}

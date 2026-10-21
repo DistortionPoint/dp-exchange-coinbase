@@ -51,6 +51,13 @@ defmodule DpExchange.Coinbase.OptionKeys do
   A function that answers `Venue.not_supported()` is not in the table and does not consult
   it: the endpoint's absence is the more useful answer whatever the options.
 
+  ## Start options are checked too
+
+  The options the venue's tree is started with (`child_spec/1`, `start_link/1`) have their own
+  list of keys, `check_start/1`, applied by `DpExchange.Coinbase.Supervisor.start_link/1`: a
+  key the tree does not read is `{:error, {:unknown_option, key}}` at start, not a default
+  silently kept.
+
   ## The table
 
   The map under `@keys` in this module is the source; this list mirrors it.
@@ -199,6 +206,57 @@ defmodule DpExchange.Coinbase.OptionKeys do
     preview_unstake_wallet: [],
     claim_rewards: [:amount, :body, :idempotency_key]
   }
+
+  # The keys the venue's tree reads at start. `Supervisor`, `Feed` and `Socket` read these and
+  # nothing else from the options `child_spec/1` and `start_link/1` take:
+  #
+  #   * naming: `:name`, and the three it derives (`:feed`, `:limiter`, `:ledger`);
+  #   * `:credentials`, wrapped before it is stored;
+  #   * the feed: `:channels`, `:level2_pairs_per_socket`, `:shard_spacing_ms`,
+  #     `:resubscribe_interval_ms`, `:subscribe_retry_delay_ms`, `:max_queue_len`, and the
+  #     alias catalogue's `:alias_map_source`, `:alias_map_retry_delay_ms`,
+  #     `:alias_map_fetch_timeout_ms` and `:alias_map_refresh_ms`;
+  #   * the socket: `:url`, and `:socket`, a pre-established connection for a test;
+  #   * the transport keys the default alias-catalogue fetch forwards to the HTTP client
+  #     (`default_alias_map_source/2` in `Feed`): `:plug`, `:timeout`, `:retry_attempts`,
+  #     `:retry_delay` and `:weight`.
+  @start_keys [
+    :name,
+    :feed,
+    :limiter,
+    :ledger,
+    :credentials,
+    :channels,
+    :level2_pairs_per_socket,
+    :shard_spacing_ms,
+    :resubscribe_interval_ms,
+    :subscribe_retry_delay_ms,
+    :max_queue_len,
+    :alias_map_source,
+    :alias_map_retry_delay_ms,
+    :alias_map_fetch_timeout_ms,
+    :alias_map_refresh_ms,
+    :url,
+    :socket,
+    :plug,
+    :timeout,
+    :retry_attempts,
+    :retry_delay,
+    :weight
+  ]
+
+  @doc """
+  Checks the options the venue's tree is started with against the keys it reads.
+
+  `:ok`, `{:error, {:unknown_option, key}}` for the first key it does not read, or
+  `{:error, {:invalid_options, opts}}` when `opts` is not a keyword list. A misspelt
+  `level2_pairs_per_sockt:` or `shard_spacing:` was dropped without a word and the tree ran
+  with the default the caller meant to change, which for `shard_spacing_ms` is a connect
+  burst against a venue that limits connections to 8 per second per IP.
+  """
+  @spec check_start(term()) ::
+          :ok | {:error, {:unknown_option, atom()} | {:invalid_options, term()}}
+  def check_start(opts), do: Options.check(opts, @start_keys)
 
   @doc """
   The keys `function` reads itself, without the shared transport keys.

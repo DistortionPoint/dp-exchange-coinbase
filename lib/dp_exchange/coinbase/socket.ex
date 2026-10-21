@@ -252,7 +252,7 @@ defmodule DpExchange.Coinbase.Socket do
   `%WebSockex.ConnError{original: :timeout}`, on a start and on every reconnect.
   """
 
-  alias DpExchange.Coinbase.{Auth, Credentials, FrameSender, SymbolFormat}
+  alias DpExchange.Coinbase.{Auth, Credentials, FrameSender, SymbolFormat, VenueNumber}
   alias DpExchange.Core.{Config, Fanout, Notice, Telemetry, Types}
 
   # `use` and `start_link/4` go to this package's vendored fork, never the real
@@ -309,6 +309,10 @@ defmodule DpExchange.Coinbase.Socket do
   # How many distinct `:data_quality` faults one connection remembers having reported. See
   # `report_quality/5`.
   @max_reported_faults 256
+
+  # How many distinct products one connection remembers having delivered for. See
+  # `remember_delivering/2`.
+  @max_delivering 1_024
 
   @doc """
   How long to wait before the reconnect that `attempt` is about to make.
@@ -395,6 +399,11 @@ defmodule DpExchange.Coinbase.Socket do
       WebSockex's own default.
     * `:socket_recv_timeout` — ms to wait for the HTTP upgrade response. Defaults to
       `#{@socket_recv_timeout_ms}`, same reasoning.
+    * `:max_frame_bytes` — the most one frame, or one fragmented message, may hold before
+      the connection is closed with status 1009 (a `:link_down`, then the ordinary
+      reconnect). Defaults to 32 MiB; a `level2` snapshot is a few megabytes. See
+      `DpExchange.Coinbase.Vendor.WebSockex`, vendored fix 7, for why the length a peer
+      announces cannot be trusted.
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
@@ -686,6 +695,51 @@ defmodule DpExchange.Coinbase.Socket do
   end
 
   def handle_info(_message, state), do: {:ok, state}
+
+  # **The set of symbols this connection has delivered for is bounded.** A product id comes
+  # from the venue's frame, not from what was subscribed (an aliased product arrives under
+  # another name), so a venue naming endless distinct products would grow this set for as
+  # long as the connection lived, and a `:sequence_gap` notice lists all of it. A shard
+  # carries at most 100 products and the venue lists far fewer than `@max_delivering`, so
+  # the bound is never reached in ordinary use. At it, the symbol is not remembered (it is
+  # still delivered), and one `:data_quality` notice per connection says so. Symbols are
+  # copied: this set outlives the frame each one was read from.
+  defp remember_delivering(state, symbol) do
+    delivering = state.delivering
+
+    cond do
+      MapSet.member?(delivering, symbol) ->
+        state
+
+      MapSet.size(delivering) < @max_delivering ->
+        %{state | delivering: MapSet.put(delivering, :binary.copy(symbol))}
+
+      true ->
+        delivering_full(state)
+    end
+  end
+
+  defp delivering_full(state) do
+    fault = {:delivering, "set full", :bound}
+    reported = Map.get(state, :reported_faults, MapSet.new())
+
+    if MapSet.member?(reported, fault) do
+      state
+    else
+      notify(
+        state,
+        Notice.new(:data_quality, :coinbase,
+          severity: :warning,
+          message:
+            "this connection has delivered for #{@max_delivering} distinct products; " <>
+              "further products are delivered but no longer named in a sequence-gap notice",
+          details: %{reason: :delivering_set_full, limit: @max_delivering}
+        )
+      )
+
+      remember_fault(state, reported, fault)
+    end
+  end
 
   defp forget_delivering(state, :remove, removed) do
     case Map.get(state, :delivering) do
@@ -1091,7 +1145,7 @@ defmodule DpExchange.Coinbase.Socket do
     case build_quote(ticker, symbol, timestamp) do
       {:ok, quote_struct} ->
         send(state.subscriber, {:dp_exchange, :coinbase, quote_struct})
-        %{state | delivering: MapSet.put(state.delivering, symbol)}
+        remember_delivering(state, symbol)
 
       {:error, reason} ->
         report_quality(state, :ticker, product, reason)
@@ -1173,7 +1227,7 @@ defmodule DpExchange.Coinbase.Socket do
 
   defp deliver_trade(%Types.Trade{} = built, state) do
     send(state.subscriber, {:dp_exchange, :coinbase, built})
-    %{state | delivering: MapSet.put(state.delivering, built.symbol)}
+    remember_delivering(state, built.symbol)
   end
 
   defp trade_subject(%{"product_id" => product}) when is_binary(product), do: product
@@ -1357,7 +1411,7 @@ defmodule DpExchange.Coinbase.Socket do
         }
 
         send(state.subscriber, {:dp_exchange, :coinbase, order_book})
-        %{state | delivering: MapSet.put(state.delivering, symbol)}
+        remember_delivering(state, symbol)
 
       {:error, reason} ->
         report_quality(state, :level2, symbol, reason)
@@ -1397,7 +1451,7 @@ defmodule DpExchange.Coinbase.Socket do
         }
 
         send(state.subscriber, {:dp_exchange, :coinbase, delta})
-        %{state | delivering: MapSet.put(state.delivering, symbol)}
+        remember_delivering(state, symbol)
 
       {:error, reason} ->
         report_quality(state, :level2, symbol, reason)
@@ -1576,26 +1630,20 @@ defmodule DpExchange.Coinbase.Socket do
   # which is why this comment is in each of them now rather than one of them.
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
-      {parsed, ""} ->
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed) or absurd_exponent?(parsed),
-          do: nil,
-          else: parsed
-
-      _unparsable ->
-        nil
+      {parsed, ""} -> if VenueNumber.bounded?(parsed), do: parsed
+      _unparsable -> nil
     end
   end
 
   defp decimal(_other), do: nil
 
-  # `"1e999999999"` parses fully and is finite, but `Decimal.compare/2` (which `sorted/2`
-  # runs on every snapshot) aligns two operands by multiplying one coefficient by
-  # `10 ** exponent_difference`: a ~415 MB integer for that string, built inside the socket
-  # process. No price or size this venue quotes comes near 64 places either side of the point
-  # (the finest increment in the committed specs is 1e-8), so a wider exponent is refused as
-  # unreadable rather than admitted as a number. Not measured against the live venue.
-  defp absurd_exponent?(%Decimal{exp: exp}), do: exp > 64 or exp < -64
-
+  # (The bound `decimal/1` applies, beyond NaN and the infinities.) `"1e999999999"` parses
+  # fully and is finite, but `Decimal.compare/2` (which `sorted/2` runs on every snapshot)
+  # aligns two operands by multiplying one coefficient by `10 ** exponent_difference`: a
+  # ~415 MB integer for that string, built inside the socket process. A string of a million
+  # digits is the same hazard on the other axis. Both are refused as unreadable by
+  # `VenueNumber.bounded?/1` (64 places either side of the point, 34 digits) rather than
+  # admitted as numbers. Not measured against the live venue.
   defp required_decimal(nil, field), do: {:error, {:missing_required_field, field}}
 
   defp required_decimal(value, field) do

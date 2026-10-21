@@ -103,6 +103,25 @@ defmodule DpExchange.Coinbase.PositionAndEditPreviewTest do
       assert Decimal.equal?(order.quantity, Decimal.new("3"))
     end
 
+    test "a closing size below zero is not stated: nil, not a negative quantity" do
+      body = %{
+        "success" => true,
+        "success_response" => %{"order_id" => "close-1"},
+        "order_configuration" => %{"market_market_ioc" => %{"base_size" => "-3"}}
+      }
+
+      assert {:ok, order} =
+               Rest.close_position(@credentials, "BTC-USD",
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert order.quantity == nil
+      # The type and time in force are still the venue's echo.
+      assert order.order_type == :market
+      assert order.time_in_force == :ioc
+    end
+
     test "the side is nil, and stays nil" do
       # A closing order's side is the opposite of the position's, and this package never read
       # the position. `:sell` would be right most of the time, which is what makes it

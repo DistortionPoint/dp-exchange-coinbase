@@ -160,7 +160,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
 
       assert quote_struct.symbol == "BTC-USD"
       assert Decimal.equal?(quote_struct.price, Decimal.new("140.91"))
-      assert quote_struct.venue_time == ~U[2021-05-31 09:59:59Z]
+      assert DateTime.compare(quote_struct.venue_time, ~U[2021-05-31 09:59:59Z]) == :eq
       assert quote_struct.provider == :coinbase
     end
 
@@ -210,7 +210,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       assert trade.side == :sell
       assert Decimal.equal?(trade.price, Decimal.new("140.91"))
       assert Decimal.equal?(trade.quantity, Decimal.new("4"))
-      assert trade.timestamp == ~U[2021-05-31 09:59:59Z]
+      assert DateTime.compare(trade.timestamp, ~U[2021-05-31 09:59:59Z]) == :eq
     end
   end
 
@@ -228,7 +228,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert candle.opened_at == DateTime.from_unix!(1_639_508_050)
+      assert DateTime.compare(candle.opened_at, DateTime.from_unix!(1_639_508_050)) == :eq
       assert Decimal.equal?(candle.open, Decimal.new("140.21"))
       assert Decimal.equal?(candle.high, Decimal.new("140.21"))
       assert Decimal.equal?(candle.low, Decimal.new("140.21"))
@@ -387,7 +387,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       assert Decimal.equal?(top.ask, Decimal.new("79478.71"))
       assert Decimal.equal?(top.bid_size, Decimal.new("0.5"))
       # `PriceBook.time` has no vendor field-level example (manual fill; see fills.md).
-      assert top.venue_time == ~U[2026-08-28 14:53:45Z]
+      assert DateTime.compare(top.venue_time, ~U[2026-08-28 14:53:45Z]) == :eq
     end
   end
 
@@ -406,7 +406,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       assert [{price, size}] = book.bids
       assert Decimal.equal?(price, Decimal.new("79478.71"))
       assert Decimal.equal?(size, Decimal.new("0.5"))
-      assert book.venue_time == ~U[2026-08-28 14:53:45Z]
+      assert DateTime.compare(book.venue_time, ~U[2026-08-28 14:53:45Z]) == :eq
     end
 
     test "the public path decodes GetPublicProductBook the same way" do
@@ -840,7 +840,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       assert Decimal.equal?(fill.quantity, Decimal.new("0.001"))
       assert Decimal.equal?(fill.fee, Decimal.new("1.25"))
       assert fill.liquidity == :maker
-      assert fill.timestamp == ~U[2021-05-31 09:59:59Z]
+      assert DateTime.compare(fill.timestamp, ~U[2021-05-31 09:59:59Z]) == :eq
     end
   end
 
@@ -1310,7 +1310,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       assert Decimal.equal?(ask_price, Decimal.new("79479.0"))
       # `L2Update.event_time` (per-row) becomes `venue_time` as the MAX across the
       # snapshot's own rows — see `socket.ex`'s `latest_event_time/1`.
-      assert book.venue_time == ~U[2026-08-28 14:53:45.610000Z]
+      assert DateTime.compare(book.venue_time, ~U[2026-08-28 14:53:45.610000Z]) == :eq
     end
 
     test "an update decodes to OrderBookDelta, carrying the venue's own bid side and a zero-quantity removal" do
@@ -1323,7 +1323,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
       # `new_quantity: "0"` is the venue's own removal signal — see the moduledoc's
       # "A zero quantity means the level ceased to exist".
       assert Decimal.equal?(quantity, Decimal.new("0"))
-      assert delta.timestamp == ~U[2026-08-28 14:53:46.600000Z]
+      assert DateTime.compare(delta.timestamp, ~U[2026-08-28 14:53:46.600000Z]) == :eq
     end
   end
 

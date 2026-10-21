@@ -100,7 +100,7 @@ defmodule DpExchange.Coinbase.FillsTest do
       assert Decimal.equal?(f.price, Decimal.new("40100.50"))
       assert Decimal.equal?(f.fee, Decimal.new("1.20"))
       assert f.liquidity == :taker
-      assert f.timestamp == ~U[2026-08-31 09:59:59Z]
+      assert DateTime.compare(f.timestamp, ~U[2026-08-31 09:59:59Z]) == :eq
       assert f.provider == :coinbase
     end
 

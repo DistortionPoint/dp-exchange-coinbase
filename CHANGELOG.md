@@ -20,6 +20,76 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A number was bounded by its exponent only.** `Rest`, `Socket` and `Prime` each refused a
+  venue or caller number whose exponent passed 64 places and none refused a wide one, so a
+  string or `Decimal` of a million digits parsed and was sent or compared whole. The rule is
+  now one module, `DpExchange.Coinbase.VenueNumber`: at most 34 significant digits and 64
+  places either side of the point; NaN and the infinities are not numbers. A venue field past
+  it is `{:invalid_decimal, field, value}` (or `nil` where the field is optional), an order
+  amount `{:invalid_quantity | :invalid_price | ...}`, a staking amount `{:invalid_amount, _}`.
+  A bare integer in a venue field is held to it too. The bound is this package's judgement, not
+  a venue measurement.
+- **`quantization/1` carried a zero or negative increment, and a non-text status.** An
+  increment or a maximum at or below zero is `nil` ("the venue did not say"), as an
+  unparseable one already was; a minimum below zero is `nil`; a `status` that is not a string
+  is `nil`. A caller rounding to a zero increment divided by zero. Orders are not rounded to
+  an increment anywhere: the price and size are sent as given, in plain notation, and the
+  venue's refusal of an off-increment value is returned (pinned by a test).
+- **A blank asset (`"  "`) was accepted** by `transfer_internal/4` and by the Prime staking
+  writes, which document a non-blank one. Both are `{:error, {:invalid_asset, v}}` now, the
+  `Fake` included.
+- **Amounts the decoders carried unchecked.** A closing order's size below zero, a futures
+  position's `average_cost` or `mark_price` at or below zero, and a conversion's `from_amount`
+  or `to_amount` below zero are `nil` ("the venue did not say"), as an order read back already
+  was.
+- **The vendored socket trusted a frame header's length.** websockex 0.5.1 held every chunk
+  until the announced last byte arrived, so a header announcing 2^63 bytes held whatever
+  followed without bound, and continuation frames were joined without limit. A frame, or a
+  fragmented message, past `:max_frame_bytes` (default 32 MiB, a `Socket.start_link/1` option)
+  is closed with status 1009: an ordinary `:link_down` and reconnect, held chunks released. A
+  backlog of many small whole frames is not mistaken for one large frame (vendored fix 7).
+- **`Socket` kept every product it had delivered for, for the life of the connection.** The
+  set names the symbols of a `:sequence_gap` notice and grew with whatever product ids the venue
+  sent. It is bounded at 1,024 products; past it a product is still delivered, not remembered,
+  and one `:data_quality` notice (`details.reason: :delivering_set_full`) says so.
+- **`Feed` recorded every unsubscribed name the venue delivered, with no bound.** With the
+  alias catalogue not loaded a frame for a product outside `wanted` is delivered under the
+  venue's id and was recorded as coverage for good (only `update_symbols/2` or an unsubscribe
+  of that exact name removed it). A name you subscribed is always recorded; past 1,024 you did
+  not, a frame is delivered but not recorded, and one `:data_quality` notice
+  (`details.reason: :unwanted_delivery_unrecorded`) says so. `update_symbols/2` and
+  `unsubscribe/2` narrow the record and arm the notice again.
+- **A refusal's words, an order id and a venue text were sub-binaries of the whole response**
+  and kept it alive for as long as a caller held the error or the struct. They are copied
+  (`Rest`, `Prime`).
+
+### Changed
+
+- **A start option the tree does not read is refused at start.** `Supervisor.start_link/1`
+  (and so `DpExchange.Coinbase.start_link/1`) answers `{:error, {:unknown_option, key}}` for a
+  key outside `OptionKeys.check_start/1`'s table, and `{:error, {:invalid_options, opts}}` for
+  options that are not a keyword list (credentials redacted). A misspelt `shard_spacing:` was
+  dropped and the tree ran with the default.
+- **`Feed` refuses a start value that cannot work.** `:url` must be a string or a `%URI{}`,
+  `:alias_map_source` a function of no arguments and `:socket` a pid, each an `ArgumentError`
+  at start that names the option and never echoes the value; a bad one used to surface at the
+  first shard open or catalogue fetch.
+
+### Security
+
+- `VenueText.bound/1` decodes its copy with `:erlang.binary_to_term(bytes, [:safe])`. The
+  bytes were always its own (a copy of an already-decoded term), so nothing changes in
+  behaviour; Core conformance group 53 now requires `[:safe]` on every `binary_to_term`.
+
+### Dependencies
+
+- `dp_exchange_core` floor raised to `~> 0.3.119` (tick AQ: value types refuse non-positive
+  prices and negative sizes, conformance groups 52 and 53, group 26 requires coverage to
+  empty after the last unsubscribe).
+
+
 ## [0.3.144] - 2026-10-20
 
 ### Dependencies

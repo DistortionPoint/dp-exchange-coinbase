@@ -55,7 +55,7 @@ defmodule DpExchange.Coinbase.Supervisor do
 
   use Supervisor
 
-  alias DpExchange.Coinbase.{Credentials, Feed, FeedLedger}
+  alias DpExchange.Coinbase.{Credentials, Feed, FeedLedger, OptionKeys}
   alias DpExchange.Core.{Config, DefaultRateLimiter}
 
   @doc """
@@ -66,11 +66,18 @@ defmodule DpExchange.Coinbase.Supervisor do
   supervisor stores it, so a caller that starts this module directly rather than through
   `DpExchange.Coinbase.child_spec/1` still does not leave the key pair in this supervisor's
   state, or in the `Start Call:` line of its `Feed` child, which OTP prints on a crash.
+
+  **An option this tree does not read is refused at start**, as
+  `{:error, {:unknown_option, key}}` (and options that are not a keyword list as
+  `{:error, {:invalid_options, opts}}`): see `DpExchange.Coinbase.OptionKeys.check_start/1`.
+  A misspelt `shard_spacing:` used to be dropped and the tree ran with the default.
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
-    opts = Credentials.wrap_opt(opts)
-    Supervisor.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+    with :ok <- OptionKeys.check_start(opts) do
+      opts = Credentials.wrap_opt(opts)
+      Supervisor.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+    end
   end
 
   @impl true

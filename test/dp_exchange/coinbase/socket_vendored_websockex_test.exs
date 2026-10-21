@@ -15,6 +15,9 @@ defmodule DpExchange.Coinbase.SocketVendoredWebSockexTest do
       `websocket_loop/3` has no clause for `WebSockex.Frame.parse_frame/1`'s own error
       return, so a close frame with an invalid status code raised `CaseClauseError` before
       `handle_disconnect/2` could run. Measured live on Webull; the defect is websockex's.
+    * **A frame has a size bound.** The length a header announces is the peer's word, and
+      websockex 0.5.1 held every chunk until that many bytes had arrived. A frame, or a
+      fragmented message, past `:max_frame_bytes` is closed with status 1009 instead.
   """
 
   use ExUnit.Case, async: true
@@ -103,6 +106,58 @@ defmodule DpExchange.Coinbase.SocketVendoredWebSockexTest do
     assert_receive {:dp_exchange, :coinbase,
                     %Notice{kind: :credentials_rejected, message: "unauthorized after"}},
                    10_000
+  end
+
+  # Vendored fix 7: the length a frame header announces is the peer's word. websockex 0.5.1
+  # held every chunk until the announced last byte arrived, so a header announcing four
+  # gigabytes held whatever followed for as long as the peer sent it.
+  test "a frame announcing more than the bound is closed with 1009, not held" do
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade_then_announce_four_gigabytes/1])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port) ++ [max_frame_bytes: 2_000])
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    # `handle_disconnect/2` ran, with this side's own close as the reason. Held, the socket
+    # would still be waiting for the other 4 GB and no notice would come.
+    assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_down, details: details}},
+                   10_000
+
+    assert details.reason == :disconnected
+    assert details.message =~ "frame too large"
+    assert Process.alive?(socket_pid)
+  end
+
+  test "a fragmented message that grows past the bound is closed with 1009" do
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade_then_send_oversized_fragments/1])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port) ++ [max_frame_bytes: 2_000])
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    assert_receive {:dp_exchange, :coinbase, %Notice{kind: :link_down, details: details}},
+                   10_000
+
+    assert details.message =~ "too large"
+    assert Process.alive?(socket_pid)
+  end
+
+  test "many small frames in one read are not mistaken for one large frame" do
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade_then_send_backlog/1])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port) ++ [max_frame_bytes: 2_000])
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    # 100 frames of ~40 bytes arrive together: 4 KB in the buffer, twice the bound, and every
+    # frame is whole. All 100 are decoded and none closes the connection.
+    for _frame <- 1..100 do
+      assert_receive {:dp_exchange, :coinbase,
+                      %Notice{kind: :credentials_rejected, message: "unauthorized backlog"}},
+                     10_000
+    end
+
+    refute_receive {:dp_exchange, :coinbase, %Notice{kind: :link_down}}
   end
 
   test "a wss peer whose certificate nothing trusts is refused" do
@@ -220,6 +275,70 @@ defmodule DpExchange.Coinbase.SocketVendoredWebSockexTest do
 
     # Waits for the client to tear down, so the close cannot race the frames.
     _client_closed = :gen_tcp.recv(socket, 0, 15_000)
+    :gen_tcp.close(socket)
+  end
+
+  # A text frame whose 64-bit length announces 4 GB, followed by 1,500 bytes of it.
+  defp upgrade_then_announce_four_gigabytes(socket) do
+    upgrade(socket)
+    :ok = :gen_tcp.send(socket, <<0x81, 127, 4_000_000_000::64>> <> String.duplicate("x", 1_500))
+
+    # Waits for the client's close frame, so the close cannot race the header.
+    await_client_close(socket)
+    :gen_tcp.close(socket)
+  end
+
+  # Waits for the client's CLOSE frame, not for any byte. Every connection opens with the
+  # client's heartbeat subscribe, so a bare `recv` returned on that frame and the server then
+  # closed the socket at once: the client's own 1009 close failed to send (`:closed`) and
+  # reported `{:remote, :closed}`, and a burst test saw a `:link_down` that this server caused.
+  defp await_client_close(socket, acc \\ <<>>) do
+    case :gen_tcp.recv(socket, 0, 15_000) do
+      {:ok, data} ->
+        acc = acc <> data
+        if client_closed?(acc), do: :ok, else: await_client_close(socket, acc)
+
+      {:error, _closed} ->
+        :ok
+    end
+  end
+
+  # Client frames are masked. Walks the whole frames received so far (every one here is under
+  # 126 bytes) and says whether any is a close (opcode 8).
+  defp client_closed?(<<0x88, _rest::binary>>), do: true
+
+  defp client_closed?(<<_fin_opcode, 1::1, len::7, _mask::32, rest::binary>>)
+       when len < 126 and byte_size(rest) >= len do
+    <<_payload::binary-size(len), more::binary>> = rest
+    client_closed?(more)
+  end
+
+  defp client_closed?(_partial_or_empty), do: false
+
+  # The start of a fragmented text message and its first continuation, 1,500 bytes each (FIN
+  # clear on both). Each frame is under the 2,000-byte bound; the message is not once the
+  # second arrives. A pause between them keeps them in separate reads.
+  defp upgrade_then_send_oversized_fragments(socket) do
+    upgrade(socket)
+    :ok = :inet.setopts(socket, nodelay: true)
+    payload = String.duplicate("x", 1_500)
+
+    :ok = :gen_tcp.send(socket, <<0x01, 126, 1_500::16>> <> payload)
+    Process.sleep(200)
+    :ok = :gen_tcp.send(socket, <<0x00, 126, 1_500::16>> <> payload)
+
+    await_client_close(socket)
+    :gen_tcp.close(socket)
+  end
+
+  # 100 whole frames in one write: more bytes than the bound, none of them an incomplete frame.
+  defp upgrade_then_send_backlog(socket) do
+    upgrade(socket)
+    body = Jason.encode!(%{"type" => "error", "message" => "unauthorized backlog"})
+    frame = <<0x81, byte_size(body), body::binary>>
+    :ok = :gen_tcp.send(socket, String.duplicate(frame, 100))
+
+    await_client_close(socket)
     :gen_tcp.close(socket)
   end
 

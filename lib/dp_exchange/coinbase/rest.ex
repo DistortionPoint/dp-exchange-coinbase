@@ -39,7 +39,15 @@ defmodule DpExchange.Coinbase.Rest do
   live one.
   """
 
-  alias DpExchange.Coinbase.{Auth, IdempotencyKey, OptionKeys, SymbolFormat, VenueText}
+  alias DpExchange.Coinbase.{
+    Auth,
+    IdempotencyKey,
+    OptionKeys,
+    SymbolFormat,
+    VenueNumber,
+    VenueText
+  }
+
   alias DpExchange.Core.{Config, HttpClient, Instrument, Timeframe, Types}
 
   require Logger
@@ -1349,8 +1357,9 @@ defmodule DpExchange.Coinbase.Rest do
       status: status,
       from_asset: from,
       to_asset: to,
-      from_amount: amount_value(trade["user_entered_amount"]),
-      to_amount: amount_value(trade["total"]),
+      # An amount below zero is no amount (`non_negative/1`): not stated, `nil`.
+      from_amount: trade["user_entered_amount"] |> amount_value() |> non_negative(),
+      to_amount: trade["total"] |> amount_value() |> non_negative(),
       rate: nil,
       # `fees` is an array of `Fee` (docs/reference/coinbase/openapi/at-spec.yaml:9968), so
       # reading it directly here handed `decimal/1` a list and produced `nil` silently rather
@@ -1555,8 +1564,9 @@ defmodule DpExchange.Coinbase.Rest do
       # The contract types this as an atom. `:future` is the vocabulary `Capabilities`
       # already uses for the instrument kind, so it is the one used here.
       instrument_type: :future,
-      average_cost: amount_value(row["avg_entry_price"]),
-      mark_price: amount_value(row["current_price"]),
+      # A price at or below zero is no price any market traded at (MD6): not stated, `nil`.
+      average_cost: row["avg_entry_price"] |> amount_value() |> positive_price(),
+      mark_price: row["current_price"] |> amount_value() |> positive_price(),
       notional_value: nil,
       # See the moduledoc above: the venue publishes a *daily* realised figure and no
       # lifetime one, and this field means the second.
@@ -1612,6 +1622,9 @@ defmodule DpExchange.Coinbase.Rest do
   defp amount_value(nil), do: nil
   defp amount_value(%{"value" => value}), do: decimal(value)
   defp amount_value(value), do: decimal(value)
+
+  defp positive_price(%Decimal{} = price), do: if(Decimal.positive?(price), do: price)
+  defp positive_price(nil), do: nil
 
   @doc """
   The futures account's balances and margin — `GET /cfm/balance_summary`.
@@ -2193,16 +2206,25 @@ defmodule DpExchange.Coinbase.Rest do
          # happen to share a value on many products, which is exactly why sending
          # `quote_increment` here read as correct in testing against real venue data while
          # rounding to the wrong field's rule on any product where they diverge.
-         price_increment: decimal(product["price_increment"]),
-         quantity_increment: decimal(product["base_increment"]),
-         min_quantity: decimal(product["base_min_size"]),
+         #
+         # **Each figure is a Decimal the venue stated and this can read, else `nil`.** An
+         # increment or a maximum at or below zero is no granularity and no ceiling (a caller
+         # rounding to it divides by zero or sizes against nothing), so it is `nil` — "the
+         # venue did not say" — as an unparseable one already was. A minimum may be zero
+         # ("no minimum") but not negative. The venue sends strings; `decimal/1` reads them
+         # (and a JSON number, should one arrive) as a `Decimal`, and refuses one wider than
+         # `VenueNumber` admits.
+         price_increment: positive_or_nil(product["price_increment"]),
+         quantity_increment: positive_or_nil(product["base_increment"]),
+         min_quantity: product["base_min_size"] |> decimal() |> non_negative(),
          # A separate minimum on a different thing: cash, not units.
-         min_quote_size: decimal(product["quote_min_size"]),
-         max_quantity: decimal(product["base_max_size"]),
-         max_quote_size: decimal(product["quote_max_size"]),
+         min_quote_size: product["quote_min_size"] |> decimal() |> non_negative(),
+         max_quantity: positive_or_nil(product["base_max_size"]),
+         max_quote_size: positive_or_nil(product["quote_max_size"]),
          # The venue's own word, unmapped: a boolean would lose the difference between a
-         # product that is paused and one that is gone.
-         status: product["status"]
+         # product that is paused and one that is gone. A word that is not text (a number, a
+         # map) is `nil`, not carried into a field typed as a string.
+         status: text_or_nil(product["status"])
        }}
     end
   end
@@ -2530,7 +2552,11 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  defp valid_currency(asset) when is_binary(asset) and asset != "", do: :ok
+  # Blank after trimming is no currency either: `"  "` was sent as the `funds` currency.
+  defp valid_currency(asset) when is_binary(asset) do
+    if String.trim(asset) == "", do: {:error, {:invalid_asset, asset}}, else: :ok
+  end
+
   defp valid_currency(asset), do: {:error, {:invalid_asset, asset}}
 
   @doc """
@@ -2919,7 +2945,7 @@ defmodule DpExchange.Coinbase.Rest do
   end
 
   defp venue_error(status, text),
-    do: {:venue_error, status, String.slice(text, 0, @max_refusal_text)}
+    do: {:venue_error, status, text |> String.slice(0, @max_refusal_text) |> :binary.copy()}
 
   # ONE shape, not two. The adapter this was ported from branched on whether credentials
   # were supplied, formatting `:public_ticker` as a flat `{"price": …}` object and
@@ -3634,14 +3660,13 @@ defmodule DpExchange.Coinbase.Rest do
 
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: value
-  defp decimal(value) when is_integer(value), do: Decimal.new(value)
+  # An integer is held to the same bound as a string: `10 ** 100_000` is a number every later
+  # `Decimal` operation walks digit by digit.
+  defp decimal(value) when is_integer(value), do: bounded_or_nil(Decimal.new(value))
 
   # A JSON float (`1.0e300`) is held to the same exponent bound as a string: it parsed as
   # `Decimal` with exponent 300 and compared, added and rounded as one.
-  defp decimal(value) when is_float(value) do
-    parsed = Decimal.from_float(value)
-    if absurd_exponent?(parsed), do: nil, else: parsed
-  end
+  defp decimal(value) when is_float(value), do: bounded_or_nil(Decimal.from_float(value))
 
   # `Decimal.new/1` raises on a string that is not a number. Coinbase sends `""` for a
   # bid or ask it has no value for, which is the same case: absent, not zero — and
@@ -3664,17 +3689,17 @@ defmodule DpExchange.Coinbase.Rest do
   # which is why this comment is in each of them now rather than one of them.
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
-      {parsed, ""} ->
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed) or absurd_exponent?(parsed),
-          do: nil,
-          else: parsed
-
-      _unparsable ->
-        nil
+      {parsed, ""} -> bounded_or_nil(parsed)
+      _unparsable -> nil
     end
   end
 
   defp decimal(_other), do: nil
+
+  # NaN, the infinities and a number wider than `VenueNumber` admits are not readable
+  # numbers: `nil`, "the venue did not say".
+  defp bounded_or_nil(%Decimal{} = parsed),
+    do: if(VenueNumber.bounded?(parsed), do: parsed)
 
   # A size, a limit price or a volume below zero is no quantity any market reports. It parses
   # as a perfectly good number, so `decimal/1` alone let it through as one; it is `nil` here,
@@ -3687,12 +3712,18 @@ defmodule DpExchange.Coinbase.Rest do
 
   # A venue string that is not a string (a number, a map) is not carried into a field the
   # contract types as `String.t() | nil`.
-  defp text_or_nil(value) when is_binary(value), do: value
+  #
+  # Copied: a decoded string is a sub-binary of the whole response, and a catalogue of
+  # hundreds of products held by a consumer would keep the document alive with it.
+  defp text_or_nil(value) when is_binary(value), do: :binary.copy(value)
   defp text_or_nil(_other), do: nil
 
   # A reason the venue quotes back is bounded, as `refusal/2`'s text is: it was copied whole
-  # into `{:order_rejected, _}`, `{:cancel_rejected, _}` and `{:edit_rejected, _}`.
-  defp bounded_text(text) when is_binary(text), do: String.slice(text, 0, @max_refusal_text)
+  # into `{:order_rejected, _}`, `{:cancel_rejected, _}` and `{:edit_rejected, _}`. Copied as
+  # well as cut, for the reason `text_or_nil/1` gives.
+  defp bounded_text(text) when is_binary(text),
+    do: text |> String.slice(0, @max_refusal_text) |> :binary.copy()
+
   defp bounded_text(other), do: other
 
   # A row list the venue sends raw is a list of objects or it is not readable: an entry that is
@@ -3711,12 +3742,6 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  # `"1e999999999"` is finite and parses fully, but comparing or adding it builds a
-  # `10 ** 999_999_999` integer (~415 MB) in the caller's process. No amount this venue
-  # quotes needs more than 64 places either side of the point; wider is refused as unreadable.
-  # Not measured against the live venue.
-  defp absurd_exponent?(%Decimal{exp: exp}), do: exp > 64 or exp < -64
-
   # A garbage or missing value in a field this contract requires must not become a `nil`
   # carried into `@enforce_keys` — a struct's field list does not check that a value is
   # non-nil, only that the key was given. Refuse the record instead of leaking a `nil`
@@ -3726,7 +3751,7 @@ defmodule DpExchange.Coinbase.Rest do
   # A trade id is a non-empty STRING, as the stream's is (`Socket`'s own `required_trade_id/1`
   # refuses a number): a map, a list or a float used to be carried as the id, and a number
   # was a different value on this path than on the stream's for the same print.
-  defp required_trade_id(id) when is_binary(id) and id != "", do: {:ok, id}
+  defp required_trade_id(id) when is_binary(id) and id != "", do: {:ok, :binary.copy(id)}
   defp required_trade_id(nil), do: {:error, {:missing_required_field, :id}}
   defp required_trade_id(""), do: {:error, {:missing_required_field, :id}}
   defp required_trade_id(_unreadable), do: {:error, :unexpected_response_shape}
@@ -3763,7 +3788,7 @@ defmodule DpExchange.Coinbase.Rest do
   # is the sibling that was half-swept.
   defp required_id(nil, field), do: {:error, {:missing_required_field, field}}
   defp required_id("", field), do: {:error, {:missing_required_field, field}}
-  defp required_id(value, _field) when is_binary(value), do: {:ok, value}
+  defp required_id(value, _field) when is_binary(value), do: {:ok, :binary.copy(value)}
   defp required_id(value, _field) when is_integer(value), do: {:ok, Integer.to_string(value)}
 
   # A map or a list is not an id, and `to_string/1` raised on it out of
@@ -4272,15 +4297,13 @@ defmodule DpExchange.Coinbase.Rest do
     end
   end
 
-  # Finite, positive and not absurdly scaled. `decimal/1` bounds a parsed string's exponent
-  # but passes a `%Decimal{}` or float through as given, and `wire_number/1` renders in plain
-  # notation: `%Decimal{coef: 1, exp: 999_999_999}` is a billion-character string built in
-  # the caller's process, and `1.0e300` is a 301-digit "price". Not measured against the
-  # live venue; see `absurd_exponent?/1`.
-  defp usable_positive?(%Decimal{} = amount) do
-    not Decimal.nan?(amount) and not Decimal.inf?(amount) and not absurd_exponent?(amount) and
-      Decimal.positive?(amount)
-  end
+  # Finite, positive and not absurdly scaled. `decimal/1` bounds a parsed string, but passes
+  # a `%Decimal{}` through as given, and `wire_number/1` renders in plain notation:
+  # `%Decimal{coef: 1, exp: 999_999_999}` is a billion-character string built in the caller's
+  # process, and `1.0e300` is a 301-digit "price". Not measured against the live venue; see
+  # `VenueNumber.bounded?/1`.
+  defp usable_positive?(%Decimal{} = amount),
+    do: VenueNumber.bounded?(amount) and Decimal.positive?(amount)
 
   # The wire leaf, built from the amounts `leaf_amounts/3` already normalised and checked.
   #
@@ -4636,7 +4659,7 @@ defmodule DpExchange.Coinbase.Rest do
   defp bounded_reason(reason) when is_atom(reason), do: reason
 
   defp bounded_reason(reason) when is_binary(reason),
-    do: String.slice(reason, 0, @max_unconfirmed_text)
+    do: reason |> String.slice(0, @max_unconfirmed_text) |> :binary.copy()
 
   defp bounded_reason({:exchange_error, venue, message}) when is_atom(venue),
     do: {:exchange_error, venue, bounded_reason(message)}
@@ -5404,7 +5427,9 @@ defmodule DpExchange.Coinbase.Rest do
   defp closing_configuration(%{} = configuration) when map_size(configuration) == 1 do
     [{name, leaf}] = Map.to_list(configuration)
     {type, tif} = Map.get(@configuration_names, name, {nil, nil})
-    {type, tif, decimal(is_map(leaf) && leaf["base_size"])}
+    # A size below zero is no size (`non_negative/1`), as on an order read back.
+    base_size = if is_map(leaf), do: leaf["base_size"]
+    {type, tif, base_size |> decimal() |> non_negative()}
   end
 
   defp closing_configuration(_absent), do: {nil, nil, nil}

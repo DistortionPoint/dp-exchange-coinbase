@@ -108,9 +108,9 @@ defmodule DpExchange.Coinbase.OrderBookTest do
                  retry_attempts: 0
                )
 
-      assert top.venue_time == ~U[2026-08-31 14:53:45.649112Z]
+      assert DateTime.compare(top.venue_time, ~U[2026-08-31 14:53:45.649112Z]) == :eq
       assert top.observed_at
-      refute top.venue_time == top.observed_at
+      refute DateTime.compare(top.venue_time, top.observed_at) == :eq
     end
 
     test "an undated pricebook leaves venue_time nil rather than borrowing our clock" do
