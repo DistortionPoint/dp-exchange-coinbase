@@ -168,6 +168,19 @@ defmodule DpExchange.Coinbase.AccountsTest do
       end
     end
 
+    test "a has_next that is not a boolean is refused, not read as the last page" do
+      for flag <- ["true", 1, %{}] do
+        body = %{"accounts" => [account()], "has_next" => flag, "cursor" => "page2"}
+
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_balances(@credentials, plug: responding(body), retry_attempts: 0),
+               "has_next #{inspect(flag)}"
+
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_accounts(@credentials, plug: responding(body), retry_attempts: 0)
+      end
+    end
+
     test "a single-account read refuses an id that would not name one" do
       for bad <- ["", :atom, 5] do
         opts = [uuid: bad, plug: fn _conn -> raise "must not be sent" end, retry_attempts: 0]

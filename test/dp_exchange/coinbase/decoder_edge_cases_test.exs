@@ -278,6 +278,22 @@ defmodule DpExchange.Coinbase.DecoderEdgeCasesTest do
       end
     end
 
+    test "a pagination.has_next that is not a boolean is not the last page" do
+      # `"true"` read as "no more" returned the first page as the whole catalogue.
+      for flag <- ["true", 1, %{}] do
+        body = %{
+          "products" => [product("BTC-USD")],
+          "pagination" => %{"has_next" => flag, "next_cursor" => "page2"}
+        }
+
+        assert @shape == Rest.get_symbols(opts(body)), "has_next #{inspect(flag)}"
+        assert @shape == Rest.list_instruments(opts(body))
+      end
+
+      done = %{"products" => [product("BTC-USD")], "pagination" => %{"has_next" => false}}
+      assert {:ok, ["BTC-USD"]} = Rest.get_symbols(opts(done))
+    end
+
     test "an overview price, high or low at or below zero is not stated, nor a negative volume" do
       body = %{
         "products" => [

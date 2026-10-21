@@ -915,6 +915,39 @@ defmodule DpExchange.Coinbase.PlaceOrderTest do
                )
     end
 
+    test "an edit of an order that is no longer working is refused, never read back as success" do
+      # `ONLY_OPEN_ORDERS_CAN_BE_EDITED` is one of `EditOrderFailureReason`'s values
+      # (at-spec.yaml:6749). A 200 saying `success: false` for a filled or cancelled order must
+      # not be turned into an `{:ok, order}` by the read-back that follows a real edit.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        body = %{
+          "success" => false,
+          "errors" => [%{"edit_failure_reason" => "ONLY_OPEN_ORDERS_CAN_BE_EDITED"}]
+        }
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:refused, {:edit_rejected, "ONLY_OPEN_ORDERS_CAN_BE_EDITED"}} =
+               Rest.replace_order(
+                 @credentials,
+                 "abc-123",
+                 %{price: Decimal.new("41000"), quantity: Decimal.new("0.5")},
+                 plug: plug
+               )
+
+      assert_receive {:path, edit_path}, 5_000
+      assert edit_path =~ "/orders/edit"
+      # Exactly one request: the venue's refusal ends it, with no read-back.
+      refute_receive {:path, _another}, 500
+    end
+
     test "preview_failure_reason is read when edit_failure_reason is absent" do
       # `EditOrderError` carries both fields
       # (docs/reference/coinbase/openapi/at-spec.yaml:6726-6734). This used to read only

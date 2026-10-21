@@ -41,6 +41,28 @@ defmodule DpExchange.CoinbaseTest do
       assert Coinbase.capabilities().streamable == [:quotes, :order_book, :trades]
     end
 
+    test "the README's endpoint counts are the declaration's, not a number that was once true" do
+      # The README states how many callbacks there are and how many are declared
+      # `:experimental` and `:unsupported`, and how many of those the venue itself does not
+      # serve. Nothing tied them to `capabilities/0`, so a ported endpoint left them stale.
+      caps = Coinbase.capabilities()
+      total = map_size(caps.endpoints)
+      unsupported = length(Capabilities.endpoints_at(caps, :unsupported))
+      experimental = length(Capabilities.endpoints_at(caps, :experimental))
+      venue_absent = length(Coinbase.venue_does_not_serve())
+
+      assert total == length(Venue.behaviour_info(:callbacks))
+      assert experimental + unsupported == total
+
+      readme = File.read!(Path.join([__DIR__, "..", "..", "README.md"]))
+
+      assert readme =~
+               "#{total} callbacks, of which **#{experimental} are declared `:experimental`** " <>
+                 "and #{unsupported} `:unsupported`"
+
+      assert readme =~ "Of the #{unsupported} unsupported endpoints, **#{venue_absent} are"
+    end
+
     test "nothing claims :proven — nothing has run in production" do
       # `:proven` is earned by production use, not by careful implementation. A package
       # that has never traded declaring it would be the exact dishonesty D15 prevents.
@@ -85,6 +107,20 @@ defmodule DpExchange.CoinbaseTest do
         assert Map.get(caps.endpoints, endpoint) == :unsupported
         assert endpoint in Coinbase.venue_does_not_serve()
       end
+    end
+  end
+
+  describe "the margin declaration describes the code" do
+    test "supports_margin is true with a per-account ceiling, and no invented number" do
+      # The package sends `leverage` / `margin_type` and reads a margined CFM account, so
+      # `false` contradicted the code. Core refuses `true` with `nil`; no single ceiling is
+      # published here, so `:per_account` says so rather than a number being made up.
+      caps = Coinbase.capabilities()
+
+      assert caps.supports_margin == true
+      assert caps.max_leverage == :per_account
+      assert caps.measured_against =~ "supports_margin and max_leverage: :per_account"
+      assert caps.measured_against =~ "not probed"
     end
   end
 

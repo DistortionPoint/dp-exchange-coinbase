@@ -1001,7 +1001,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
     # `:channel_unsubscribe` (fire-and-forget, no retry, no ordering guarantee against a
     # sibling `:channel_subscribe`) is gone — see `feed.ex`'s moduledoc, "unsubscribe
     # before subscribe". `:channel_reconcile` replaces it: ONE deferred message carrying
-    # both the departing and arriving symbols, handled by `attempt_channel_reconcile/6`,
+    # both the departing and arriving symbols, handled by `attempt_channel_reconcile/8`,
     # which never sends the subscribe half until the unsubscribe half has succeeded.
 
     test "a :channel_reconcile message unsubscribes before it subscribes, on the same socket" do
@@ -1657,7 +1657,7 @@ defmodule DpExchange.Coinbase.ShardingTest do
       # untouched — the shard under test here is `{"level2", 0}`, which reshard/1 always
       # picks as this call's PRIMARY (synchronous) shard, since it sorts first among the
       # touched keys. To exercise the deferred path instead, this drives
-      # `attempt_channel_reconcile/6` directly via the same message
+      # `attempt_channel_reconcile/8` directly via the same message
       # `reconcile_shard_in_place/7`'s async clause schedules — proving the handler's own
       # ordering, independent of which shard reshard/1 happens to pick as primary.
       reporting_socket = frame_reporting_socket(self())

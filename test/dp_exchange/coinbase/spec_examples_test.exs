@@ -934,6 +934,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
 
       assert order.id == "0000-000000-000000"
       assert order.symbol == "BTC-USD"
+      assert_vendor_order_fields(order)
     end
 
     test "get_orders/2 walks one real page of GetHistoricalOrders" do
@@ -947,6 +948,27 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
                )
 
       assert order.id == "0000-000000-000000"
+      assert_vendor_order_fields(order)
+    end
+
+    # The fields of the vendor's own `Order` example, which this package decodes. The example
+    # is a union of every `order_configuration` leaf at once (a real order carries exactly one),
+    # so the size and prices, which are read from that single leaf, are `nil` here rather than
+    # taken from whichever leaf came first: not stated, never guessed.
+    defp assert_vendor_order_fields(order) do
+      assert order.status == :pending
+      assert order.side == :buy
+      assert order.order_type == :market
+      assert order.time_in_force == :gtd
+      assert order.quantity == nil
+      assert order.price == nil
+      assert order.stop_price == nil
+      assert Decimal.equal?(order.filled_quantity, Decimal.new("0.001"))
+      assert Decimal.equal?(order.average_price, Decimal.new("50"))
+      assert Decimal.equal?(order.fee, Decimal.new("5.00"))
+      assert order.fee_currency == nil
+      assert DateTime.compare(order.created_at, ~U[2021-05-31 09:59:59Z]) == :eq
+      assert order.provider == :coinbase
     end
   end
 

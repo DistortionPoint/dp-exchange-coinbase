@@ -87,6 +87,51 @@ defmodule DpExchange.Coinbase.AuthTest do
       assert claims |> Map.keys() |> Enum.sort() == ["exp", "iss", "nbf", "sub", "uri"]
     end
 
+    test "the signature verifies against the key's public half, and only for the signed bytes" do
+      # Every other test here reads a token's shape. A signer that returned any 64 bytes would
+      # pass them all, and the venue would answer an opaque 401. This checks the Ed25519
+      # signature itself, with the public key derived from the seed.
+      seed = :crypto.strong_rand_bytes(32)
+      {public, _private} = :crypto.generate_key(:eddsa, :ed25519, seed)
+      credentials = %{@credentials | api_secret: Base.encode64(seed)}
+
+      {:ok, token} = Auth.jwt(credentials, uri: "GET api.coinbase.com/x")
+      [header, claims, signature] = String.split(token, ".")
+      {:ok, raw_signature} = Base.url_decode64(signature, padding: false)
+      signing_input = header <> "." <> claims
+
+      assert byte_size(raw_signature) == 64
+      assert :crypto.verify(:eddsa, :none, signing_input, raw_signature, [public, :ed25519])
+
+      refute :crypto.verify(:eddsa, :none, signing_input <> "x", raw_signature, [
+               public,
+               :ed25519
+             ])
+
+      {other_public, _other_private} =
+        :crypto.generate_key(:eddsa, :ed25519, :crypto.strong_rand_bytes(32))
+
+      refute :crypto.verify(:eddsa, :none, signing_input, raw_signature, [
+               other_public,
+               :ed25519
+             ])
+    end
+
+    test "the 64-byte form signs with its leading seed, not its public half" do
+      seed = :crypto.strong_rand_bytes(32)
+      {public, _private} = :crypto.generate_key(:eddsa, :ed25519, seed)
+      credentials = %{@credentials | api_secret: Base.encode64(seed <> public)}
+
+      {:ok, token} = Auth.jwt(credentials)
+      [header, claims, signature] = String.split(token, ".")
+      {:ok, raw_signature} = Base.url_decode64(signature, padding: false)
+
+      assert :crypto.verify(:eddsa, :none, header <> "." <> claims, raw_signature, [
+               public,
+               :ed25519
+             ])
+    end
+
     test "accepts the 64-byte seed-plus-public-key form" do
       seed = :crypto.strong_rand_bytes(64) |> Base.encode64()
       assert {:ok, _token} = Auth.jwt(%{@credentials | api_secret: seed})

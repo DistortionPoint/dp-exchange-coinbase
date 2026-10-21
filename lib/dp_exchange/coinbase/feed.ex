@@ -1076,7 +1076,7 @@ defmodule DpExchange.Coinbase.Feed do
   (`{:exchange_error, _venue, :rate_limit_timeout}` — the wait itself ran out, not a
   refusal), and the fetch can still fail for reasons no amount of waiting fixes.
   `transient_alias_map_failure?/1` classifies it exactly the way
-  `transient_subscribe_failure?/1` classifies a channel subscribe, and for the same
+  `transient_frame_failure?/1` classifies a channel subscribe, and for the same
   reason: not every failure can be fixed by retrying, so retrying one that can't only
   delays an honest "this failed" and spends a retry budget a genuinely transient failure
   needs.
@@ -1086,7 +1086,7 @@ defmodule DpExchange.Coinbase.Feed do
   drained further, which is the whole reason `rate_limit_blocking: true` exists here.
   Everything else — an unrecognised response shape, a refused request, a raw or
   unclassified reason (including whatever a test's own stand-in returns) — is treated as
-  permanent, matching `transient_subscribe_failure?/1`'s own default-to-permanent stance
+  permanent, matching `transient_frame_failure?/1`'s own default-to-permanent stance
   for anything not explicitly known to clear on its own. Retries are bounded
   (`@max_alias_map_retries`, backed off by `@alias_map_retry_delay_ms` — both overridable
   via opts for a test's benefit, the same shape as `subscribe_retry_delay_ms` above)
@@ -1292,7 +1292,7 @@ defmodule DpExchange.Coinbase.Feed do
   # One initial attempt plus this many retries. Bounded deliberately — see "not every
   # failure can be fixed by waiting" in the moduledoc. Shared between a plain channel
   # subscribe and a reconcile's two phases (unsubscribe, then subscribe — see
-  # `attempt_channel_reconcile/6` and the moduledoc's "unsubscribe before subscribe"
+  # `attempt_channel_reconcile/8` and the moduledoc's "unsubscribe before subscribe"
   # section), rather than each phase inventing its own bound for the identical
   # underlying wait.
   #
@@ -1371,16 +1371,14 @@ defmodule DpExchange.Coinbase.Feed do
   # cosmetic. Because this re-issue is unconditional, the package sends a `level2`
   # subscribe per shard per interval indefinitely, and `FrameSender`'s moduledoc leans on
   # the assumption that "subscribes are idempotent on every venue in this family, so a
-  # duplicate is harmless". If a venue counted *attempted* L2 stream requests per session
-  # rather than established streams, that assumption would be false here and this timer
-  # would be feeding the counter — the open question in DpCryptoManagement's issue #22,
-  # STILL open after the `6` -> `30` bisection: that bisection used a fresh socket per
-  # attempt specifically to keep this question out of its own result (see the moduledoc's
-  # "cumulative vs. concurrent" section) and answers only the concurrent ceiling, not
-  # whether repeated identical resubscribes on ONE socket ever count against anything.
-  # Settling it needs a short interval against a symbol count too small to exhaust any
-  # plausible stream limit, which is not something a consumer could arrange while this was
-  # a hardcoded constant.
+  # duplicate is harmless". The question this knob was made to settle (does a venue count
+  # *attempted* L2 stream requests per session, so that this timer would feed the counter?)
+  # was answered 2026-09-07 by DpCryptoManagement's probe 1 (issue #22): the same 30 products
+  # re-sent fourteen times on one socket were all accepted, so repeats do not accumulate (see
+  # the moduledoc's "the ceiling is concurrent, not cumulative" and
+  # `docs/reference/coinbase/level2-session-limit.md`). The option stays because a
+  # short interval is still how a consumer reproduces that kind of probe, and because
+  # `next_resubscribe_delay/1` guards it.
   @default_resubscribe_interval_ms 60_000
 
   # The least time between two gap-triggered re-issues of the same `level2` shard (MD9). A
@@ -2587,7 +2585,7 @@ defmodule DpExchange.Coinbase.Feed do
   # "unsubscribe before subscribe" section for why this ONE deferred message, rather than
   # the two independent `Process.send_after/3` calls this replaced, is what makes that
   # order a property of ordinary sequential code instead of two timers firing at the same
-  # tick. `attempt_channel_reconcile/7` is the whole implementation; this clause and the
+  # tick. `attempt_channel_reconcile/8` is the whole implementation; this clause and the
   # one below it only supply the starting attempt number, the same two-clause shape
   # `:channel_subscribe` already uses. `key` travels alongside so a failure that gives up
   # can record `removed` against the right shard in `state.pending_unsubscribes` — see
@@ -2603,7 +2601,7 @@ defmodule DpExchange.Coinbase.Feed do
 
   # The retry this module schedules when the UNSUBSCRIBE half of a reconcile fails
   # transiently — see `handle_unsubscribe_failure/8`. `attempt` starts at `2` here; the
-  # first attempt is always the 6-tuple clause above.
+  # first attempt is always the 7-tuple clause above.
   def handle_info(
         {:channel_reconcile, key, socket, channel, removed, added, credentials, attempt},
         state
@@ -3467,7 +3465,7 @@ defmodule DpExchange.Coinbase.Feed do
   # scheduled for the same tick leave their relative firing order to however the BEAM's
   # timer wheel happens to break the tie, which this module does not get to assume when
   # that order is load-bearing. Folding both into the single `{:channel_reconcile, ...}`
-  # message `attempt_channel_reconcile/6` handles makes the order a property of ordinary,
+  # message `attempt_channel_reconcile/8` handles makes the order a property of ordinary,
   # sequential Elixir code instead.
   defp reconcile_shard_in_place(state, key, channel, socket, current, wanted, false, delay) do
     # See the sync clause above for why `pending` has to be folded in here too: this
@@ -3604,7 +3602,7 @@ defmodule DpExchange.Coinbase.Feed do
   end
 
   # `Socket.subscribe/4` for `added` only ever runs once `unsubscribe_step/3` has returned
-  # `:ok` for THIS message's own `removed` list — see `reconcile_shard_in_place/7`'s async
+  # `:ok` for THIS message's own `removed` list — see `reconcile_shard_in_place/8`'s async
   # clause and the moduledoc's "unsubscribe before subscribe" section. A transient
   # unsubscribe failure retries the unsubscribe itself, the same bounded backoff a channel
   # subscribe already gets (`handle_unsubscribe_failure/8`), rather than risk sending
@@ -4294,7 +4292,7 @@ defmodule DpExchange.Coinbase.Feed do
   # further. Everything else — an unrecognised response shape, a refused request, a raw or
   # unclassified reason (including whatever a test's own stand-in returns) — is a fact
   # about the request or the venue that no amount of waiting changes, so it is not
-  # retried, matching `transient_subscribe_failure?/1`'s own default-to-permanent stance.
+  # retried, matching `transient_frame_failure?/1`'s own default-to-permanent stance.
   defp transient_alias_map_failure?({:exchange_error, _venue, :rate_limit_timeout}), do: true
 
   # Transient for a different reason, and this exception to the default-to-permanent stance

@@ -498,6 +498,11 @@ defmodule DpExchange.Coinbase.SocketTest do
         }
 
         assert {:ok, _state} = Socket.handle_frame({:text, Jason.encode!(frame)}, state())
+
+        # "Skipped" is a claim about delivery: `{:ok, state}` alone is true of a frame that
+        # was decoded and sent on, with a symbol made of whatever the venue put there.
+        refute_received {:dp_exchange, :coinbase, %Types.OrderBook{}}
+        refute_received {:dp_exchange, :coinbase, %Types.OrderBookDelta{}}
       end
     end
   end
@@ -733,8 +738,11 @@ defmodule DpExchange.Coinbase.SocketTest do
       refute_received {:dp_exchange, :coinbase, %Types.Quote{}}
     end
 
-    test "a non-text frame is ignored" do
-      assert {:ok, _state} = Socket.handle_frame({:binary, <<1, 2, 3>>}, state())
+    test "a non-text frame is ignored: no state change, nothing delivered, nothing reported" do
+      untouched = state()
+
+      assert {:ok, ^untouched} = Socket.handle_frame({:binary, <<1, 2, 3>>}, untouched)
+      refute_received {:dp_exchange, :coinbase, _anything}
     end
 
     test "a ticker event whose tickers is null does not crash the socket" do

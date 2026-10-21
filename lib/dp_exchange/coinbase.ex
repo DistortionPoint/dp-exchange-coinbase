@@ -266,7 +266,23 @@ defmodule DpExchange.Coinbase do
       # and a declaration for a surface this package does not reach would be a claim about
       # the venue standing in for one about the package.
       supported_instrument_types: [:spot, :future],
+      # `false` is a claim about SPOT only: a spot sale needs the asset held. A CFM future is
+      # different, and `get_positions/1` returns `:short` positions for it (the venue's `SHORT`
+      # side), so a futures SELL can open one. That was never probed (no credential here), and
+      # Core has no per-instrument form of this field, so it stays at the spot answer.
       supports_short_selling: false,
+      # **This used to be left at the default `false` while the package sent margin fields and
+      # read margin state**: `place_order/3` and `preview_order/3` send `leverage` and
+      # `margin_type` when named, and the CFM reads and writes (`get_futures_balance_summary/2`,
+      # `get_intraday_margin_setting/2`, `set_intraday_margin_setting/3`) are a margined
+      # futures account. A declaration must describe the code, so it is `true`. Core refuses
+      # `true` with no ceiling, and this venue publishes none to declare: CFM margin is set by
+      # the venue's per-contract requirements and the account's intraday setting, not by one
+      # multiplier, so the ceiling is `:per_account` (read it from the balance summary), the
+      # positive statement Core defines for exactly that case. No number is invented. Read
+      # from the documentation and the spec, never probed (no credential here).
+      supports_margin: true,
+      max_leverage: :per_account,
 
       # **Was left undeclared (defaulting to `false`) while `stake/3` and `unstake/3`**
       # — see `DpExchange.Coinbase.Prime` — **were already `:experimental` in the
@@ -396,7 +412,10 @@ defmodule DpExchange.Coinbase do
           "rests on api.prime.coinbase.com's own published paths, deduplicated " <>
           "2026-08-31 from thirteen documentation pages to the nine endpoints " <>
           "DpExchange.Coinbase.Prime implements; read from documentation, not probed, " <>
-          "and said so rather than implied otherwise; the `:trades` stream's frame shape " <>
+          "and said so rather than implied otherwise; supports_margin and " <>
+          "max_leverage: :per_account are read from the CFM and order-request schemas in " <>
+          "at-spec.yaml, not probed, and no single leverage ceiling is published; " <>
+          "the `:trades` stream's frame shape " <>
           "and side direction were observed live against wss://advanced-trade-ws.coinbase.com " <>
           "(market_trades, BTC-USD) 2026-10-02, its per-socket product ceiling was not probed"
     )

@@ -221,7 +221,7 @@ defmodule DpExchange.Coinbase.Rest do
   comment for why SPOT is the honest scope for this package to claim rather than a wider
   list it cannot correctly trade.
   """
-  @spec get_symbols(keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  @spec get_symbols(keyword()) :: {:ok, [String.t()]} | {:error, term()} | {:refused, term()}
   def get_symbols(opts) do
     with :ok <- OptionKeys.check(:get_symbols, opts),
          {:ok, products} <- fetch_products(opts) do
@@ -237,7 +237,7 @@ defmodule DpExchange.Coinbase.Rest do
   carries all of this, so there is no second request behind it. Same SPOT-only scope as
   `get_symbols/1`; see `fetch_products/1`'s comment.
   """
-  @spec get_market_overview(keyword()) :: {:ok, map()} | {:error, term()}
+  @spec get_market_overview(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_market_overview(opts) do
     with :ok <- OptionKeys.check(:get_market_overview, opts),
          {:ok, products} <- fetch_products(opts) do
@@ -252,7 +252,8 @@ defmodule DpExchange.Coinbase.Rest do
   Reads the same bulk endpoint `get_symbols/1` does, and shares its SPOT-only scope — see
   `fetch_products/1`'s comment for why.
   """
-  @spec list_instruments(keyword()) :: {:ok, [Instrument.t()]} | {:error, term()}
+  @spec list_instruments(keyword()) ::
+          {:ok, [Instrument.t()]} | {:error, term()} | {:refused, term()}
   def list_instruments(opts) do
     with :ok <- OptionKeys.check(:list_instruments, opts),
          {:ok, products} <- fetch_products(opts) do
@@ -304,7 +305,8 @@ defmodule DpExchange.Coinbase.Rest do
   id, same as before this map existed, plus a notice that attribution is degraded and
   why. Never a fabricated mapping.
   """
-  @spec get_alias_map(keyword()) :: {:ok, %{String.t() => [String.t()]}} | {:error, term()}
+  @spec get_alias_map(keyword()) ::
+          {:ok, %{String.t() => [String.t()]}} | {:error, term()} | {:refused, term()}
   def get_alias_map(opts) do
     with :ok <- OptionKeys.check(:get_alias_map, opts),
          {:ok, products} <- fetch_products(opts) do
@@ -387,26 +389,11 @@ defmodule DpExchange.Coinbase.Rest do
     case request(:get, path, credentials, opts, params) do
       {:ok, %{body: %{"products" => products} = body}} when is_list(products) ->
         collected = [Enum.filter(products, &named_product?/1) | acc]
-        pagination = body["pagination"]
-        next_cursor = if is_map(pagination), do: pagination["next_cursor"]
 
-        # `has_next: true` with no usable cursor is "there is more" with no way to ask for
-        # it. Stopping returned the first page as the whole catalogue, every row real and the
-        # rest silently missing — the shape `next_cursor/2` refuses for `/accounts`.
-        cond do
-          not is_map(pagination) or pagination["has_next"] != true ->
-            {:ok, collected |> Enum.reverse() |> Enum.concat()}
-
-          # The cursor just sent, offered again, is the same page again: a walk that can only
-          # repeat itself until `@max_product_pages` ends it, fifty identical requests later.
-          is_binary(next_cursor) and next_cursor == cursor ->
-            {:error, :pagination_cursor_repeated}
-
-          is_binary(next_cursor) and next_cursor != "" ->
-            all_products(credentials, path, opts, next_cursor, collected, page + 1)
-
-          true ->
-            {:error, :pagination_cursor_missing}
+        case product_page_step(body["pagination"], cursor) do
+          :done -> {:ok, collected |> Enum.reverse() |> Enum.concat()}
+          {:next, next} -> all_products(credentials, path, opts, next, collected, page + 1)
+          {:error, _reason} = error -> error
         end
 
       {:ok, _unexpected} ->
@@ -414,6 +401,33 @@ defmodule DpExchange.Coinbase.Rest do
 
       {:error, reason} ->
         classify(reason, :symbol)
+    end
+  end
+
+  # `has_next: true` with no usable cursor is "there is more" with no way to ask for it.
+  # Stopping returned the first page as the whole catalogue, every row real and the rest
+  # silently missing — the shape `next_cursor/2` refuses for `/accounts`.
+  defp product_page_step(pagination, sent) do
+    next_cursor = if is_map(pagination), do: pagination["next_cursor"]
+
+    cond do
+      not is_map(pagination) or pagination["has_next"] in [false, nil] ->
+        :done
+
+      # Not a boolean (`"true"`, `1`): not "no more" either, so not a complete catalogue.
+      pagination["has_next"] != true ->
+        {:error, :unexpected_response_shape}
+
+      # The cursor just sent, offered again, is the same page again: a walk that can only
+      # repeat itself until `@max_product_pages` ends it, fifty identical requests later.
+      is_binary(next_cursor) and next_cursor == sent ->
+        {:error, :pagination_cursor_repeated}
+
+      is_binary(next_cursor) and next_cursor != "" ->
+        {:next, next_cursor}
+
+      true ->
+        {:error, :pagination_cursor_missing}
     end
   end
 
@@ -682,6 +696,13 @@ defmodule DpExchange.Coinbase.Rest do
        do: {:next, cursor}
 
   defp next_cursor(%{"has_next" => true}, _sent), do: {:error, :pagination_cursor_missing}
+
+  # `has_next` is a boolean (at-spec.yaml `ListOrdersResponse`, `ListAccountsResponse`). A
+  # value that is neither a boolean nor `null` (`"true"`, `1`) is not "no more": reading it as
+  # the end returned the first page as the whole list, the truncation these walkers refuse.
+  defp next_cursor(%{"has_next" => flag}, _sent) when flag not in [false, nil],
+    do: {:error, :unexpected_response_shape}
+
   defp next_cursor(_body, _sent), do: :done
 
   defp all_accounts(_credentials, _opts, _cursor, _acc, page) when page >= @max_account_pages,
@@ -1375,9 +1396,10 @@ defmodule DpExchange.Coinbase.Rest do
     }
   end
 
-  # The venue's own enum. Anything this package does not know maps to `nil` rather than to
-  # the nearest status: reporting a quote as settled is the failure this field exists to
-  # prevent, and reporting a failure as a quote is the same mistake backwards.
+  # The venue's own enum. Anything this package does not know answers `nil` here, never the
+  # nearest status (reporting a quote as settled is the failure this field exists to prevent,
+  # and reporting a failure as a quote is the same mistake backwards), and
+  # `required_conversion_status/1` turns that `nil` into `{:unknown_conversion_status, word}`.
   defp conversion_status("TRADE_STATUS_CREATED"), do: :quoted
   defp conversion_status("TRADE_STATUS_STARTED"), do: :committed
   defp conversion_status("TRADE_STATUS_COMPLETED"), do: :settled
@@ -3949,7 +3971,8 @@ defmodule DpExchange.Coinbase.Rest do
   placed at the venue's 1x. `:leverage` is a finite positive number
   (`{:error, {:invalid_leverage, value}}`) and `:margin_type` is `:cross`, `:isolated` or
   the venue's string (`{:error, {:invalid_margin_type, value}}`). Not measured against the
-  live venue.
+  live venue. Sending them is part of why `DpExchange.Coinbase.capabilities/0` declares
+  `supports_margin: true` (with `max_leverage: :per_account`: no single ceiling is published).
   """
   @spec place_order(map(), term(), keyword()) ::
           {:ok, Types.Order.t()} | {:error, term()} | {:refused, term()}
@@ -4804,6 +4827,13 @@ defmodule DpExchange.Coinbase.Rest do
   carrying the venue's reason. An order already filled or already cancelled comes back as a
   refusal rather than an `:ok`, because "I cancelled it" and "it was not there to cancel"
   are different facts and a caller retrying on the second is chasing nothing.
+
+  **`{:ok, :cancelled}` means the venue accepted the cancel request, not that the order is
+  gone.** The venue's own word for the row is "Whether the cancel request was submitted
+  successfully" (at-spec.yaml `CancelOrderResponse.success`), and it has an intermediate
+  status for the gap, `CANCEL_QUEUED`, which `get_order/3` reads as `:open`: the order can
+  still fill until the venue says otherwise. A caller that must know the final state reads
+  the order back; a `:filled` there means the cancel lost the race.
   """
   @spec cancel_order(map(), String.t(), keyword()) ::
           {:ok, :cancelled} | {:error, term()} | {:refused, term()}
@@ -5097,11 +5127,43 @@ defmodule DpExchange.Coinbase.Rest do
   # An order naming no id cannot be cancelled, edited or reconciled, and a list of them looks
   # complete. The id is refused rather than carried as `nil` (the spec lists `order_id` among
   # `Order`'s required fields, at-spec.yaml:8225-8229).
+  #
+  # **A row whose status contradicts its own fill figures is refused**, as
+  # `{:error, :unexpected_response_shape}`, never carried: `Core.Types.Order.new/1` raises on
+  # exactly these, and a consumer who trusts `:filled` beside a `filled_size` of zero books a
+  # position that does not exist. The rows are `FILLED` with nothing, or only part, filled, and
+  # a working status (`PENDING`, `OPEN`, `QUEUED`, `CANCEL_QUEUED`, `EDIT_QUEUED`) with the
+  # whole `base_size` already filled, which is also the race of a fill landing under a queued
+  # cancel: the read is refused (and may be retried) rather than reported as still working.
+  # `base_size` absent (a quote-sized order) or `filled_size` absent states nothing, so no
+  # judgement is made. `CANCELLED`, `EXPIRED` and `FAILED` keep whatever filled before they ended.
   defp to_order(order) do
     with {:ok, id} <- required_id(order["order_id"], :order_id) do
-      {:ok, build_order(order, id)}
+      built = build_order(order, id)
+
+      if status_contradicts_fill?(built.status, built.quantity, built.filled_quantity),
+        do: {:error, :unexpected_response_shape},
+        else: {:ok, built}
     end
   end
+
+  defp status_contradicts_fill?(_status, _quantity, nil), do: false
+
+  defp status_contradicts_fill?(status, quantity, filled) do
+    nothing? = Decimal.eq?(filled, 0)
+    whole? = sized?(quantity) and Decimal.compare(filled, quantity) != :lt
+    part? = sized?(quantity) and Decimal.compare(filled, quantity) == :lt
+
+    cond do
+      status in [:filled, :partially_filled] and nothing? -> true
+      status in [:pending, :open, :partially_filled] and whole? -> true
+      status == :filled and part? -> true
+      true -> false
+    end
+  end
+
+  defp sized?(%Decimal{} = quantity), do: Decimal.positive?(quantity)
+  defp sized?(nil), do: false
 
   defp build_order(order, id) do
     leaf = order_leaf(order["order_configuration"])

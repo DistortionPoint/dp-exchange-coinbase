@@ -310,8 +310,12 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
           {"FAILED", :rejected},
           {"UNKNOWN_ORDER_STATUS", nil}
         ] do
+      # A filled order has filled its whole size; the others keep the fixture's partial fill.
+      filled = if venue == "FILLED", do: "1.0", else: "0.25"
+
       test "#{venue} maps to #{inspect(expected)}" do
-        body = %{"order" => order_json(%{"status" => unquote(venue)})}
+        overrides = %{"status" => unquote(venue), "filled_size" => unquote(filled)}
+        body = %{"order" => order_json(overrides)}
 
         assert {:ok, order} =
                  Rest.get_order(@credentials, "abc-123",
@@ -347,6 +351,113 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
                Rest.get_order(@credentials, "abc-123", plug: responding(body), retry_attempts: 0)
 
       assert order.status == :open
+    end
+
+    test "an order cancelled after a partial fill keeps what filled, and says cancelled" do
+      # Reading `CANCELLED` as "nothing happened" would lose a fill the venue already
+      # reported: `filled_size` and the average price are the venue's, whatever the status.
+      body = %{
+        "order" =>
+          order_json(%{
+            "status" => "CANCELLED",
+            "filled_size" => "0.25",
+            "average_filled_price" => "40100.5"
+          })
+      }
+
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc-123", plug: responding(body), retry_attempts: 0)
+
+      assert order.status == :cancelled
+      assert Decimal.equal?(order.filled_quantity, Decimal.new("0.25"))
+      assert Decimal.equal?(order.average_price, Decimal.new("40100.5"))
+    end
+
+    test "a filled order's fee is the venue's total_fees as sent, with no currency invented" do
+      body = %{
+        "order" =>
+          order_json(%{"status" => "FILLED", "filled_size" => "1.0", "total_fees" => "-0.40"})
+      }
+
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc-123", plug: responding(body), retry_attempts: 0)
+
+      assert order.status == :filled
+      assert Decimal.equal?(order.filled_quantity, order.quantity)
+      assert Decimal.equal?(order.fee, Decimal.new("-0.40"))
+      assert order.fee_currency == nil
+    end
+
+    # `Core.Types.Order.new/1` raises on a status that contradicts the fill figures. A venue
+    # row that does is refused, never built into an `Order` that says both.
+    for {name, status, filled} <- [
+          {"FILLED with nothing filled", "FILLED", "0"},
+          {"FILLED with only part of the size filled", "FILLED", "0.25"},
+          {"OPEN with the whole size filled", "OPEN", "1.0"},
+          {"PENDING with more than the size filled", "PENDING", "2"},
+          {"CANCEL_QUEUED with the whole size filled (a fill landed under the cancel)",
+           "CANCEL_QUEUED", "1.0"},
+          {"EDIT_QUEUED with the whole size filled", "EDIT_QUEUED", "1.0"}
+        ] do
+      test "a contradictory row is refused: #{name}" do
+        body = %{
+          "order" => order_json(%{"status" => unquote(status), "filled_size" => unquote(filled)})
+        }
+
+        opts = [plug: responding(body), retry_attempts: 0]
+
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_order(@credentials, "abc-123", opts)
+      end
+    end
+
+    test "a contradictory row refuses the whole list, never a short one" do
+      rows = [
+        order_json(%{"order_id" => "ok-1"}),
+        order_json(%{"order_id" => "bad-2", "status" => "FILLED", "filled_size" => "0"})
+      ]
+
+      body = %{"orders" => rows, "has_next" => false}
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_orders(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "rows that only look odd are still read: terminal statuses and unstated sizes" do
+      # CANCELLED / EXPIRED / FAILED keep any fill (even all of it or none); a quote-sized
+      # order states no base_size, and an absent filled_size states nothing.
+      cases = [
+        %{"status" => "CANCELLED", "filled_size" => "1.0"},
+        %{"status" => "EXPIRED", "filled_size" => "0"},
+        %{"status" => "FAILED", "filled_size" => "0"},
+        %{
+          "status" => "FILLED",
+          "filled_size" => "0.5",
+          "order_configuration" => %{"market_market_ioc" => %{"quote_size" => "500"}}
+        },
+        %{"status" => "FILLED", "filled_size" => nil},
+        %{"status" => "OPEN", "filled_size" => nil}
+      ]
+
+      for overrides <- cases do
+        body = %{"order" => order_json(overrides)}
+        opts = [plug: responding(body), retry_attempts: 0]
+
+        assert {:ok, %DpExchange.Core.Types.Order{}} =
+                 Rest.get_order(@credentials, "abc-123", opts)
+      end
+    end
+
+    test "an order with nothing filled has no average price, whatever the venue states for it" do
+      body = %{
+        "order" => order_json(%{"filled_size" => "0", "average_filled_price" => "0"})
+      }
+
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc-123", plug: responding(body), retry_attempts: 0)
+
+      assert Decimal.equal?(order.filled_quantity, 0)
+      assert order.average_price == nil
     end
 
     test "a status the venue invents later is nil, never a guess" do
@@ -449,6 +560,22 @@ defmodule DpExchange.Coinbase.OrderLifecycleTest do
 
       assert {:error, :pagination_cursor_repeated} =
                Rest.get_orders(@credentials, plug: plug, retry_attempts: 0)
+    end
+
+    test "a has_next that is not a boolean is not the end of the list" do
+      # `"true"` or `1` read as "no more" returned the first page as the whole order list.
+      for flag <- ["true", 1, "false", %{}, []] do
+        body = %{"orders" => [order_json()], "has_next" => flag, "cursor" => "page2"}
+
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_orders(@credentials, plug: responding(body), retry_attempts: 0),
+               "has_next #{inspect(flag)} must not read as the last page"
+      end
+
+      for flag <- [false, nil] do
+        body = %{"orders" => [order_json()], "has_next" => flag}
+        assert {:ok, [_only]} = Rest.get_orders(@credentials, plug: responding(body))
+      end
     end
 
     test "filters are sent to the venue rather than applied here" do

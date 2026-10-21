@@ -82,5 +82,24 @@ defmodule DpExchange.Coinbase.SymbolFormatTest do
         assert is_binary(SymbolFormat.to_exchange_symbol(input))
       end
     end
+
+    test "an input that is not a pair comes back as it was given, upper-cased, never invented" do
+      # `is_binary/1` above is satisfied by any string at all, an invented one included. What a
+      # value that cannot be split must be is the input itself (upper-cased): a one-sided pair
+      # is not completed, and a dangling separator is not carried or dropped on the way in.
+      for {input, expected} <- [
+            {"", ""},
+            {"NOTAPAIR", "NOTAPAIR"},
+            {"btc", "BTC"},
+            {"BTC-", "BTC-"},
+            {"-USD", "-USD"}
+          ] do
+        assert SymbolFormat.to_canonical_symbol(input) == expected
+      end
+
+      assert SymbolFormat.to_exchange_symbol("") == ""
+      assert SymbolFormat.to_exchange_symbol("NOTAPAIR") == "NOTAPAIR"
+      assert SymbolFormat.to_exchange_symbol("-USD") == "-USD"
+    end
   end
 end

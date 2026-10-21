@@ -1568,7 +1568,8 @@ defmodule DpExchange.Coinbase.Socket do
   defp book_side("bid"), do: :bid
   # Only `"offer"`. Any other side used to be filed as an ask, so a row the venue labelled
   # something this package does not know moved the ask side of the book. It is now an
-  # unreadable row, reported and dropped like an unparseable price — see `decode_rows/2`.
+  # unreadable row, reported (and its whole event refused) like an unparseable price — see
+  # `decode_rows/2`.
   defp book_side("offer"), do: :ask
 
   # Both accumulators are reversed once at the end, so a tie in `sorted/2`'s stable

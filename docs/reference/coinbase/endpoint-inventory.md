@@ -112,10 +112,12 @@ of the contract's 87 callbacks, most of them authenticated. The fix is not a fre
 capture — Advanced Trade's operation count has not moved — it is stating what changed on
 this side of the boundary, which a vendor capture cannot do for itself.
 
-**Current, from `capabilities/0`, checked 2026-09-06**: 88 callbacks — 49 `:experimental`,
+**Current, from `capabilities/0`, checked 2026-10-21**: 89 callbacks — 50 `:experimental`,
 39 `:unsupported`, of which 37 are the venue's own absence — see `negative-claims.md` — and
 2 are genuinely not yet ported (`get_funding/2`, `get_contract_stats/2`). `list_instruments/1`
-was on that not-ported list and no longer is: it has been implemented since 2026-09-01.
+was on that not-ported list and no longer is: it has been implemented since 2026-09-01. (This
+line said 88 and 49 until 2026-10-21, a count taken before Core added a callback; the README
+and `test/dp_exchange/coinbase_test.exs` now pin the same numbers against `capabilities/0`.)
 
 The vendor-side counts below are unchanged since the original capture and still describe
 Advanced Trade's own surface, not this package's coverage of it — read the two separately.
@@ -228,6 +230,14 @@ public/private pair in this table.
 
 **INTX perpetuals are marked deprecated by the vendor.** Implementing a surface being
 removed is a question for the architect, not a decision to take here.
+
+**`leverage` and `margin_type` on `POST /orders` are not an INTX endpoint.** `NewOrderRequest`
+carries both (at-spec.yaml:8101-8140, written for perpetuals), and `place_order/3` and
+`preview_order/3` send them when the request names them. That is why `capabilities/0` declares
+`supports_margin: true` with `max_leverage: :per_account`, beside the CFM margin reads and
+writes above, while `:perp` stays out of `supported_instrument_types`: the declaration says
+the package sends margin fields and reads a margined futures account, not that the INTX
+perpetual endpoints are reached. Read from the spec, never probed.
 
 ## Re-capturing
 

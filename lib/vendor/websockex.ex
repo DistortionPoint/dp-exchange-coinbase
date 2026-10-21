@@ -153,9 +153,11 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
      released first. Added 2026-10-21.
 
   Every function body and every `@spec` is copied verbatim from
-  `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
-  true size: two clauses, the `spawn_process/5`/`do_spawn/2` glue, and the handshake
-  deadline. A handful of doc comments were additionally edited, never behaviour: the two
+  `deps/websockex/lib/websockex.ex` at 0.5.1 except for the seven items above — `diff`
+  against that file to see the true size of the change: the close-frame clause, the
+  `spawn_process/5`/`do_spawn/2` glue, the handshake deadline, the chunked receive buffer, the
+  telemetry placeholder, the answer to queued sends on termination, and the frame size bound.
+  A handful of doc comments were additionally edited, never behaviour: the two
   self-referential examples in this moduledoc's closing section (`use WebSockex` → `use
   DpExchange.Coinbase.Vendor.WebSockex`), the two `@doc` headers for `start/4` and
   `start_link/4`, and a few backtick spans de-linked to plain text where this package's
@@ -209,7 +211,7 @@ defmodule DpExchange.Coinbase.Vendor.WebSockex do
   this exact defect, drop this vendor module, restore `use WebSockex` /
   `WebSockex` calls in `DpExchange.Coinbase.Socket`, and
   relax `mix.exs`'s pin back to `~>`. Until then, every future upstream release should be
-  diffed here for anything beyond this file's own four marked changes.
+  diffed here for anything beyond this file's own seven marked changes.
 
   ---
 

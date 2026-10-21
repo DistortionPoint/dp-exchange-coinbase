@@ -20,6 +20,78 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `has_next` that was not a boolean read as "no more pages".** The account walk
+  (`get_balances/2`, `get_accounts/2`), the order walk (`get_orders/2`) and the product
+  catalogue walk (`get_symbols/1`, `get_market_overview/1`, `list_instruments/1`,
+  `get_alias_map/1`) stopped on `"true"` or `1` and returned the first page as the whole
+  list, the truncation these walks exist to refuse. A value that is neither a boolean nor
+  `null` is now `{:error, :unexpected_response_shape}`.
+- **An order row whose status contradicted its own fill figures was built into an `Order`
+  that Core's `Order.new/1` now raises on.** `get_order/3`, `get_orders/2` and the edit
+  read-back refuse such a row as `{:error, :unexpected_response_shape}`: `FILLED` with nothing
+  or only part filled, and `PENDING`, `OPEN`, `QUEUED`, `CANCEL_QUEUED` or `EDIT_QUEUED` with the
+  whole `base_size` filled (a fill landing under a queued cancel reads as a refused, retryable
+  read, not as still working). Quote-sized orders, an absent `filled_size`, and `CANCELLED`,
+  `EXPIRED` and `FAILED` are not judged. Every order the `Fake` answers is tested to rebuild
+  through `Order.new/1`.
+- **`Fake.replace_order/4` and its preview edited an order that was no longer working.** A
+  cancelled or filled order was answered `{:ok, order}`, so a consumer's test passed an edit
+  the venue refuses. They now answer `{:refused, {:edit_rejected,
+  "ONLY_OPEN_ORDERS_CAN_BE_EDITED"}}` and `{:refused, {:edit_preview_rejected, [reason]}}`,
+  and the order is left as it was.
+- `Fake.preview_replace/4` priced an edit of a cancelled or filled order when the change named
+  both fields (only the one-field form read the order). It now refuses that too.
+- Four catalogue reads (`Rest.get_symbols/1`, `get_market_overview/1`, `list_instruments/1`,
+  `get_alias_map/1`) had a `@spec` without `{:refused, term()}`.
+- **`capabilities/0` declared `supports_margin: false` while the package sent `leverage` and
+  `margin_type` on orders and read a margined CFM account.** It is now `supports_margin: true`
+  with `max_leverage: :per_account` (Core refuses `true` with no ceiling, and the venue
+  publishes no single one, so none is invented). Read from the spec, never probed, and
+  `measured_against` says so. `supported_instrument_types` still excludes `:perp`.
+
+### Documented
+
+- `{:ok, :cancelled}` from `cancel_order/3` means the venue accepted the cancel request, not
+  that the order is gone (`CANCEL_QUEUED` reads as `:open`); read the order back.
+- `usage-rules.md`: the whole `OrderExecutionStatus` mapping (nothing defaults; unknown words
+  are `nil`), the fee sign and absent fee currency, and the order refusals that had no doc
+  line (`:invalid_stop_direction`, `:invalid_post_only`, `:invalid_client_order_id`,
+  `:close_rejected`, `:missing_venue_timestamp`). The Core floor line said `0.3.114` (it is
+  `0.3.119`), and it said the `user` channel needs a credential on `Feed`; `Feed` never
+  subscribes `user`, so no order or fill stream exists.
+- Stale doc and comment references corrected: `Feed` named `attempt_channel_reconcile/6` and
+  `/7` (it is `/8`), a 6-tuple message that is a 7-tuple, and `transient_subscribe_failure?/1`
+  (it is `transient_frame_failure?/1`); the `resubscribe_interval_ms` comment called the
+  attempt-counting question still open, which probe 1 of the level2 measurements closed. The
+  vendored WebSockex moduledoc said "four marked changes" and described a two-clause fix; it
+  has seven. `Supervisor` said "both children" of three. `endpoint-inventory.md` counted 88
+  callbacks and 49 experimental (89 and 50), and `reconciliation.md` listed three items as
+  still to reconcile that were done.
+- `capabilities/0`: a comment says `supports_short_selling: false` is the spot answer
+  (futures can hold `:short`; never probed).
+
+### Tests
+
+- The Ed25519 signature of a minted JWT is now verified against the public key.
+- The vendor `Order` example is decoded field by field (status, side, type, time in force,
+  fills, average price, fee, time).
+- New cases: cancelled order keeps its fills, a filled order's negative fee, a zero fill,
+  refused edit of a non-working order (real path and Fake), non-boolean `has_next` on all
+  three walks, README endpoint counts against `capabilities/0`.
+- `capabilities/0` is pinned to `supports_margin: true`, `max_leverage: :per_account`, and
+  `measured_against` naming it as read from the spec, not probed.
+- `SymbolFormat` totality asserts the returned value, and a skipped `level2` event with a
+  non-text product asserts nothing was delivered.
+
+### Dependencies
+
+- `dp_exchange_core` floor raised to `~> 0.3.120` (tick AR: conformance group 54 rebuilds
+  every Order and Fill the Fake answers through `new/1`, and `Order.new/1` refuses a status
+  that contradicts its filled quantity; groups 33, 35 and 37 no longer pass having examined
+  nothing).
+
 ## [0.3.145] - 2026-10-21
 
 ### Fixed

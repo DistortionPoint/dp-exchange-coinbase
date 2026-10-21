@@ -2351,7 +2351,9 @@ defmodule DpExchange.Coinbase.Fake do
 
   @doc """
   Edits a working order's price, size or both; a field left out stays the order's own. An id
-  this fake never issued is `{:refused, :not_found}`. Needs a credential.
+  this fake never issued is `{:refused, :not_found}`, and an order that is no longer working
+  (cancelled or filled) is `{:refused, {:edit_rejected, "ONLY_OPEN_ORDERS_CAN_BE_EDITED"}}`,
+  the venue's own reason. Needs a credential.
 
   See `c:DpExchange.Core.Venue.replace_order/4`.
   """
@@ -2374,7 +2376,7 @@ defmodule DpExchange.Coinbase.Fake do
         # A field the change leaves out stays the order's own, as the real path reads the
         # order and sends that value beside the new one (a field the order does not state is
         # `{:order_field_unavailable, field}` there too).
-        with {:ok, base} <- edit_base(order_id),
+        with {:ok, base} <- edit_base(order_id, :replace),
              {:ok, price, quantity} <- edited_fields(changes, base) do
           # Remembered, so `get_order/3` and `cancel_order/3` on the same id answer it.
           {:ok, remember_order(%{base | id: order_id, price: price, quantity: quantity})}
@@ -2383,12 +2385,22 @@ defmodule DpExchange.Coinbase.Fake do
     end)
   end
 
-  defp edit_base(order_id) do
+  # An order that is no longer working cannot be edited: the venue answers
+  # `ONLY_OPEN_ORDERS_CAN_BE_EDITED` (`EditOrderFailureReason`, at-spec.yaml:6749). The fake
+  # used to edit a cancelled or filled order and answer `{:ok, order}`, keeping the terminal
+  # status, so a consumer's test passed an edit the venue refuses.
+  defp edit_base(order_id, mode) do
     case find_order(order_id) do
-      {:ok, base} -> {:ok, base}
+      {:ok, %Types.Order{status: status} = base} when status in [:open, :pending] -> {:ok, base}
+      {:ok, _terminal} -> {:refused, edit_refusal(mode)}
       :error -> {:refused, :not_found}
     end
   end
+
+  defp edit_refusal(:replace), do: {:edit_rejected, "ONLY_OPEN_ORDERS_CAN_BE_EDITED"}
+
+  defp edit_refusal(:preview),
+    do: {:edit_preview_rejected, [%{"edit_failure_reason" => "ONLY_OPEN_ORDERS_CAN_BE_EDITED"}]}
 
   defp edited_fields(changes, base) do
     with {:ok, price} <- edited_field(changes, :price, base.price),
@@ -2408,7 +2420,10 @@ defmodule DpExchange.Coinbase.Fake do
 
   @doc """
   A fixed in-memory pricing of an edit. A change naming one field reads the order for the
-  other, as `replace_order/4` does. Nothing is changed.
+  other, as `replace_order/4` does. An order this fake holds that is no longer working is
+  refused, whichever fields the change names, as
+  `{:refused, {:edit_preview_rejected, [%{"edit_failure_reason" =>
+  "ONLY_OPEN_ORDERS_CAN_BE_EDITED"}]}}`. Nothing is changed.
 
   See `c:DpExchange.Core.Venue.preview_replace/4`.
   """
@@ -2440,12 +2455,25 @@ defmodule DpExchange.Coinbase.Fake do
   end
 
   # A change naming both fields prices without a read, as the real path does; a partial one
-  # reads the order (an id this fake never issued is the venue's 404).
+  # reads the order (an id this fake never issued is the venue's 404). The venue judges the
+  # order either way, so an order this fake holds that is no longer working is refused on both
+  # paths: pricing it would be an answer the venue does not give. An id this fake never issued
+  # is priced on the both-fields path, as the venue's answer for one is unmeasured.
   defp preview_fields(order_id, changes) do
     if Map.has_key?(changes, :price) and Map.has_key?(changes, :quantity) do
-      {:ok, cast_decimal(changes.price), cast_decimal(changes.quantity)}
+      priced_unread(order_id, changes)
     else
-      with {:ok, base} <- edit_base(order_id), do: edited_fields(changes, base)
+      with {:ok, base} <- edit_base(order_id, :preview), do: edited_fields(changes, base)
+    end
+  end
+
+  defp priced_unread(order_id, changes) do
+    case find_order(order_id) do
+      {:ok, %Types.Order{status: status}} when status not in [:open, :pending] ->
+        {:refused, edit_refusal(:preview)}
+
+      _working_or_never_issued ->
+        {:ok, cast_decimal(changes.price), cast_decimal(changes.quantity)}
     end
   end
 

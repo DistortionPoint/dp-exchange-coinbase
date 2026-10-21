@@ -539,7 +539,8 @@ defmodule DpExchange.Coinbase.TickAqTest do
                      5_000
 
       refute_receive {:dp_exchange, :coinbase,
-                      %Notice{details: %{reason: :unwanted_delivery_unrecorded}}}
+                      %Notice{details: %{reason: :unwanted_delivery_unrecorded}}},
+                     500
     end
 
     test "a wanted name is always recorded, and narrowing the wanted set empties the record" do

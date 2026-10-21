@@ -29,8 +29,9 @@ defmodule DpExchange.Coinbase.Supervisor do
   running, which is correct — an unmetered package is how a venue answers with HTTP 429
   while a budget panel reads comfortable. But it means a venue package that expected
   someone else to start a limiter answers `{:error, {:exchange_error, :coinbase,
-  "Rate limiter unavailable"}}` to every call, and the error does not say what is missing. Measured while writing this package's
-  tier-2 tests, which is exactly the tier that catches integration gaps a fake cannot.
+  "Rate limiter unavailable"}}` to every call, and the error does not say what is missing.
+  Measured while writing this package's tier-2 tests, which is exactly the tier that catches
+  integration gaps a fake cannot.
 
   A consumer may still supply its own limiter through `Core.Config`'s
   `:rate_limit_module`, per process — this is a working default, not a lock.
@@ -86,8 +87,8 @@ defmodule DpExchange.Coinbase.Supervisor do
     # the `Feed` child spec below is stored by this supervisor with `opts` in its start call.
     opts = Credentials.wrap_opt(opts)
 
-    # Both children take their names from `opts`, so a consumer running two of this venue
-    # — two credentials, two scopes — keeps them apart. Hardcoding either name means the
+    # Every child takes its name from `opts`, so a consumer running two of this venue
+    # — two credentials, two scopes — keeps them apart. Hardcoding any name means the
     # second instance collides with the first, which is a failure at start rather than in
     # production but is still a failure a consumer should not have to discover.
     #

@@ -850,6 +850,64 @@ defmodule DpExchange.Coinbase.FakeTest do
       assert Decimal.equal?(read.price, Decimal.new("41000"))
     end
 
+    test "an order that is no longer working cannot be edited, and the refusal is the venue's" do
+      # The venue answers `ONLY_OPEN_ORDERS_CAN_BE_EDITED`. The fake used to edit a cancelled
+      # order and answer `{:ok, order}` with its terminal status, so a consumer's test passed an
+      # edit the venue refuses.
+      assert {:ok, placed} = Fake.place_order(@credentials, eth_sell())
+      assert {:ok, :cancelled} = Fake.cancel_order(@credentials, placed.id)
+
+      edit = %{price: Decimal.new("3100"), quantity: Decimal.new("3")}
+
+      assert {:refused, {:edit_rejected, "ONLY_OPEN_ORDERS_CAN_BE_EDITED"}} =
+               Fake.replace_order(@credentials, placed.id, edit)
+
+      reason = "ONLY_OPEN_ORDERS_CAN_BE_EDITED"
+
+      assert {:refused, {:edit_preview_rejected, [%{"edit_failure_reason" => ^reason}]}} =
+               Fake.preview_replace(@credentials, placed.id, %{price: Decimal.new("3100")})
+
+      # Naming both fields is judged the same way: the venue prices the amendment against the
+      # order's own state, so a priced edit of a cancelled order would be an answer it never
+      # gives.
+      assert {:refused, {:edit_preview_rejected, [%{"edit_failure_reason" => ^reason}]}} =
+               Fake.preview_replace(@credentials, placed.id, edit)
+
+      # Nothing was changed by the refused edit.
+      assert {:ok, read} = Fake.get_order(@credentials, placed.id)
+      assert read.status == :cancelled
+      assert Decimal.equal?(read.price, Decimal.new("3000"))
+      assert Decimal.equal?(read.quantity, Decimal.new("2"))
+    end
+
+    test "every order the fake answers is one Core.Types.Order.new/1 accepts" do
+      # `Order.new/1` raises on a status that contradicts the fill figures, on a time in
+      # force outside Core's list and on bad legs. The fake's orders (placed, quote-sized,
+      # closing, edited, cancelled, the canned one and the listing) are rebuilt through it.
+      quote_sized = limit_order(%{quote_size: "10"}) |> Map.delete(:quantity)
+
+      assert {:ok, placed} = Fake.place_order(@credentials, eth_sell())
+      assert {:ok, sized} = Fake.place_order(@credentials, quote_sized)
+      assert {:ok, closing} = Fake.close_position(@credentials, "BTC-USD")
+      edit = %{price: Decimal.new("3100"), quantity: Decimal.new("3")}
+      assert {:ok, edited} = Fake.replace_order(@credentials, placed.id, edit)
+      assert {:ok, :cancelled} = Fake.cancel_order(@credentials, closing.id)
+      assert {:ok, cancelled} = Fake.get_order(@credentials, closing.id)
+      assert {:ok, canned} = Fake.get_order(@credentials, "fake-order-1")
+      assert {:ok, listed} = Fake.get_orders(@credentials)
+
+      for order <- [placed, sized, closing, edited, cancelled, canned | listed] do
+        rebuilt = DpExchange.Core.Types.Order.new(Map.from_struct(order))
+        assert rebuilt.id == order.id
+      end
+
+      # Nothing the fake holds is filled, so none carries a status that says otherwise.
+      for order <- [edited, cancelled, canned | listed] do
+        assert order.status in [:open, :cancelled]
+        assert Decimal.equal?(order.filled_quantity, 0)
+      end
+    end
+
     test "replace_order on an id the fake never issued is the venue's 404" do
       edit = %{price: Decimal.new("1"), quantity: Decimal.new("1")}
 

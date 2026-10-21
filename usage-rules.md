@@ -89,7 +89,7 @@ of two ways, and which one it is depends on what the endpoint gives it:
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.114`.
+`Core.Types.TopOfBook` has always had. Introduced with `dp_exchange_core ~> 0.2.1`; this package now requires `~> 0.3.120` (`mix.exs` is the source).
 
 ```elixir
 # before
@@ -505,7 +505,8 @@ after defaults were applied; breaking change of the returned reason for an inver
 window on `get_historical_prices/4`.
 
 **Every authenticated subscribe carries a token minted for that frame.** `level2` (when you
-hold credentials) and `user` frames get a fresh Ed25519 JWT per subscribe, never a cached one:
+hold credentials) frames get a fresh Ed25519 JWT per subscribe, never a cached one (`Socket`
+would sign a `user` frame the same way, but `Feed` never asks for that channel):
 the periodic re-issue on a connection that has been up for hours, a reconnect's re-issue, a
 retry after a timed-out send and each shard's own subscribe all mint their own. The feed holds
 your credentials, never a token. A frame queued behind a reconnecting socket's backoff is
@@ -588,7 +589,11 @@ One thing the option deliberately does not do:
   stream, do not start a feed.
 
 A credential-less feed still opens `level2` shards (see "Neither `:order_book` nor `:quotes`
-requires a credential to stream" above); it is `user` (order fills) that genuinely needs one.
+requires a credential to stream" above). There is **no order or fill stream** on this facade:
+the venue's authenticated `user` channel exists, but `Feed` never subscribes it (its channel
+vocabulary is `:quotes`, `:order_book` and `:trades` only), so no order update is delivered and
+none can arrive out of order. Read order state with `get_order/3` / `get_orders/2` and fills
+with `get_trade_history/2`.
 
 A kind this venue does not stream (`:candles`, say) also fails at `init/1` rather than being
 silently dropped.
@@ -1073,6 +1078,12 @@ or numeric string (a float is refused). A value outside the schema is
 `{:error, {:invalid_leverage, v}}` or `{:error, {:invalid_margin_type, v}}`. They used to be
 dropped silently.
 
+`capabilities/0` declares `supports_margin: true` with `max_leverage: :per_account`: the
+package sends margin fields and a CFM futures account is margined, but the venue publishes no
+single leverage ceiling, so none is declared. Read the room from `get_futures_balance_summary/2`.
+Read from the spec and documentation, not probed. `supports_short_selling: false` stays the
+spot answer.
+
 `INTRADAY_MARGIN_SETTING_UNSPECIFIED` is the venue declining to say. It is **not**
 `_STANDARD`, and this package will not map it to one.
 
@@ -1194,6 +1205,41 @@ a map, unknown keys, symbol, side, type, time-in-force and the pair (a GTD order
 `end_time` included), sizing, fields the leaf does not carry, price fields, the leaf's
 required fields, `post_only` values, `client_order_id` (non-blank), margin fields, then
 credentials, then the wire.
+
+**How an order read back says what state it is in.** `get_order/3` and `get_orders/2` map the
+venue's whole `OrderExecutionStatus` enum (at-spec.yaml): `PENDING` is `:pending`; `OPEN`,
+`QUEUED`, `CANCEL_QUEUED` and `EDIT_QUEUED` are `:open` (a cancel or an edit that is queued has
+not happened, and the order can still fill); `FILLED` is `:filled`; `CANCELLED` is `:cancelled`;
+`EXPIRED` is `:expired`; `FAILED` is `:rejected`; `UNKNOWN_ORDER_STATUS`, and any word the venue
+adds later, is `status: nil`, never the nearest atom. There is no `:partially_filled` here: the
+venue has no such status, so a partly filled working order is `:open` with `filled_quantity`
+above zero, and an order cancelled after a partial fill is `:cancelled` with its
+`filled_quantity` and `average_price` kept. `average_price` is `nil` while nothing has filled.
+A row whose status contradicts its own fill figures (`FILLED` with nothing or only part filled;
+a working status with the whole `base_size` already filled, including a fill that landed under a
+`CANCEL_QUEUED`) is `{:error, :unexpected_response_shape}`, never an `Order` saying both: read
+it again. Quote-sized orders (no `base_size`) and an absent `filled_size` are not judged.
+`fee` is the venue's `total_fees` as sent (its sign is kept, and the venue does not say which way
+a negative one reads), and `fee_currency` is
+always `nil`: the order and fill schemas name no fee currency and this package will not guess
+the quote asset. A fill's `liquidity` is `:maker` or `:taker`, `nil` for the venue's
+`UNKNOWN_LIQUIDITY_INDICATOR`. **`{:ok, :cancelled}` from `cancel_order/3` means the venue
+accepted the cancel request** ("Whether the cancel request was submitted successfully"), not
+that the order is gone: read it back, and a `:filled` there means the cancel lost the race.
+The `Fake` refuses to edit an order that is no longer working, as the venue does
+(`{:refused, {:edit_rejected, "ONLY_OPEN_ORDERS_CAN_BE_EDITED"}}`).
+
+**Four more order refusals, named here because the code returns them:** a `stop_direction`
+that is not `:up`, `:down` or the venue's `"STOP_DIRECTION_STOP_UP"` / `"..._STOP_DOWN"` is
+`{:error, {:invalid_stop_direction, v}}` (never inferred from `side`); a `post_only` that is
+not a boolean is `{:error, {:invalid_post_only, v}}`; a `client_order_id` that is not a
+string, or is blank after trimming, is `{:error, {:invalid_client_order_id, v}}`; and a
+`close_position/3` the venue declines with `success: false` is
+`{:refused, {:close_rejected, reason}}` (the venue's `new_order_failure_reason`, bounded).
+`DUPLICATE_CLIENT_ORDER_ID` on a close is `{:order_unconfirmed, client_order_id,
+:duplicate_client_order_id}`, as on a placement. A venue time that is absent or not epoch
+seconds on a candle, or absent on a fill, is `{:error, :missing_venue_timestamp}` (an
+unparseable text one is `{:unparseable_venue_timestamp, reason}`): never the local clock.
 
 **Order ids are checked first.** `get_order/3`, `cancel_order/3` and `replace_order/4` answer
 `{:error, {:invalid_order_id, value}}` for `nil`, a non-string or a blank/whitespace-only id
@@ -1411,7 +1457,9 @@ rather than treating them as "no data". `get_orders/2` has no date option: the v
 A page that says `has_next: true` but carries no cursor is `{:error,
 :pagination_cursor_missing}`: the venue promised more and gave no way to ask for it, so the
 first page is never returned as the whole list. That one is the venue's fault, not this
-package's limit, and a narrower filter will not necessarily help. An empty order page
+package's limit, and a narrower filter will not necessarily help. A `has_next` that is
+neither a boolean nor `null` (`"true"`, `1`) is `{:error, :unexpected_response_shape}` on the
+account, order and product-catalogue walks: it is not "no more". An empty order page
 carrying `proof_token_required: true` is `{:refused, :proof_token_required}`. A row with no
 readable `order_id` refuses the whole `get_orders/2` list.
 

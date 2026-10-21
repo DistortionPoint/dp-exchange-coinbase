@@ -30,6 +30,11 @@ defmodule DpExchange.Coinbase.TickAiFakeParityTest do
   end
 
   test "the arities reached by leaving options out exist on both" do
+    # `function_exported?/3` is false for a module not loaded yet, so without these the
+    # answer depended on whether an earlier test in the run had touched the module.
+    Code.ensure_loaded!(Coinbase)
+    Code.ensure_loaded!(Fake)
+
     for {name, arity} <- [
           {:get_market_overview, 0},
           {:list_instruments, 0},
