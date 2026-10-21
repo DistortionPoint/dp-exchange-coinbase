@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.145] - 2026-10-21
+
 ### Fixed
 
 - **A number was bounded by its exponent only.** `Rest`, `Socket` and `Prime` each refused a
