@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.146] - 2026-10-21
+
 ### Fixed
 
 - **A `has_next` that was not a boolean read as "no more pages".** The account walk
