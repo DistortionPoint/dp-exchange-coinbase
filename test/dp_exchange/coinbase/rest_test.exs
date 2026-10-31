@@ -689,6 +689,7 @@ defmodule DpExchange.Coinbase.RestTest do
             "price" => "79355.5",
             "price_percentage_change_24h" => "1.13",
             "volume_24h" => "12191.98",
+            "approximate_quote_24h_volume" => "967513485.29",
             "high_24h" => "82283",
             "low_24h" => "78431.32",
             "status" => "online"
@@ -703,6 +704,7 @@ defmodule DpExchange.Coinbase.RestTest do
                price: price,
                price_change_24h_pct: change,
                volume_24h: volume,
+               approximate_quote_volume_24h: quote_volume,
                high_24h: high,
                low_24h: low,
                status: "online"
@@ -710,7 +712,9 @@ defmodule DpExchange.Coinbase.RestTest do
 
       assert Decimal.equal?(price, Decimal.new("79355.5"))
       assert Decimal.equal?(change, Decimal.new("1.13"))
+      # Issue #6: base units, carried as the venue sent them — never multiplied here.
       assert Decimal.equal?(volume, Decimal.new("12191.98"))
+      assert Decimal.equal?(quote_volume, Decimal.new("967513485.29"))
       assert Decimal.equal?(high, Decimal.new("82283"))
       assert Decimal.equal?(low, Decimal.new("78431.32"))
     end

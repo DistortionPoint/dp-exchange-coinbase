@@ -449,6 +449,9 @@ defmodule DpExchange.Coinbase.Fake do
   @doc """
   An in-memory snapshot (price, 24h change, volume, high/low, status) for each carried symbol.
 
+  Same fields and units as `DpExchange.Coinbase.Rest.get_market_overview/1`: base volume,
+  and the quote figure as base volume times the price, the way the venue computes it.
+
   See `c:DpExchange.Core.Venue.get_market_overview/1`.
   """
   @impl true
@@ -459,12 +462,14 @@ defmodule DpExchange.Coinbase.Fake do
         {:ok,
          Map.new(@symbols, fn symbol ->
            price = Decimal.new(@price[symbol])
+           volume = Decimal.new("1200.5")
 
            {symbol,
             %{
               price: price,
               price_change_24h_pct: Decimal.new("1.25"),
-              volume_24h: Decimal.new("1200.5"),
+              volume_24h: volume,
+              approximate_quote_volume_24h: Decimal.mult(volume, price),
               high_24h: Decimal.add(price, Decimal.new("500")),
               low_24h: Decimal.sub(price, Decimal.new("500")),
               status: "online"

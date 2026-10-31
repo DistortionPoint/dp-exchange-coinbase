@@ -236,6 +236,23 @@ defmodule DpExchange.Coinbase.Rest do
   Reads the same bulk endpoint `get_symbols/1` does — the venue's per-product row already
   carries all of this, so there is no second request behind it. Same SPOT-only scope as
   `get_symbols/1`; see `fetch_products/1`'s comment.
+
+  ## Units
+
+    * `:price`, `:high_24h`, `:low_24h` — quote currency per one unit of base.
+    * `:price_change_24h_pct` — percent, `1.13` meaning 1.13%.
+    * `:volume_24h` — **base currency**: BTC on `BTC-USD`, not dollars (issue #6). The
+      vendor spec says only "the trading volume"; the unit is measured. One public
+      `GET /market/products/BTC-USD` on 2026-10-31 answered `volume_24h` 5489.17574471 at a
+      price of 77442.7, and AAVE-USDC's day of 1h candles summed to the base figure in the
+      issue (2026-10-29).
+    * `:approximate_quote_volume_24h` — quote currency, the venue's
+      `approximate_quote_24h_volume`: per the spec "based on the current quote", and in the
+      same 2026-10-31 reply 425096590.44, which is `volume_24h × price` to the cent. It
+      is **not** the notional the day's trades summed to: a pair that moved during the day
+      reads high or low by the move. Named `approximate_` so that caveat cannot be lost.
+
+  A field the venue omits, garbles or reports below zero is `nil`.
   """
   @spec get_market_overview(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_market_overview(opts) do
@@ -453,6 +470,8 @@ defmodule DpExchange.Coinbase.Rest do
        price: positive_or_nil(product["price"]),
        price_change_24h_pct: decimal(product["price_percentage_change_24h"]),
        volume_24h: product["volume_24h"] |> decimal() |> non_negative(),
+       approximate_quote_volume_24h:
+         product["approximate_quote_24h_volume"] |> decimal() |> non_negative(),
        high_24h: positive_or_nil(product["high_24h"]),
        low_24h: positive_or_nil(product["low_24h"]),
        status: text_or_nil(product["status"])

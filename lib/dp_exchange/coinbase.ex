@@ -495,6 +495,10 @@ defmodule DpExchange.Coinbase do
   A bulk snapshot (price, 24h change, volume, high/low, status) across every SPOT product,
   from the same listing `get_symbols/1` reads.
 
+  `:volume_24h` is in the **base** currency; `:approximate_quote_volume_24h` is the venue's
+  quote-currency figure, base volume at the current price. Every field's unit, and how each
+  was measured, is in the `Rest` doc.
+
   See `DpExchange.Coinbase.Rest.get_market_overview/1` and
   `c:DpExchange.Core.Venue.get_market_overview/1`.
   """

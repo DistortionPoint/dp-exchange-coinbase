@@ -20,6 +20,23 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`get_market_overview/1` rows carry `:approximate_quote_volume_24h`** (issue #6): the
+  venue's `approximate_quote_24h_volume`, in the quote currency, passed through as sent.
+  It is the base volume at the current price, not the notional the day traded, and is
+  named for that. A field that is absent, unreadable or below zero is `nil`; it is never
+  computed from `:volume_24h` and `:price`. The `Fake` carries the same field.
+
+### Documentation
+
+- **`:volume_24h` is stated to be in the base currency** (issue #6). Nothing said so, and a
+  consumer reading it as dollars filtered out 35 of 36 USDC pairs under a $100,000 floor.
+  The vendor spec gives no unit, so the doc records the measurement: one public
+  `GET /market/products/BTC-USD` on 2026-10-31 answered `volume_24h` 5489.17574471 at price
+  77442.7, with `approximate_quote_24h_volume` 425096590.44 (their product to the cent).
+  Every overview field now has its unit documented.
+
 ## [0.3.146] - 2026-10-21
 
 ### Fixed

@@ -302,6 +302,7 @@ defmodule DpExchange.Coinbase.DecoderEdgeCasesTest do
             "high_24h" => "-4",
             "low_24h" => "0",
             "volume_24h" => "-10",
+            "approximate_quote_24h_volume" => "-0.01",
             "price_percentage_change_24h" => "-1.5"
           })
         ]
@@ -312,6 +313,7 @@ defmodule DpExchange.Coinbase.DecoderEdgeCasesTest do
       assert row.high_24h == nil
       assert row.low_24h == nil
       assert row.volume_24h == nil
+      assert row.approximate_quote_volume_24h == nil
       # A fall is a real number; only the three above have no negative reading.
       assert Decimal.equal?(row.price_change_24h_pct, Decimal.new("-1.5"))
     end
@@ -321,6 +323,43 @@ defmodule DpExchange.Coinbase.DecoderEdgeCasesTest do
 
       assert {:ok, %{"BTC-USD" => %{volume_24h: volume}}} = Rest.get_market_overview(opts(body))
       assert Decimal.equal?(volume, 0)
+    end
+
+    test "an absent or garbled quote volume is not stated, and is never derived from price" do
+      for quote_volume <- [:absent, "n/a", "", %{}] do
+        fields = %{"volume_24h" => "3", "price" => "10"}
+
+        fields =
+          if quote_volume == :absent,
+            do: fields,
+            else: Map.put(fields, "approximate_quote_24h_volume", quote_volume)
+
+        body = %{"products" => [product("BTC-USD", fields)]}
+
+        assert {:ok, %{"BTC-USD" => row}} = Rest.get_market_overview(opts(body))
+        assert Decimal.equal?(row.volume_24h, 3)
+        assert row.approximate_quote_volume_24h == nil
+      end
+    end
+
+    test "the Fake's overview has the same fields as the real one, its quote volume priced" do
+      body = %{
+        "products" => [
+          product("BTC-USD", %{"volume_24h" => "1", "approximate_quote_24h_volume" => "10"})
+        ]
+      }
+
+      assert {:ok, %{"BTC-USD" => real}} = Rest.get_market_overview(opts(body))
+      assert {:ok, fake} = Fake.get_market_overview()
+
+      for {_symbol, row} <- fake do
+        assert Map.keys(row) == Map.keys(real)
+
+        assert Decimal.equal?(
+                 row.approximate_quote_volume_24h,
+                 Decimal.mult(row.volume_24h, row.price)
+               )
+      end
     end
   end
 

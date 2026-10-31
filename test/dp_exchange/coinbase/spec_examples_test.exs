@@ -296,6 +296,7 @@ defmodule DpExchange.Coinbase.SpecExamplesTest do
 
       assert Decimal.equal?(row.price, Decimal.new("140.21"))
       assert Decimal.equal?(row.volume_24h, Decimal.new("1908432"))
+      assert Decimal.equal?(row.approximate_quote_volume_24h, Decimal.new("1908432"))
       assert row.status == "online"
     end
 
