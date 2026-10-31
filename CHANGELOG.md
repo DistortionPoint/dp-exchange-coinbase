@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.147] - 2026-10-31
+
 ### Added
 
 - **`get_market_overview/1` rows carry `:approximate_quote_volume_24h`** (issue #6): the
