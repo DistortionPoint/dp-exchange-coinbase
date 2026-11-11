@@ -259,6 +259,56 @@ defmodule DpExchange.Coinbase.OptionKeys do
   def check_start(opts), do: Options.check(opts, @start_keys)
 
   @doc """
+  The keys the venue's tree is started with: exactly the list `check_start/1` refuses against.
+
+  Read from the same module attribute, so the declaration
+  (`DpExchange.Coinbase.start_options/0`) and the refusal cannot drift.
+  """
+  @spec start_keys() :: [atom()]
+  def start_keys, do: @start_keys
+
+  # Facade functions that take no options. `venue_does_not_serve/0` is a facade function that
+  # is not a `Core.Venue` callback; the rest are callbacks with no keyword argument.
+  @no_options [
+    :provider_name,
+    :runtime_id,
+    :asset_classes,
+    :capabilities,
+    :quantization,
+    :venue_does_not_serve,
+    :start_options,
+    :call_options
+  ]
+
+  # `child_spec/1` and `start_link/1` take the tree's start options.
+  @start_functions [:child_spec, :start_link]
+
+  @doc """
+  The option keys the facade function `function` accepts without
+  `{:error, {:unknown_option, key}}`, as `{:ok, keys}`, with no duplicates.
+
+  This is the declaration behind `DpExchange.Coinbase.call_options/1`. A request call: every
+  key `allowed/1` lets through (the keys the call-site check uses, so the two cannot drift).
+  `child_spec` and `start_link`: `start_keys/0`. A function that takes no options: `[]`.
+
+  A name that is in none of those is `{:error, {:unknown_function, function}}`, never
+  `{:ok, []}`: an empty list for a name nobody declared would read as "takes no options".
+  The caller (the facade) has already established that the name is a public facade function
+  and that the endpoint is active.
+  """
+  @spec declared(atom()) :: {:ok, [atom()]} | {:error, {:unknown_function, atom()}}
+  def declared(function) when function in @start_functions, do: {:ok, @start_keys}
+  def declared(function) when function in @no_options, do: {:ok, []}
+
+  def declared(function) when is_atom(function) do
+    if Map.has_key?(@keys, function),
+      do: {:ok, Enum.uniq(allowed(function))},
+      else: {:error, {:unknown_function, function}}
+  end
+
+  def declared(function), do: {:error, {:unknown_function, function}}
+
+  @doc """
   The keys `function` reads itself, without the shared transport keys.
 
   Raises `KeyError` for a function that is not in the table, so a typo in a call site fails

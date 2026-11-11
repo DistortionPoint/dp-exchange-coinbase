@@ -118,6 +118,46 @@ defmodule DpExchange.Coinbase.Fake do
   def start_link(_opts), do: :ignore
 
   @doc """
+  The option keys this fake's `child_spec/1` and `start_link/1` accept.
+
+  This fake checks no start option (`start_link/1` ignores them all), so it answers the
+  real venue's list, `DpExchange.Coinbase.start_options/0`: a consumer handing it what the
+  facade declares is never refused.
+
+  See `c:DpExchange.Core.Venue.start_options/0`.
+  """
+  @impl true
+  @spec start_options() :: [atom()]
+  def start_options, do: DpExchange.Coinbase.start_options()
+
+  @doc """
+  The option keys the fake's function `name` accepts, answered as
+  `DpExchange.Coinbase.call_options/1` answers for the facade.
+
+  The fake's checks are the real path's (`DpExchange.Coinbase.OptionKeys`), so the keys are
+  the facade's, plus the one seam only the fake reads: `:channels` on `subscribe/2`. Every
+  key the facade declares for an endpoint is accepted here; the reverse is not required.
+  An endpoint the declaration marks unsupported is `{:error, :not_supported}`, and a name that
+  is not a function of this module is `{:error, {:unknown_function, name}}`.
+
+  See `c:DpExchange.Core.Venue.call_options/1`.
+  """
+  @impl true
+  @spec call_options(term()) ::
+          {:ok, [atom()]} | {:error, :not_supported} | {:error, {:unknown_function, term()}}
+  def call_options(name) when is_atom(name) do
+    if Keyword.has_key?(__MODULE__.__info__(:functions), name),
+      do: name |> DpExchange.Coinbase.call_options() |> with_fake_keys(name),
+      else: {:error, {:unknown_function, name}}
+  end
+
+  def call_options(name), do: {:error, {:unknown_function, name}}
+
+  # `subscribe/2` also reads `:channels` here (the fake's own seam, see its check).
+  defp with_fake_keys({:ok, keys}, :subscribe), do: {:ok, Enum.uniq([:channels | keys])}
+  defp with_fake_keys(answer, _name), do: answer
+
+  @doc """
   The real venue's display name, `DpExchange.Coinbase.provider_name/0`.
 
   See `c:DpExchange.Core.Venue.provider_name/0`.

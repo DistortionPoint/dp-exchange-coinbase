@@ -112,7 +112,7 @@ of the contract's 87 callbacks, most of them authenticated. The fix is not a fre
 capture — Advanced Trade's operation count has not moved — it is stating what changed on
 this side of the boundary, which a vendor capture cannot do for itself.
 
-**Current, from `capabilities/0`, checked 2026-10-21**: 89 callbacks — 50 `:experimental`,
+**Current, from `capabilities/0`, checked 2026-11-11**: 91 callbacks — 52 `:experimental`,
 39 `:unsupported`, of which 37 are the venue's own absence — see `negative-claims.md` — and
 2 are genuinely not yet ported (`get_funding/2`, `get_contract_stats/2`). `list_instruments/1`
 was on that not-ported list and no longer is: it has been implemented since 2026-09-01. (This

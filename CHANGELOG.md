@@ -20,6 +20,23 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `dp_exchange_core` 0.3.123 or later, the release that adds the required
+  `start_options/0` and `call_options/1` callbacks and conformance group 55.
+
+### Added
+
+- **`start_options/0` and `call_options/1`: the option keys the facade accepts, declared**
+  (DistortionPoint/dp-exchange-core#43). `start_options/0` is exactly the list the start-time
+  check refuses against (`OptionKeys.check_start/1`), and `call_options(name)` answers
+  `{:ok, keys}` for a public facade function (exactly the keys that call accepts without
+  `{:unknown_option, _}`, read from the same lists the call-site checks use), `{:ok, []}` for
+  one that takes none, `{:error, :not_supported}` for an endpoint `capabilities/0` declares
+  unsupported, and `{:error, {:unknown_function, name}}` for anything else. `Fake` answers both
+  for itself and accepts every key the facade lists. A consumer passes
+  `Keyword.take(opts, keys)` instead of guessing.
+
 ## [0.3.148] - 2026-11-11
 
 ### Fixed

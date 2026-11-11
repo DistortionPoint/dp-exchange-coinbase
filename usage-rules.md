@@ -1578,6 +1578,27 @@ None of these raises in your process, and the fake runs the same check in the sa
   set". `{:refused, {:edit_rejected, reason}}` carries the first one that is set, else the
   edit reason.
 
+## Ask which options a call takes, instead of guessing
+
+`DpExchange.Coinbase.start_options/0` lists exactly the keys `child_spec/1` and
+`start_link/1` accept, and `DpExchange.Coinbase.call_options/1` lists exactly the keys a
+facade function accepts without `{:error, {:unknown_option, key}}`. Both are read from the
+lists the checks use, so they cannot drift from what is refused. Pass only what a call reads:
+
+    {:ok, keys} = DpExchange.Coinbase.call_options(:get_trades)
+    DpExchange.Coinbase.get_trades(symbol, Keyword.take(opts, keys))
+
+    DpExchange.Coinbase.start_link(Keyword.take(opts, DpExchange.Coinbase.start_options()))
+
+`call_options/1` answers `{:ok, keys}` for a public facade function (`{:ok, []}` when it takes
+none; `child_spec` and `start_link` answer `start_options/0`), `{:error, :not_supported}` for
+an endpoint `capabilities/0` declares unsupported, and `{:error, {:unknown_function, name}}`
+for anything else, a non-atom included. An unknown name is never `{:ok, []}`. A key can be
+listed and still be refused by name with a more specific answer: `:limit` on
+`get_order_book/2` and `:portfolio` on the futures reads are not `:unknown_option`, so they
+are listed. `DpExchange.Coinbase.Fake` answers both for itself and accepts every key the
+facade lists (it also reads `:channels` on `subscribe/2`).
+
 ## Error shapes that mean "do not act on this answer"
 
 Returned by calls that previously answered `{:ok, _}` carrying a value you could not act on.

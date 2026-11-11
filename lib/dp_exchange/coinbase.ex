@@ -212,6 +212,61 @@ defmodule DpExchange.Coinbase do
   @impl true
   def start_link(opts), do: Supervisor.start_link(opts)
 
+  @doc """
+  The option keys `child_spec/1` and `start_link/1` accept.
+
+  Exactly the list the start-time check refuses against
+  (`DpExchange.Coinbase.OptionKeys.check_start/1`): a key outside it is
+  `{:error, {:unknown_option, key}}` at start, and every key inside it is not. A consumer
+  hands this venue only what it reads: `Keyword.take(opts, DpExchange.Coinbase.start_options())`.
+  See `c:DpExchange.Core.Venue.start_options/0`.
+  """
+  @impl true
+  @spec start_options() :: [atom()]
+  def start_options, do: OptionKeys.start_keys()
+
+  @doc """
+  The option keys the facade function `name` accepts.
+
+    * `{:ok, keys}` for a public facade function: exactly the keys that call accepts without
+      `{:error, {:unknown_option, key}}`, taken from the same lists the call-site checks use.
+      A function that takes no options answers `{:ok, []}`; `child_spec` and `start_link`
+      answer `{:ok, start_options()}`.
+    * `{:error, :not_supported}` for a `Core.Venue` callback this venue declares unsupported
+      in `capabilities/0`: that endpoint answers `{:error, :not_supported}` whatever the
+      options.
+    * `{:error, {:unknown_function, name}}` for anything else, including a name that is not an
+      atom. An unknown name is never `{:ok, []}`.
+
+  A consumer passes only what the call reads:
+  `{:ok, keys} = DpExchange.Coinbase.call_options(:get_trades)`, then
+  `DpExchange.Coinbase.get_trades(symbol, Keyword.take(opts, keys))`. A key a call lists
+  but refuses by name with a more useful error (`:limit` on `get_order_book/2`, `:portfolio`
+  on the futures reads) is listed because it is not `:unknown_option`.
+  See `c:DpExchange.Core.Venue.call_options/1`.
+  """
+  @impl true
+  @spec call_options(term()) ::
+          {:ok, [atom()]} | {:error, :not_supported} | {:error, {:unknown_function, term()}}
+  def call_options(name) when is_atom(name) do
+    cond do
+      inactive_callback?(name) -> Venue.not_supported()
+      Keyword.has_key?(__MODULE__.__info__(:functions), name) -> OptionKeys.declared(name)
+      true -> {:error, {:unknown_function, name}}
+    end
+  end
+
+  def call_options(name), do: {:error, {:unknown_function, name}}
+
+  # A `Core.Venue` callback named `name` at an arity this venue declares unsupported.
+  defp inactive_callback?(name) do
+    declaration = capabilities()
+
+    Enum.any?(Venue.behaviour_info(:callbacks), fn {callback, arity} ->
+      callback == name and not Capabilities.active?(declaration, {callback, arity})
+    end)
+  end
+
   # --- declaration -------------------------------------------------------
 
   @doc """
