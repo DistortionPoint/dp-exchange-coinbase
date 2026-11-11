@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`list_instruments/1` reported delisted products as `:unknown`** (issue #7). The venue
+  marks a delisted product with both `status: "delisted"` and `trading_disabled: true`, and
+  the not-trading flags from issue #5 were checked first. On 2026-11-03 and 2026-11-11 (a
+  public SPOT listing read each day) all eight flagged products, DAI, EOS, MKR and RNDR
+  against USD and USDC, were that case. A `delisted`, `closed` or `offline` status is now
+  `:delisted` whatever the flags say, and the flags still make a live product `:unknown`.
+
+### Documentation
+
+- `list_instruments/1` documents how each status is decided, and that a product the venue
+  stops listing is absent rather than `:delisted`, so a consumer counts its own misses.
+
 ## [0.3.147] - 2026-10-31
 
 ### Added

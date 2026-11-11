@@ -796,6 +796,48 @@ defmodule DpExchange.Coinbase.RestTest do
       end
     end
 
+    # Issue #7: on 2026-11-03 and 2026-11-11 every flagged SPOT product (DAI, EOS, MKR, RNDR
+    # against USD and USDC) was `delisted` with `trading_disabled: true`, and read `:unknown`.
+    for status <- ~w(delisted closed offline), flag <- ~w(trading_disabled is_disabled) do
+      test "a #{status} product flagged #{flag} is :delisted, not :unknown" do
+        product = %{
+          "product_id" => "MKR-USD",
+          "base_currency_id" => "MKR",
+          "quote_currency_id" => "USD",
+          "product_type" => "SPOT",
+          "status" => unquote(status),
+          unquote(flag) => true
+        }
+
+        assert {:ok, [instrument]} =
+                 Rest.list_instruments(
+                   plug: responding(%{"products" => [product]}),
+                   retry_attempts: 0
+                 )
+
+        assert instrument.status == :delisted
+      end
+    end
+
+    test "an unrecognised status with a flag stays :unknown" do
+      product = %{
+        "product_id" => "MKR-USD",
+        "base_currency_id" => "MKR",
+        "quote_currency_id" => "USD",
+        "product_type" => "SPOT",
+        "status" => "paused",
+        "cancel_only" => true
+      }
+
+      assert {:ok, [instrument]} =
+               Rest.list_instruments(
+                 plug: responding(%{"products" => [product]}),
+                 retry_attempts: 0
+               )
+
+      assert instrument.status == :unknown
+    end
+
     test "limit_only and post_only still trade, so the product stays :tradable" do
       product = %{
         "product_id" => "BTC-USD",

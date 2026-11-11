@@ -268,6 +268,21 @@ defmodule DpExchange.Coinbase.Rest do
 
   Reads the same bulk endpoint `get_symbols/1` does, and shares its SPOT-only scope — see
   `fetch_products/1`'s comment for why.
+
+  ## Status
+
+    * `:delisted` — the venue's status is `delisted`, `closed` or `offline`, whatever flags
+      the product also carries (issue #7).
+    * `:unknown` — the status is live but the product is flagged `cancel_only`,
+      `trading_disabled`, `is_disabled` or `view_only` (issue #5), or the status is not one
+      this package recognises.
+    * `:tradable` — otherwise.
+
+  **A product the venue stops listing is simply absent.** It is not returned as `:delisted`:
+  VELO-USD and VELO-USDC left this listing on 2026-11-02 while Coinbase's separate Exchange
+  API still answered `delisted` for them (reported in issue #7). This package has no
+  record of what the venue used to list, so a consumer that needs "gone" counts its own
+  misses.
   """
   @spec list_instruments(keyword()) ::
           {:ok, [Instrument.t()]} | {:error, term()} | {:refused, term()}
@@ -517,12 +532,20 @@ defmodule DpExchange.Coinbase.Rest do
   # which is how `dp_exchange_webull` reports its liquidate-only and non-tradable rows. It
   # returns to `:tradable` by itself once the venue clears the flag. `limit_only` and
   # `post_only` still trade, just with order-type restrictions, so they stay `:tradable`.
+  #
+  # **A terminal status beats the flags** (issue #7). The venue marks a delisted product with
+  # both `status: "delisted"` and `trading_disabled: true`: every flagged SPOT product in the
+  # listing on 2026-11-03 and again on 2026-11-11 (DAI, EOS, MKR and RNDR against USD and
+  # USDC) was exactly that. Checking the flags first turned all eight into `:unknown`, and a
+  # consumer that retires a pair only on `:delisted` kept them forever. The flags only
+  # qualify a product the status calls live.
   @not_trading ~w(cancel_only trading_disabled is_disabled view_only)
 
   defp product_status(product) do
-    if Enum.any?(@not_trading, &(product[&1] == true)),
-      do: :unknown,
-      else: Instrument.status_from(product["status"])
+    case Instrument.status_from(product["status"]) do
+      :delisted -> :delisted
+      status -> if Enum.any?(@not_trading, &(product[&1] == true)), do: :unknown, else: status
+    end
   end
 
   @doc """
