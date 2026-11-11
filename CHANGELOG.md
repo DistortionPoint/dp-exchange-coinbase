@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.3.148] - 2026-11-11
+
 ### Fixed
 
 - **`list_instruments/1` reported delisted products as `:unknown`** (issue #7). The venue
